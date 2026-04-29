@@ -1,6 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { NextResponse } from "next/server";
+import { downloadExamFileByName, isGoogleDriveConfigured } from "@/lib/googleDrive";
 
 const EXAM_DIR_KO = path.join(process.cwd(), "시험지");
 const EXAM_DIR_EN = path.join(process.cwd(), "exams");
@@ -49,6 +50,17 @@ export async function GET(request: Request) {
         { error: "지원하지 않는 파일 형식입니다." },
         { status: 400 },
       );
+    }
+
+    if (isGoogleDriveConfigured()) {
+      const { buffer, mimeType } = await downloadExamFileByName(name);
+      const uint8 = new Uint8Array(buffer);
+      return new NextResponse(uint8, {
+        headers: {
+          "Content-Type": mimeType || getMimeType(ext),
+          "Cache-Control": "no-store",
+        },
+      });
     }
 
     const normalized = path.normalize(name);

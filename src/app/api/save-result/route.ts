@@ -1,6 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { NextResponse } from "next/server";
+import { isGoogleDriveConfigured, uploadCompletedDocx } from "@/lib/googleDrive";
 import {
   Document,
   Packer,
@@ -40,7 +41,8 @@ export async function POST(request: Request) {
       `${path.parse(examName).name}_문항${safeName(questionNo)}_${stamp}`,
     );
 
-    const docxPath = path.join(OUTPUT_DIR, `${baseName}.docx`);
+    const docxFileName = `${baseName}.docx`;
+    const docxPath = path.join(OUTPUT_DIR, docxFileName);
 
     const blocks = explanationBody
       .split(/\n\s*\n/g)
@@ -127,8 +129,16 @@ export async function POST(request: Request) {
     });
 
     const buffer = await Packer.toBuffer(doc);
-    await fs.writeFile(docxPath, buffer);
 
+    if (isGoogleDriveConfigured()) {
+      await uploadCompletedDocx(buffer, docxFileName);
+      return NextResponse.json({
+        message: "작업 완료 폴더(Drive)에 DOCX로 업로드했습니다.",
+      });
+    }
+
+    // 로컬 개발/테스트를 위한 폴백
+    await fs.writeFile(docxPath, buffer);
     return NextResponse.json({
       message: "작업 완료 폴더에 DOCX로 저장했습니다.",
       docxPath,
