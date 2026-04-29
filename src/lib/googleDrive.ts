@@ -1,5 +1,6 @@
 import { google } from "googleapis";
 import type { drive_v3 } from "googleapis";
+import { Readable } from "node:stream";
 
 const DEFAULT_PARENT_FOLDER_NAME = "해설제작";
 const DEFAULT_EXAMS_FOLDER_NAME = "시험지";
@@ -193,7 +194,8 @@ export async function uploadCompletedDocx(buffer: Buffer, fileName: string) {
     },
     media: {
       mimeType,
-      body: buffer,
+      // googleapis 업로드는 Readable stream 입력이 가장 안정적입니다.
+      body: Readable.from(buffer),
     },
     fields: "id,name",
     supportsAllDrives: true,
