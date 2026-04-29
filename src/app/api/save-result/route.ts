@@ -144,9 +144,10 @@ export async function POST(request: Request) {
       docxPath,
     });
   } catch (error) {
-    console.error("Failed to save result:", error);
+    const message = error instanceof Error ? error.message : "알 수 없는 오류";
+    console.error("Failed to save result:", message, error);
     return NextResponse.json(
-      { error: "작업 완료 폴더 저장 중 오류가 발생했습니다." },
+      { error: `작업 완료 폴더 저장 중 오류가 발생했습니다: ${message}` },
       { status: 500 },
     );
   }

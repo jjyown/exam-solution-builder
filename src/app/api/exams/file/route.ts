@@ -98,9 +98,10 @@ export async function GET(request: Request) {
       },
     });
   } catch (error) {
-    console.error("Failed to read exam file:", error);
+    const message = error instanceof Error ? error.message : "알 수 없는 오류";
+    console.error("Failed to read exam file:", message, error);
     return NextResponse.json(
-      { error: "시험지 이미지를 불러오지 못했습니다." },
+      { error: `시험지 이미지를 불러오지 못했습니다: ${message}` },
       { status: 500 },
     );
   }

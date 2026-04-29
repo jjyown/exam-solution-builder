@@ -36,9 +36,10 @@ export async function GET() {
     const sorted = files.sort((a, b) => a.localeCompare(b, "ko"));
     return NextResponse.json({ files: sorted });
   } catch (error) {
-    console.error("Failed to list exam files:", error);
+    const message = error instanceof Error ? error.message : "알 수 없는 오류";
+    console.error("Failed to list exam files:", message, error);
     return NextResponse.json(
-      { error: "시험지 폴더를 읽지 못했습니다." },
+      { error: `시험지 폴더를 읽지 못했습니다: ${message}` },
       { status: 500 },
     );
   }
