@@ -36,6 +36,25 @@ yarn-error.log*
 # vercel
 .vercel
 
+# local runtime data (not for repo)
+시험지/
+작업 완료/
+*.pdf
+*.docx
+*.txt
+
+# local helper scripts (not needed for hosting)
+*.bat
+*.sh
+
+# docker files (optional; keep only if Railway deploys via Docker)
+Dockerfile
+.dockerignore
+docker-compose.yml
+
+# internal notes
+AGENTS.md
+CLAUDE.md
 # typescript
 *.tsbuildinfo
 next-env.d.ts
