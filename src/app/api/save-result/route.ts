@@ -7,17 +7,45 @@ import {
   Packer,
   Paragraph,
   TextRun,
-  Table,
-  TableRow,
-  TableCell,
-  WidthType,
   AlignmentType,
+  HeadingLevel,
 } from "docx";
 
 const OUTPUT_DIR = path.join(process.cwd(), "작업 완료");
 
 function safeName(value: string) {
   return value.replace(/[<>:"/\\|?*\u0000-\u001F]/g, "_").trim();
+}
+
+function buildExplanationParagraphs(explanationBody: string) {
+  const lines = explanationBody
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+
+  const paragraphs: Paragraph[] = [];
+  for (const line of lines) {
+    const isSectionTitle = /^\[[^\]]+\]\s*:/.test(line) || /^\[[^\]]+\]$/.test(line);
+    if (isSectionTitle) {
+      paragraphs.push(
+        new Paragraph({
+          heading: HeadingLevel.HEADING_3,
+          children: [new TextRun({ text: line, bold: true })],
+          spacing: { before: 240, after: 120 },
+        }),
+      );
+      continue;
+    }
+
+    paragraphs.push(
+      new Paragraph({
+        children: [new TextRun({ text: line })],
+        spacing: { after: 140 },
+      }),
+    );
+  }
+
+  return paragraphs;
 }
 
 export async function POST(request: Request) {
@@ -42,59 +70,24 @@ export async function POST(request: Request) {
     const docxFileName = `${baseName}.docx`;
     const docxPath = path.join(OUTPUT_DIR, docxFileName);
 
-    const blocks = explanationBody
-      .split(/\n\s*\n/g)
-      .map((s) => s.trim())
-      .filter(Boolean);
-
-    // 2단(좌/우)을 "블록 단위"로 번갈아 배치합니다.
-    const leftBlocks: string[] = [];
-    const rightBlocks: string[] = [];
-    blocks.forEach((blk, idx) => {
-      if (idx % 2 === 0) leftBlocks.push(blk);
-      else rightBlocks.push(blk);
-    });
-    const maxLen = Math.max(leftBlocks.length, rightBlocks.length);
-
-    const tableRows: TableRow[] = [];
-    for (let i = 0; i < maxLen; i++) {
-      tableRows.push(
-        new TableRow({
-          children: [
-            new TableCell({
-              width: { size: 50, type: WidthType.PERCENTAGE },
-              children: [
-                new Paragraph({
-                  children: [
-                    new TextRun({
-                      text: leftBlocks[i] ?? "",
-                    }),
-                  ],
-                }),
-              ],
-            }),
-            new TableCell({
-              width: { size: 50, type: WidthType.PERCENTAGE },
-              children: [
-                new Paragraph({
-                  children: [
-                    new TextRun({
-                      text: rightBlocks[i] ?? "",
-                    }),
-                  ],
-                }),
-              ],
-            }),
-          ],
-        }),
-      );
-    }
+    const explanationParagraphs = buildExplanationParagraphs(explanationBody);
 
     const doc = new Document({
       sections: [
         {
           properties: {},
           children: [
+            new Paragraph({
+              alignment: AlignmentType.CENTER,
+              heading: HeadingLevel.HEADING_1,
+              children: [
+                new TextRun({
+                  text: "수학 해설지",
+                  bold: true,
+                }),
+              ],
+              spacing: { after: 220 },
+            }),
             new Paragraph({
               alignment: AlignmentType.CENTER,
               children: [
@@ -111,16 +104,16 @@ export async function POST(request: Request) {
               spacing: { after: 300 },
             }),
             new Paragraph({
-              text: "",
-              spacing: { after: 100 },
+              heading: HeadingLevel.HEADING_2,
+              children: [
+                new TextRun({
+                  text: "[해설]",
+                  bold: true,
+                }),
+              ],
+              spacing: { before: 120, after: 180 },
             }),
-            new Table({
-              width: { size: 100, type: WidthType.PERCENTAGE },
-              rows: tableRows,
-            }),
-            new Paragraph({
-              text: "",
-            }),
+            ...explanationParagraphs,
           ],
         },
       ],
