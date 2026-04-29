@@ -28,8 +28,6 @@ export async function POST(request: Request) {
     const quickAnswer = String(formData.get("quickAnswer") || "-");
     const explanationBody = String(formData.get("explanationBody") || "");
 
-    await fs.mkdir(OUTPUT_DIR, { recursive: true });
-
     const now = new Date();
     const stamp = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, "0")}${String(
       now.getDate(),
@@ -138,6 +136,7 @@ export async function POST(request: Request) {
     }
 
     // 로컬 개발/테스트를 위한 폴백
+    await fs.mkdir(OUTPUT_DIR, { recursive: true });
     await fs.writeFile(docxPath, buffer);
     return NextResponse.json({
       message: "작업 완료 폴더에 DOCX로 저장했습니다.",
