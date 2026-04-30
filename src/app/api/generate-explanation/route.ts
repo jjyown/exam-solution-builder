@@ -41,6 +41,8 @@ type GenerateRequestBody = {
   generationMode?: "test" | "final";
   mimeType?: string;
   crop?: unknown;
+  quickAnswerPageHint?: string;
+  explanationReferenceHint?: string;
 };
 
 const FINAL_MODEL_CANDIDATES = ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"] as const;
@@ -58,6 +60,15 @@ function validateExplanationFormat(text: string) {
   if (explanationMatch && !explanationMatch[1]?.trim()) missing.push("[해설] 본문");
 
   return { ok: missing.length === 0, missing };
+}
+
+function isLikelyTruncatedResult(text: string) {
+  const explanation = text.match(/\[해설\]\s*([\s\S]*)/i)?.[1]?.trim() ?? "";
+  if (explanation.length < 50) return true;
+  if (/[,:+\-*/=]$/.test(explanation)) return true;
+  const openParen = (explanation.match(/[({\[]/g) ?? []).length;
+  const closeParen = (explanation.match(/[)}\]]/g) ?? []).length;
+  return openParen > closeParen;
 }
 
 function normalizeChoice(value: string) {
@@ -158,6 +169,7 @@ function buildRetryInstruction(
   lines.push("[정답] (한 줄)");
   lines.push("[해설]");
   lines.push("(해설 본문)");
+  lines.push("해설은 중간에 끊기지 않게 마지막 문장까지 완결하세요.");
   lines.push("다른 제목/머리말/설명문을 추가하지 마세요.");
   return lines.join("\n");
 }
@@ -208,12 +220,14 @@ export async function POST(request: Request) {
       questionText || "(텍스트 미입력 - 이미지의 문제를 직접 읽어 해설해줘)",
       "",
       "[추가 지시]",
+      "- 내부 처리 순서를 반드시 지켜: 1) 문제 풀이 2) 빠른정답 확정 3) 해설 작성.",
       "- 출력 양식을 정확히 지켜줘.",
       "- 수식은 LaTeX로 작성해.",
       "- [정답], [해설] 형식을 엄격히 유지해.",
       "- 이미지에서 선택지 ①~⑤ 또는 1~5 보기 형식이 보이면 객관식으로 판단해.",
       "- 객관식이면 [정답]에 정답 번호만 1~5 중 하나로 출력해.",
-      "- 주관식이면 [정답]에 최종 식/값만 간단히 출력해.",
+      "- 단답형이면 [정답]에 최종 식/값만 간단히 출력해.",
+      "- 서술형이면 [정답]은 반드시 '해설참고'로 출력하고, 실제 서술형 답안은 [해설]에 작성해.",
       "- 이미지가 일부 흐리거나 누락되어도 '이미지가 제공되지 않았다'고 쓰지 말고, 판독 가능한 정보 기준으로 최선의 해설을 작성해.",
       "- 반드시 중고등학교 교육과정 내 용어/기호만 사용하고 대학 수준 용어/기호는 사용하지 마.",
       "- 영문 수학 용어 대신 한국어 용어를 사용해.",
@@ -227,6 +241,12 @@ export async function POST(request: Request) {
       showAllMethods
         ? "- 풀이 방법이 여러 개면 [단계별 풀이]에서 [방법 1], [방법 2], [방법 3] 형식으로 모두 제시해."
         : "- 풀이 방법은 대표 1가지만 제시해.",
+      body.quickAnswerPageHint
+        ? `- ${body.quickAnswerPageHint}가 제공된 경우 해당 정답 기준과 모순되지 않게 검증해.`
+        : "",
+      body.explanationReferenceHint
+        ? `- ${body.explanationReferenceHint}가 제공된 경우 구성/서술 흐름을 참고하되, 현재 문제 기준으로 재정리해.`
+        : "",
       body.crop ? `- 사용자 크롭 정보: ${JSON.stringify(body.crop)}` : "",
     ]
       .filter(Boolean)
@@ -291,7 +311,12 @@ export async function POST(request: Request) {
         const formatCheck = validateExplanationFormat(generatedText);
         const consistencyCheck = validateExplanationConsistency(generatedText);
         const scopeCheck = validateCurriculumScope(generatedText);
-        if (formatCheck.ok && consistencyCheck.ok && scopeCheck.ok) {
+        if (
+          formatCheck.ok &&
+          consistencyCheck.ok &&
+          scopeCheck.ok &&
+          !isLikelyTruncatedResult(generatedText)
+        ) {
           return NextResponse.json(
             { result: generatedText, model: modelName, qualityWarnings: [] },
             { status: 200 },
@@ -324,7 +349,12 @@ export async function POST(request: Request) {
         const retryFormatCheck = validateExplanationFormat(retryText);
         const retryConsistencyCheck = validateExplanationConsistency(retryText);
         const retryScopeCheck = validateCurriculumScope(retryText);
-        if (!retryFormatCheck.ok || !retryConsistencyCheck.ok || !retryScopeCheck.ok) {
+        if (
+          !retryFormatCheck.ok ||
+          !retryConsistencyCheck.ok ||
+          !retryScopeCheck.ok ||
+          isLikelyTruncatedResult(retryText)
+        ) {
           failures.push(
             `${modelName}: 형식/정합 검증 실패(재시도 포함) - 누락: ${retryFormatCheck.missing.join(
               ", ",

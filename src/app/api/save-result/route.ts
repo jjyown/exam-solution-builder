@@ -9,6 +9,7 @@ import {
   TextRun,
   AlignmentType,
   HeadingLevel,
+  SectionType,
   TabStopType,
 } from "docx";
 
@@ -50,6 +51,8 @@ type ExplanationBlock = {
   answer: string;
   explanationLines: string[];
 };
+
+type QuickAnswerKind = "objective" | "short" | "essay";
 
 function parseExplanationBlocks(explanationBody: string, fallbackQuickAnswer: string) {
   const normalized = simplifyMathText(explanationBody);
@@ -107,13 +110,16 @@ function buildExplanationParagraphs(blocks: ExplanationBlock[]) {
   const paragraphs: Paragraph[] = [];
 
   blocks.forEach((block, idx) => {
+    const answerKind = classifyQuickAnswerKind(block.answer, block.explanationLines);
+    const quickAnswerText =
+      answerKind === "essay" ? "해설참고" : block.answer || "-";
     paragraphs.push(
       new Paragraph({
         tabStops: [{ type: TabStopType.LEFT, position: 1800 }],
         children: [
           new TextRun({ text: `${block.questionLabel})`, bold: true }),
           new TextRun({ text: "\t[정답] ", bold: true }),
-          new TextRun({ text: block.answer, bold: true }),
+          new TextRun({ text: quickAnswerText, bold: true }),
         ],
         spacing: { before: idx === 0 ? 0 : 220, after: 80 },
       }),
@@ -146,6 +152,62 @@ function buildExplanationParagraphs(blocks: ExplanationBlock[]) {
   return paragraphs;
 }
 
+function normalizeObjectiveAnswer(answer: string) {
+  const normalized = answer
+    .trim()
+    .replace("①", "1")
+    .replace("②", "2")
+    .replace("③", "3")
+    .replace("④", "4")
+    .replace("⑤", "5");
+  const matched = normalized.match(/^[1-5]$/);
+  return matched?.[0] ?? null;
+}
+
+function classifyQuickAnswerKind(answer: string, explanationLines: string[]): QuickAnswerKind {
+  if (normalizeObjectiveAnswer(answer)) return "objective";
+  const clean = answer.trim();
+  const explanationText = explanationLines.join(" ");
+  if (
+    /서술|논술|증명|과정을\s*쓰|풀이를\s*쓰|설명하/.test(`${clean} ${explanationText}`) ||
+    clean.length >= 24
+  ) {
+    return "essay";
+  }
+  return "short";
+}
+
+function buildQuickAnswerRows(blocks: ExplanationBlock[]) {
+  const entries = blocks.map((block) => {
+    const answerKind = classifyQuickAnswerKind(block.answer, block.explanationLines);
+    const objective = normalizeObjectiveAnswer(block.answer);
+    const displayAnswer =
+      answerKind === "essay"
+        ? "해설참고"
+        : objective
+          ? objective
+          : block.answer || "-";
+    return `${block.questionLabel}) ${displayAnswer}`;
+  });
+  const paragraphs: Paragraph[] = [];
+  for (let i = 0; i < entries.length; i += 2) {
+    const left = entries[i] ?? "";
+    const right = entries[i + 1] ?? "";
+    paragraphs.push(
+      new Paragraph({
+        tabStops: [{ type: TabStopType.LEFT, position: 5200 }],
+        children: [
+          new TextRun({ text: left, bold: true }),
+          new TextRun({ text: "\t" }),
+          new TextRun({ text: right, bold: true }),
+        ],
+        spacing: { after: 110 },
+      }),
+    );
+  }
+  return paragraphs;
+}
+
 export async function POST(request: Request) {
   try {
     const formData = await request.formData();
@@ -168,14 +230,12 @@ export async function POST(request: Request) {
 
     const blocks = parseExplanationBlocks(explanationBody, quickAnswer);
     const explanationParagraphs = buildExplanationParagraphs(blocks);
-    const quickAnswerSummary = blocks
-      .map((item) => `${item.questionLabel}) ${item.answer || "-"}`)
-      .join("   ");
     const headerTitle = `${path.parse(examName).name}(해설)`;
     const docDate = `${now.getFullYear()}.${String(now.getMonth() + 1).padStart(2, "0")}.${String(
       now.getDate(),
     ).padStart(2, "0")}`;
 
+    const quickAnswerRows = buildQuickAnswerRows(blocks);
     const doc = new Document({
       sections: [
         {
@@ -204,23 +264,17 @@ export async function POST(request: Request) {
             }),
             new Paragraph({
               alignment: AlignmentType.LEFT,
-              children: [
-                new TextRun({
-                  text: "[빠른 정답]",
-                  bold: true,
-                }),
-              ],
-              spacing: { after: 100 },
+              children: [new TextRun({ text: "[빠른 정답]", bold: true })],
+              spacing: { after: 90 },
             }),
-            new Paragraph({
-              alignment: AlignmentType.LEFT,
-              children: [new TextRun({ text: quickAnswerSummary, bold: true })],
-              spacing: { after: 260 },
-            }),
+            ...(quickAnswerRows.length > 0
+              ? quickAnswerRows
+              : [new Paragraph({ children: [new TextRun({ text: "추출/생성된 정답 없음" })] })]),
           ],
         },
         {
           properties: {
+            type: SectionType.CONTINUOUS,
             column: {
               count: 2,
               space: 708,
@@ -230,7 +284,7 @@ export async function POST(request: Request) {
             new Paragraph({
               heading: HeadingLevel.HEADING_2,
               children: [new TextRun({ text: "[해설]", bold: true })],
-              spacing: { before: 120, after: 180 },
+              spacing: { before: 180, after: 180 },
             }),
             ...(explanationParagraphs.length > 0
               ? explanationParagraphs

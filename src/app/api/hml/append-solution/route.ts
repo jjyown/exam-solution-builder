@@ -8,6 +8,8 @@ import {
   HeadingLevel,
   Packer,
   Paragraph,
+  SectionType,
+  TabStopType,
   TextRun,
 } from "docx";
 import { isGoogleDriveConfigured, uploadCompletedDocx } from "@/lib/googleDrive";
@@ -587,6 +589,15 @@ function validateExplanationFormat(text: string) {
   );
 }
 
+function isLikelyTruncatedSolution(text: string) {
+  const explanation = text.match(/\[해설\]\s*([\s\S]*)/i)?.[1]?.trim() ?? "";
+  if (explanation.length < 50) return true;
+  if (/[,:+\-*/=]$/.test(explanation)) return true;
+  const openParen = (explanation.match(/[({\[]/g) ?? []).length;
+  const closeParen = (explanation.match(/[)}\]]/g) ?? []).length;
+  return openParen > closeParen;
+}
+
 function evaluateQuestionTextQuality(text: string): QuestionQualityInfo {
   const length = text.length;
   const scriptTokenCount = (text.match(/it_\{|smallprod|left\(|right\)|\{rm\{|\`/g) ?? []).length;
@@ -657,6 +668,7 @@ async function generateSolutionForQuestion(
       : questionText;
   const promptBase = [
     "중고등 수학 문제를 해설하라.",
+    "반드시 내부적으로 다음 순서로 수행: 1) 문제 풀이 2) 빠른정답 확정 3) 해설 작성.",
     "출력은 반드시 아래 형식:",
     "[정답] ...",
     "[해설]",
@@ -687,14 +699,14 @@ async function generateSolutionForQuestion(
         model: modelName,
         generationConfig: {
           temperature: profile === "noisy" ? 0.1 : 0.2,
-          maxOutputTokens: profile === "noisy" ? 1200 : 1500,
+          maxOutputTokens: profile === "noisy" ? 1800 : 2200,
         },
       });
       const first = await model.generateContent([{ text: prompt }]);
       const text = first.response.text()?.trim() ?? "";
       const parsed = parseAnswerFromSolution(text);
       const answerMatches = expectedAnswer ? parsed === normalizeAnswerToken(expectedAnswer) : true;
-      if (text && validateExplanationFormat(text) && answerMatches) {
+      if (text && validateExplanationFormat(text) && answerMatches && !isLikelyTruncatedSolution(text)) {
         return { text, model: modelName };
       }
       const retryPrompt =
@@ -704,13 +716,14 @@ async function generateSolutionForQuestion(
               expectedAnswer
                 ? `[정답]은 반드시 ${normalizeAnswerToken(expectedAnswer)} 로 맞춰라.`
                 : "",
+              "해설이 중간에 끊기지 않게 마지막 문장까지 완결해서 작성하라.",
               "[정답] 한 줄 + [해설] 본문 형식만 출력하라.",
             ]
               .filter(Boolean)
               .join(" ")
           : expectedAnswer
             ? `형식 또는 정답 검증이 실패했습니다. 반드시 [정답] 한 줄, [해설] 본문 형식으로 출력하고 [정답]은 ${normalizeAnswerToken(expectedAnswer)} 와 일치시켜라.`
-            : "형식이 맞지 않았습니다. 반드시 [정답] 한 줄, [해설] 본문 형식으로만 다시 출력하세요.";
+            : "형식이 맞지 않았습니다. 반드시 [정답] 한 줄, [해설] 본문 형식으로만 다시 출력하세요. 해설은 중간에 끊기지 않게 완결하세요.";
       const retry = await model.generateContent([
         { text: prompt },
         {
@@ -722,7 +735,12 @@ async function generateSolutionForQuestion(
       const retryMatches = expectedAnswer
         ? retryParsed === normalizeAnswerToken(expectedAnswer)
         : true;
-      if (retryText && validateExplanationFormat(retryText) && retryMatches) {
+      if (
+        retryText &&
+        validateExplanationFormat(retryText) &&
+        retryMatches &&
+        !isLikelyTruncatedSolution(retryText)
+      ) {
         return { text: retryText, model: modelName };
       }
       failures.push(`${modelName}: 형식/정답 검증 실패`);
@@ -793,6 +811,7 @@ async function generateSolutionWithOpenAiFallback(
 
   const prompt = [
     "중고등 수학 문제를 해설하라.",
+    "반드시 내부적으로 다음 순서로 수행: 1) 문제 풀이 2) 빠른정답 확정 3) 해설 작성.",
     "출력은 반드시 아래 형식만 사용:",
     "[정답] ...",
     "[해설]",
@@ -830,7 +849,7 @@ async function generateSolutionWithOpenAiFallback(
     choices?: Array<{ message?: { content?: string } }>;
   };
   const text = data.choices?.[0]?.message?.content?.trim() ?? "";
-  if (!text || !validateExplanationFormat(text)) {
+  if (!text || !validateExplanationFormat(text) || isLikelyTruncatedSolution(text)) {
     throw new Error("GPT 백업 응답 형식이 올바르지 않습니다.");
   }
   const parsed = parseAnswerFromSolution(text);
@@ -842,33 +861,57 @@ async function generateSolutionWithOpenAiFallback(
 
 function buildDocx(
   originalTitle: string,
-  originalTextPreview: string,
-  quickAnswerSummary: string,
   items: GeneratedItem[],
 ) {
-  const children: Paragraph[] = [
-    new Paragraph({
-      alignment: AlignmentType.CENTER,
-      heading: HeadingLevel.HEADING_1,
-      children: [new TextRun({ text: `${originalTitle}(원본+해설)`, bold: true })],
-      spacing: { after: 220 },
-    }),
-    new Paragraph({
-      children: [new TextRun({ text: "[원본 문제(추출 미리보기)]", bold: true })],
-      spacing: { after: 100 },
-    }),
-    new Paragraph({
-      children: [new TextRun({ text: originalTextPreview })],
-      spacing: { after: 280 },
-    }),
-    new Paragraph({
-      children: [new TextRun({ text: "[빠른 정답]", bold: true })],
-      spacing: { after: 100 },
-    }),
-    new Paragraph({
-      children: [new TextRun({ text: quickAnswerSummary || "추출/생성된 정답 없음" })],
-      spacing: { after: 240 },
-    }),
+  const normalizeObjective = (value: string) =>
+    value
+      .trim()
+      .replace("①", "1")
+      .replace("②", "2")
+      .replace("③", "3")
+      .replace("④", "4")
+      .replace("⑤", "5")
+      .match(/^[1-5]$/)?.[0] ?? null;
+  const getAnswerKind = (item: GeneratedItem) => {
+    const objective = normalizeObjective(item.generatedAnswer || item.expectedAnswer || "");
+    if (objective) return "objective" as const;
+    const explain = item.solution.match(/\[해설\]\s*([\s\S]*)/i)?.[1] ?? "";
+    if (
+      /서술|논술|증명|설명하|과정을\s*쓰/.test(`${item.generatedAnswer} ${explain}`) ||
+      (item.generatedAnswer || "").trim().length >= 24
+    ) {
+      return "essay" as const;
+    }
+    return "short" as const;
+  };
+
+  const quickEntries = items.map((item) => {
+    const kind = getAnswerKind(item);
+    const objective = normalizeObjective(item.generatedAnswer || item.expectedAnswer || "");
+    const display =
+      kind === "essay"
+        ? "해설참고"
+        : objective
+          ? objective
+          : (item.generatedAnswer || item.expectedAnswer || "?");
+    return `${item.no}) ${display}`;
+  });
+  const quickRows: Paragraph[] = [];
+  for (let i = 0; i < quickEntries.length; i += 2) {
+    quickRows.push(
+      new Paragraph({
+        tabStops: [{ type: TabStopType.LEFT, position: 5200 }],
+        children: [
+          new TextRun({ text: quickEntries[i] ?? "", bold: true }),
+          new TextRun({ text: "\t" }),
+          new TextRun({ text: quickEntries[i + 1] ?? "", bold: true }),
+        ],
+        spacing: { after: 110 },
+      }),
+    );
+  }
+
+  const explanationChildren: Paragraph[] = [
     new Paragraph({
       heading: HeadingLevel.HEADING_2,
       children: [new TextRun({ text: "[해설]", bold: true })],
@@ -877,8 +920,16 @@ function buildDocx(
   ];
 
   items.forEach((item) => {
+    const kind = getAnswerKind(item);
+    const objective = normalizeObjective(item.generatedAnswer || item.expectedAnswer || "");
+    const quickAnswerText =
+      kind === "essay"
+        ? "해설참고"
+        : objective
+          ? objective
+          : (item.generatedAnswer || item.expectedAnswer || "?");
     const lines = item.solution.split("\n").map((line) => line.trim()).filter(Boolean);
-    children.push(
+    explanationChildren.push(
       new Paragraph({
         heading: HeadingLevel.HEADING_3,
         children: [
@@ -890,9 +941,15 @@ function buildDocx(
         spacing: { before: 160, after: 80 },
       }),
     );
+    explanationChildren.push(
+      new Paragraph({
+        children: [new TextRun({ text: `[빠른정답] ${quickAnswerText}`, bold: true })],
+        spacing: { after: 90 },
+      }),
+    );
     lines.forEach((line) => {
       const isKey = /^\[정답\]|\[해설\]/.test(line);
-      children.push(
+      explanationChildren.push(
         new Paragraph({
           children: [new TextRun({ text: line, bold: isKey })],
           spacing: { after: 100 },
@@ -904,13 +961,32 @@ function buildDocx(
   return new Document({
     sections: [
       {
+        properties: {},
+        children: [
+          new Paragraph({
+            alignment: AlignmentType.CENTER,
+            heading: HeadingLevel.HEADING_1,
+            children: [new TextRun({ text: `${originalTitle}(해설)`, bold: true })],
+            spacing: { after: 220 },
+          }),
+          new Paragraph({
+            children: [new TextRun({ text: "[빠른 정답]", bold: true })],
+            spacing: { after: 100 },
+          }),
+          ...(quickRows.length > 0
+            ? quickRows
+            : [new Paragraph({ children: [new TextRun({ text: "추출/생성된 정답 없음" })] })]),
+        ],
+      },
+      {
         properties: {
+          type: SectionType.CONTINUOUS,
           column: {
             count: 2,
             space: 708,
           },
         },
-        children,
+        children: explanationChildren,
       },
     ],
   });
@@ -1216,14 +1292,7 @@ export async function POST(request: Request) {
     ).padStart(2, "0")}${String(now.getSeconds()).padStart(2, "0")}`;
     const outputName = `${title}_원본추가해설_${stamp}.docx`;
 
-    const preview = workingQuestions
-      .slice(0, 6)
-      .map((item) => `${item.no}) ${item.text}`)
-      .join("\n");
-    const quickAnswerSummary = workingQuestions
-      .map((item) => `${item.no}) ${quickAnswerMap.get(item.no) ?? "?"}`)
-      .join("  ");
-    const doc = buildDocx(title, preview, quickAnswerSummary, generated);
+    const doc = buildDocx(title, generated);
     const buffer = await Packer.toBuffer(doc);
     const parsingQuality = evaluateParsingQuality({
       questions: workingQuestions,
