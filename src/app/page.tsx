@@ -95,10 +95,8 @@ type VerticalGuide = {
 
 const DEFAULT_BODY = `해설 생성 버튼을 누르면 이 영역에 결과가 표시됩니다.
 
-[출제 의도 및 개념] : 문제의 핵심 개념을 짧게 정리
-[조건 분석] : 주어진 조건을 어떻게 해석하는지 설명
-[단계별 풀이] : Step 1, Step 2 형식으로 풀이를 전개
-[최종 정답 확인] : 따라서 정답은 ~이다`;
+[해설]
+문제의 핵심 개념과 단계별 풀이를 학생 눈높이에 맞게 작성합니다.`;
 
 function extractSection(text: string, header: string, nextHeaders: string[]) {
   const escapedHeader = header.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -153,13 +151,24 @@ function parseExplanation(raw: string): ParsedExplanation {
     return { quickAnswer: "-", body: DEFAULT_BODY };
   }
 
+  // 신규 양식 우선 파싱: [정답], [해설]
+  const answerBlocks = [...normalized.matchAll(/\[정답\]\s*([^\n\r]*)/gi)];
+  const firstAnswer = answerBlocks[0]?.[1]?.trim() ?? "";
+  const firstExplanation = extractSection(normalized, "해설", []);
+  if (answerBlocks.length > 0 && firstExplanation) {
+    return {
+      quickAnswer: normalizeQuickAnswer(firstAnswer || "-", normalized),
+      body: `[해설]\n${firstExplanation}`,
+    };
+  }
+
+  // 기존 양식 하위 호환: [빠른 정답], [출제 의도 및 개념] ...
   const quickAnswer = extractSection(normalized, "빠른 정답", [
     "출제 의도 및 개념",
     "조건 분석",
     "단계별 풀이",
     "최종 정답 확인",
   ]);
-
   const concept = extractSection(normalized, "출제 의도 및 개념", [
     "조건 분석",
     "단계별 풀이",
@@ -171,8 +180,7 @@ function parseExplanation(raw: string): ParsedExplanation {
   ]);
   const steps = extractSection(normalized, "단계별 풀이", ["최종 정답 확인"]);
   const finalAnswer = extractSection(normalized, "최종 정답 확인", []);
-
-  const body = [
+  const legacyBody = [
     `[출제 의도 및 개념] : ${concept || "내용이 제공되지 않았습니다."}`,
     `[조건 분석] : ${condition || "내용이 제공되지 않았습니다."}`,
     `[단계별 풀이] : ${steps || "내용이 제공되지 않았습니다."}`,
@@ -181,7 +189,7 @@ function parseExplanation(raw: string): ParsedExplanation {
 
   return {
     quickAnswer: normalizeQuickAnswer(quickAnswer || "-", normalized),
-    body,
+    body: legacyBody,
   };
 }
 
