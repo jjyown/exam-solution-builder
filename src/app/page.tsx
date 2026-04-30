@@ -987,7 +987,7 @@ export default function Home() {
         );
         if (!precheck.ok) {
           setErrorMessage(
-            `생성을 중단했습니다. 문제 추출 품질이 낮습니다: ${precheck.messages.join(" / ")} 영역 박스를 다시 지정해 주세요.`,
+            `생성을 중단했습니다. 문제 추출 품질이 낮습니다: ${precheck.messages.join(" / ")} 문제 박스를 다시 지정해 주세요.`,
           );
           return;
         }
@@ -1015,7 +1015,7 @@ export default function Home() {
           .filter(Boolean)
           .join(" / ");
         setErrorMessage(
-          `생성을 중단했습니다. 문제 추출 비전 사전검증 점수 ${visionPrecheckData.score}점(기준 70점 이상). ${reasons || "핵심 정보 누락 가능성이 높습니다."} 영역 박스를 다시 지정해 주세요.`,
+          `생성을 중단했습니다. 문제 추출 비전 사전검증 점수 ${visionPrecheckData.score}점(기준 70점 이상). ${reasons || "핵심 정보 누락 가능성이 높습니다."} 문제 박스를 다시 지정해 주세요.`,
         );
         return;
       }
@@ -1327,7 +1327,7 @@ export default function Home() {
     ]);
     setCrop(undefined);
     setCompletedCrop(undefined);
-    setSuccessMessage("그림 전용 박스를 추가했습니다.");
+    setSuccessMessage("문제 박스를 추가했습니다.");
     setErrorMessage("");
   };
 
@@ -1474,7 +1474,7 @@ export default function Home() {
       return;
     }
     if (pendingDiagramBoxes.length < 1) {
-      setErrorMessage("현재 페이지에 최소 1개 이상의 영역 박스를 추가해 주세요.");
+      setErrorMessage("현재 페이지에 최소 1개 이상의 문제 박스를 추가해 주세요.");
       return;
     }
 
@@ -1543,7 +1543,7 @@ export default function Home() {
       return;
     }
     setSuccessMessage(
-      `${pageLabel} 영역 박스를 저장했습니다. (${nextCompletedRequired}/${requiredPageNumbers.length} 필수 페이지 완료, 제외 ${excludedPageNumbers.length})`,
+      `${pageLabel} 문제 박스를 저장했습니다. (${nextCompletedRequired}/${requiredPageNumbers.length} 필수 페이지 완료, 제외 ${excludedPageNumbers.length})`,
     );
   };
 
@@ -1584,7 +1584,7 @@ export default function Home() {
 
   const runBatchGeneration = async () => {
     if (queuedProblems.length === 0) {
-      setErrorMessage("먼저 영역 박스를 하나 이상 추가해 주세요.");
+      setErrorMessage("먼저 문제 박스를 하나 이상 추가해 주세요.");
       return;
     }
 
@@ -1772,7 +1772,7 @@ export default function Home() {
 
       setBatchResults(results);
       if (successfulExplanations.length === 0) {
-        setSuccessMessage("영역 박스 순차 자동 해설 생성을 완료했습니다.");
+        setSuccessMessage("문제 박스 순차 자동 해설 생성을 완료했습니다.");
       }
     } catch (error) {
       const message =
@@ -2378,11 +2378,11 @@ export default function Home() {
                           }}
                         >
                           <span className="absolute -top-5 left-0 rounded bg-emerald-600 px-1.5 py-0.5 text-[10px] font-bold text-white">
-                            그림 {box.labelNo ?? idx + 1}
+                            문제 {box.labelNo ?? idx + 1}
                           </span>
                           <button
                             type="button"
-                            aria-label={`그림 ${box.labelNo ?? idx + 1} 크기 조절`}
+                            aria-label={`문제 ${box.labelNo ?? idx + 1} 크기 조절`}
                             className="absolute -bottom-2 -right-2 h-4 w-4 rounded bg-emerald-600 text-white"
                             style={{ cursor: "nwse-resize" }}
                             onMouseDown={(event) => {
@@ -2409,7 +2409,7 @@ export default function Home() {
                   </div>
                 </div>
                 <p className="mt-2 rounded bg-blue-50 p-2 text-xs text-blue-700">
-                  영역 박스 모드: 드래그해서 문제 영역을 추가하고, 저장 후 자동 보조 실행에 포함하세요.
+                  문제 박스 모드: 드래그해서 문제 영역을 추가하고, 저장 후 자동 보조 실행에 포함하세요.
                 </p>
                 <p className="mt-2 rounded bg-emerald-50 p-2 text-xs text-emerald-700">
                   박스를 드래그해 추가하면 자동 저장 목록에 포함됩니다. 추가된 박스는 드래그 이동, 우하단
@@ -2424,23 +2424,23 @@ export default function Home() {
                 </button>
                 {pendingDiagramBoxes.length > 0 && (
                   <p className="mt-2 rounded bg-slate-50 p-2 text-xs text-slate-600">
-                    설정됨: 영역 박스 {pendingDiagramBoxes.length}개
+                    설정됨: 문제 박스 {pendingDiagramBoxes.length}개
                   </p>
                 )}
                 {pendingDiagramBoxes.length === 0 && (
                   <p className="mt-1 text-xs text-rose-600">
-                    문제 영역 박스를 먼저 추가해 주세요.
+                    문제 박스를 먼저 추가해 주세요.
                   </p>
                 )}
                 <div className="mt-1 rounded-md bg-slate-50 px-2 py-2 text-xs text-slate-600">
-                  영역 박스 {pendingDiagramBoxes.length}개 / 저장상태{" "}
+                  문제 박스 {pendingDiagramBoxes.length}개 / 저장상태{" "}
                   {isCurrentPageExcluded ? "제외됨" : isCurrentPageSaved ? "저장됨" : "미저장"} / 필수{" "}
                   {completedRequiredPageCount}/{requiredPageNumbers.length}
                 </div>
                 {pendingDiagramBoxes.length > 0 && (
                   <div className="mt-2 rounded-md border border-slate-200 p-2">
                     <p className="text-xs font-semibold text-slate-700">
-                      영역 박스 목록 ({pendingDiagramBoxes.length})
+                      문제 박스 목록 ({pendingDiagramBoxes.length})
                     </p>
                     <div className="mt-1 flex flex-wrap gap-2">
                       {pendingDiagramBoxes.map((box, idx) => (
@@ -2449,7 +2449,7 @@ export default function Home() {
                           onClick={() => removePendingDiagramBox(box.id)}
                           className="rounded border border-slate-300 bg-white px-2 py-1 text-[11px]"
                         >
-                          영역 {box.labelNo ?? idx + 1} 삭제
+                          문제 {box.labelNo ?? idx + 1} 삭제
                         </button>
                       ))}
                     </div>
@@ -2614,7 +2614,7 @@ export default function Home() {
                   </p>
                   {queuedProblems.length === 0 ? (
                     <p className="mt-2 text-xs text-slate-500">
-                      영역 박스를 저장하면 자동 생성에 추가됩니다.
+                      문제 박스를 저장하면 자동 생성에 추가됩니다.
                     </p>
                   ) : (
                     <ul className="mt-2 space-y-1 text-xs text-slate-700">
@@ -2640,7 +2640,7 @@ export default function Home() {
                   >
                     {isBatchGenerating
                       ? "보조 자동 해설 생성 중..."
-                      : "영역 박스 순서대로 자동 보조 실행"}
+                      : "문제 박스 순서대로 자동 보조 실행"}
                   </button>
                 </div>
               </div>
