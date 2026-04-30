@@ -1024,6 +1024,12 @@ export default function Home() {
       setErrorMessage("이미지 로딩이 완료된 뒤 다시 시도해 주세요.");
       return;
     }
+    if (isPdfSource && !requiredPageNumbers.includes(pdfPageNo)) {
+      setErrorMessage(
+        "현재 페이지는 빠른정답/해설참고로 지정되어 풀이 대상에서 제외된 페이지입니다. 문제 페이지로 이동해 주세요.",
+      );
+      return;
+    }
     try {
       setIsGenerating(true);
       setErrorMessage("");
@@ -1540,6 +1546,12 @@ export default function Home() {
 
     const mimeType = sourceFile?.type || "image/png";
     const pageNumber = isPdfSource ? pdfPageNo : 1;
+    if (isPdfSource && !requiredPageNumbers.includes(pageNumber)) {
+      setErrorMessage(
+        "현재 페이지는 참고 전용(빠른정답/해설참고)으로 제외된 페이지입니다. 이 페이지는 문제 저장 대상이 아닙니다.",
+      );
+      return;
+    }
     const pageLabel = isPdfSource ? `PDF ${pageNumber}p` : "이미지";
     const baseCountWithoutCurrentPage = Object.entries(savedPageWorks).reduce(
       (sum, [pageKey, items]) => {
