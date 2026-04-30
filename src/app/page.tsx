@@ -182,8 +182,6 @@ function normalizeQuickAnswer(rawQuick: string, fullText: string) {
     return toDigit(quickOption[0]);
   }
   if (objectiveHint) {
-    const fallbackOption = fullText.match(/[①②③④⑤]|(?<!\d)[1-5](?!\d)/);
-    if (fallbackOption) return toDigit(fallbackOption[0]);
     return "-";
   }
 
@@ -206,9 +204,10 @@ function parseExplanation(raw: string): ParsedExplanation {
   const firstAnswer = answerBlocks[0]?.[1]?.trim() ?? "";
   const firstExplanation = extractSection(normalized, "해설", []);
   if (answerBlocks.length > 0 && firstExplanation) {
+    const sanitizedExplanation = firstExplanation.replace(/^\s*\d+\s*[.)]\s*/g, "").trim();
     return {
       quickAnswer: normalizeQuickAnswer(firstAnswer || "-", normalized),
-      body: `[해설]\n${firstExplanation}`,
+      body: `[해설]\n${sanitizedExplanation}`,
     };
   }
 

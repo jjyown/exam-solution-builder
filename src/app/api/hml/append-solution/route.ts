@@ -598,6 +598,32 @@ function isLikelyTruncatedSolution(text: string) {
   return openParen > closeParen;
 }
 
+function normalizeStudentMathText(value: string) {
+  return value
+    .replace(/\$\$?/g, "")
+    .replace(/\\left|\\right/g, "")
+    .replace(/\\binom\{([^}]+)\}\{([^}]+)\}/g, "$1C$2")
+    .replace(/\\frac\{([^}]+)\}\{([^}]+)\}/g, "$1/$2")
+    .replace(/\\sqrt\{([^}]+)\}/g, "√$1")
+    .replace(/\\times|\\cdot/g, "×")
+    .replace(/\\div/g, "÷")
+    .replace(/\\geq|\\ge/g, "≥")
+    .replace(/\\leq|\\le/g, "≤")
+    .replace(/\\neq/g, "≠")
+    .replace(/\\pm/g, "±")
+    .replace(/\\cdots|\\dots/g, "...")
+    .replace(/\\alpha/g, "α")
+    .replace(/\\beta/g, "β")
+    .replace(/\\gamma/g, "γ")
+    .replace(/\\theta/g, "θ")
+    .replace(/\\,/g, " ")
+    .replace(/\{([^{}]+)\}/g, "$1")
+    .replace(/\\([A-Za-z]+)/g, "$1")
+    .replace(/\r\n/g, "\n")
+    .replace(/[ \f\v]+/g, " ")
+    .trim();
+}
+
 function evaluateQuestionTextQuality(text: string): QuestionQualityInfo {
   const length = text.length;
   const scriptTokenCount = (text.match(/it_\{|smallprod|left\(|right\)|\{rm\{|\`/g) ?? []).length;
@@ -668,6 +694,9 @@ async function generateSolutionForQuestion(
       : questionText;
   const promptBase = [
     "중고등 수학 문제를 해설하라.",
+    "수식은 LaTeX 표기(\\binom, \\frac 등)로 쓰지 말고 학생이 읽기 쉬운 일반 표기로 작성하라.",
+    "조합은 반드시 nCk 표기(예: 10C3)로 작성하라.",
+    "[해설] 본문 첫 줄에 문제 번호(예: 17.)를 다시 쓰지 마라.",
     "반드시 내부적으로 다음 순서로 수행: 1) 문제 풀이 2) 빠른정답 확정 3) 해설 작성.",
     "출력은 반드시 아래 형식:",
     "[정답] ...",
@@ -811,6 +840,9 @@ async function generateSolutionWithOpenAiFallback(
 
   const prompt = [
     "중고등 수학 문제를 해설하라.",
+    "수식은 LaTeX 표기(\\binom, \\frac 등)로 쓰지 말고 학생이 읽기 쉬운 일반 표기로 작성하라.",
+    "조합은 반드시 nCk 표기(예: 10C3)로 작성하라.",
+    "[해설] 본문 첫 줄에 문제 번호(예: 17.)를 다시 쓰지 마라.",
     "반드시 내부적으로 다음 순서로 수행: 1) 문제 풀이 2) 빠른정답 확정 3) 해설 작성.",
     "출력은 반드시 아래 형식만 사용:",
     "[정답] ...",
@@ -928,7 +960,10 @@ function buildDocx(
         : objective
           ? objective
           : (item.generatedAnswer || item.expectedAnswer || "?");
-    const lines = item.solution.split("\n").map((line) => line.trim()).filter(Boolean);
+    const lines = item.solution
+      .split("\n")
+      .map((line) => normalizeStudentMathText(line))
+      .filter(Boolean);
     explanationChildren.push(
       new Paragraph({
         heading: HeadingLevel.HEADING_3,

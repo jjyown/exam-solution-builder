@@ -23,6 +23,7 @@ function simplifyMathText(value: string) {
   return value
     .replace(/\$\$?/g, "")
     .replace(/\\left|\\right/g, "")
+    .replace(/\\binom\{([^}]+)\}\{([^}]+)\}/g, "$1C$2")
     .replace(/\\times|\\cdot/g, "×")
     .replace(/\\div/g, "÷")
     .replace(/\\pi/g, "π")
@@ -41,7 +42,10 @@ function simplifyMathText(value: string) {
     .replace(/\\beta/g, "β")
     .replace(/\\gamma/g, "γ")
     .replace(/\\theta/g, "θ")
+    .replace(/\\cdots|\\dots/g, "...")
     .replace(/\\,/g, " ")
+    .replace(/\{([^{}]+)\}/g, "$1")
+    .replace(/\\([A-Za-z]+)/g, "$1")
     .replace(/\r\n/g, "\n")
     .replace(/\t/g, " ")
     .replace(/[ \f\v]+/g, " ")
