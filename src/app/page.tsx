@@ -47,6 +47,17 @@ type VisionPrecheckResponse = {
   error?: string;
 };
 
+type ExamSourceKind = "image" | "pdf" | "hml" | "hwp" | "unknown";
+
+function getExamSourceKind(fileName: string): ExamSourceKind {
+  const lower = fileName.toLowerCase();
+  if (lower.endsWith(".pdf")) return "pdf";
+  if (lower.endsWith(".hml")) return "hml";
+  if (lower.endsWith(".hwp") || lower.endsWith(".hwpx")) return "hwp";
+  if (/\.(png|jpg|jpeg|webp|gif)$/i.test(lower)) return "image";
+  return "unknown";
+}
+
 type ExtractionPrecheck = {
   ok: boolean;
   messages: string[];
@@ -433,6 +444,10 @@ export default function Home() {
   const [rawResponse, setRawResponse] = useState("");
   const [qualityWarnings, setQualityWarnings] = useState<string[]>([]);
   const [hmlFile, setHmlFile] = useState<File | null>(null);
+  const [hmlManualQuestionSelection, setHmlManualQuestionSelection] = useState("1-30");
+  const [hmlExecutionMode, setHmlExecutionMode] = useState<"manual" | "auto_assist">("manual");
+  const [manualDividerXPercent, setManualDividerXPercent] = useState("50");
+  const [manualDividerYPercent, setManualDividerYPercent] = useState("50");
   const [isProcessingHml, setIsProcessingHml] = useState(false);
   const [isLoadingExams, setIsLoadingExams] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
@@ -462,6 +477,7 @@ export default function Home() {
   const [successMessage, setSuccessMessage] = useState("");
 
   const hasImage = Boolean(sourceImage && sourceFile);
+  const selectedExamKind = selectedExam ? getExamSourceKind(selectedExam) : "unknown";
   const hasGeneratedResult = rawResponse.trim().length > 0;
   const canGenerate = hasImage && !isGenerating && !isLoadingExams;
   const sortedVerticalGuides = useMemo(
@@ -606,6 +622,13 @@ export default function Home() {
   };
 
   const loadSourceFile = async (file: File) => {
+    const sourceKind = getExamSourceKind(file.name);
+    if (sourceKind === "hml" || sourceKind === "hwp") {
+      throw new Error(
+        "한글 원본 파일은 이미지 작업 단계가 아닙니다. 1단계의 '원본 HML 기반 해설 붙이기'를 사용해 주세요.",
+      );
+    }
+
     setOriginalFile(file);
     setSelectedExam(file.name);
     setCrop(undefined);
@@ -638,6 +661,21 @@ export default function Home() {
     setSourceImage(objectUrl);
     setSourceFile(file);
     setCurrentStep(2);
+  };
+
+  const prepareHmlWorkflow = (file: File, fromListName?: string) => {
+    setSelectedExam(fromListName || file.name);
+    setHmlFile(file);
+    setCurrentStep(1);
+    setSourceImage("");
+    setSourceFile(null);
+    setOriginalFile(null);
+    setIsPdfSource(false);
+    setPdfPageCount(0);
+    setPdfPageNo(1);
+    setDividerMarkers([]);
+    setVerticalGuides([]);
+    clearPendingSelection();
   };
 
   const loadExamFiles = useCallback(async () => {
@@ -690,11 +728,32 @@ export default function Home() {
 
   const loadExamImage = async (fileName: string) => {
     try {
-      const lowerName = fileName.toLowerCase();
-      if (lowerName.endsWith(".hml") || lowerName.endsWith(".hwp") || lowerName.endsWith(".hwpx")) {
+      const sourceKind = getExamSourceKind(fileName);
+      if (sourceKind === "hwp") {
         setErrorMessage(
-          "한글 원본 파일은 이미지 미리보기를 지원하지 않습니다. 아래 '.hml 원본 업로드'에서 바로 해설 추가 생성을 사용해 주세요.",
+          "`.hwp/.hwpx`는 현재 직접 파싱을 지원하지 않습니다. 수학비서에서 `.hml`로 저장한 뒤 업로드해 주세요.",
         );
+        setSuccessMessage("");
+        return;
+      }
+      if (sourceKind === "hml") {
+        setIsLoadingSelectedFile(true);
+        setErrorMessage("");
+        setSuccessMessage("");
+        const response = await fetch(
+          `/api/exams/file?name=${encodeURIComponent(fileName)}`,
+          { cache: "no-store" },
+        );
+        if (!response.ok) {
+          const data = (await response.json()) as { error?: string };
+          throw new Error(data.error || "HML 파일을 불러오지 못했습니다.");
+        }
+        const blob = await response.blob();
+        const file = new File([blob], fileName, {
+          type: blob.type || "text/xml",
+        });
+        prepareHmlWorkflow(file, fileName);
+        setSuccessMessage("HML 원본을 선택했습니다. 아래 버튼으로 원본 기반 해설 생성을 진행해 주세요.");
         return;
       }
       setIsLoadingSelectedFile(true);
@@ -755,6 +814,10 @@ export default function Home() {
       setSuccessMessage("");
       const formData = new FormData();
       formData.append("hmlFile", hmlFile);
+      formData.append("mode", hmlExecutionMode);
+      if (hmlManualQuestionSelection.trim()) {
+        formData.append("manualQuestionSelection", hmlManualQuestionSelection.trim());
+      }
       const response = await fetch("/api/hml/append-solution", {
         method: "POST",
         body: formData,
@@ -764,15 +827,88 @@ export default function Home() {
         message?: string;
         fileName?: string;
         questionCount?: number;
+        parsingDiagnostics?: {
+          strategy?: string;
+          paragraphQuestionCount?: number;
+          autonumBlockQuestionCount?: number;
+          bodyFallbackQuestionCount?: number;
+          fallbackQuestionCount?: number;
+          quickAnswerSource?: string;
+          sourceProfile?: string;
+          aiExtractedQuestionCount?: number;
+          openAiFallbackCount?: number;
+          noisyQuestionCount?: number;
+          notes?: string[];
+        };
+        parsingQuality?: {
+          pass?: boolean;
+          warnings?: string[];
+          coverageRatio?: number;
+          mismatchRatio?: number;
+        };
+        quickAnswerStats?: {
+          verifiedCount?: number;
+          filledCount?: number;
+          mismatchCount?: number;
+        };
+        manualSelectionApplied?: number[] | null;
+        mode?: "manual" | "auto_assist";
+        requiresManualReview?: boolean;
+        assistGuidance?: string | null;
       };
       if (!response.ok) {
         throw new Error(data.error || "원본 기반 해설 생성에 실패했습니다.");
       }
       setSuccessMessage(
-        `${data.message || "원본 기반 해설 생성 완료"} (${data.questionCount || 0}문항) ${
-          data.fileName ? `- ${data.fileName}` : ""
-        }`,
+        `${data.message || "원본 기반 해설 생성 완료"} (${data.questionCount || 0}문항)${
+          data.quickAnswerStats
+            ? ` | 검증 ${data.quickAnswerStats.verifiedCount || 0} / 보완 ${
+                data.quickAnswerStats.filledCount || 0
+              } / 불일치 ${data.quickAnswerStats.mismatchCount || 0}`
+            : ""
+        }${
+          data.manualSelectionApplied?.length
+            ? ` | 수동문항 ${data.manualSelectionApplied.join(", ")}`
+            : ""
+        }${
+          data.mode ? ` | 모드 ${data.mode === "manual" ? "수동메인" : "자동보조"}` : ""
+        }${
+          data.parsingDiagnostics
+            ? ` | 파싱 ${
+                data.parsingDiagnostics.strategy === "paragraph-priority" ? "문단우선" : "텍스트대체"
+              } / 문단추출 ${data.parsingDiagnostics.paragraphQuestionCount || 0} / 구조추출 ${
+                data.parsingDiagnostics.autonumBlockQuestionCount || 0
+              } / 대체추출 ${
+                data.parsingDiagnostics.bodyFallbackQuestionCount ||
+                data.parsingDiagnostics.fallbackQuestionCount ||
+                0
+              } / 정답원천 ${
+                data.parsingDiagnostics.quickAnswerSource === "hml-endnote" ? "원본정답표" : "본문추출"
+              } / 프로필 ${
+                data.parsingDiagnostics.sourceProfile === "core-request-set" ? "대표샘플" : "기본"
+              } / AI추출 ${data.parsingDiagnostics.aiExtractedQuestionCount || 0} / GPT백업 ${
+                data.parsingDiagnostics.openAiFallbackCount || 0
+              } / 노이즈문항 ${
+                data.parsingDiagnostics.noisyQuestionCount || 0
+              }`
+            : ""
+        }${
+          data.parsingQuality
+            ? ` | 품질 ${data.parsingQuality.pass ? "PASS" : "CHECK"} (커버리지 ${Math.round(
+                (data.parsingQuality.coverageRatio || 0) * 100,
+              )}%, 불일치 ${Math.round((data.parsingQuality.mismatchRatio || 0) * 100)}%)`
+            : ""
+        } ${data.fileName ? `- ${data.fileName}` : ""}`,
       );
+      if (data.parsingDiagnostics?.notes?.length) {
+        console.info("HML 파싱 보정 노트:", data.parsingDiagnostics.notes);
+      }
+      if (data.requiresManualReview && data.assistGuidance) {
+        setErrorMessage(`자동 보조 경고: ${data.assistGuidance}`);
+      }
+      if (data.parsingQuality?.warnings?.length) {
+        setErrorMessage(`HML 품질 점검 경고: ${data.parsingQuality.warnings.join(" / ")}`);
+      }
       setHmlFile(null);
     } catch (error) {
       const message =
@@ -977,6 +1113,24 @@ export default function Home() {
       `${marker.labelNo}번 구분선을 추가했습니다. ${queuedProblems.length + 1}번 문제가 생성 준비되었습니다.`,
     );
     setErrorMessage("");
+  };
+
+  const addDividerMarkerByPercent = () => {
+    if (!imageRef.current) {
+      setErrorMessage("이미지가 로드된 뒤 수동 구분선을 추가해 주세요.");
+      return;
+    }
+    const x = Number.parseFloat(manualDividerXPercent);
+    const y = Number.parseFloat(manualDividerYPercent);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) {
+      setErrorMessage("수동 좌표는 숫자로 입력해 주세요. 예: X=50, Y=34.5");
+      return;
+    }
+    if (x < 0 || x > 100 || y < 0 || y > 100) {
+      setErrorMessage("수동 좌표 범위를 확인해 주세요. X/Y는 0~100%입니다.");
+      return;
+    }
+    addDividerMarkerAt((x / 100) * imageRef.current.width, (y / 100) * imageRef.current.height);
   };
 
   const addVerticalGuideAt = (x: number) => {
@@ -1786,9 +1940,9 @@ export default function Home() {
               {currentStep === 1 &&
                 "현재 단계: 시험지 선택. 목록에서 파일을 선택하거나 직접 업로드하세요."}
               {currentStep === 2 &&
-                "현재 단계: 영역 지정. 구분선을 배치한 뒤 현재 페이지 작업 저장을 누르세요."}
+                "현재 단계: 수동 영역 지정(메인). 구분선을 배치한 뒤 현재 페이지 작업 저장을 누르세요."}
               {currentStep === 3 &&
-                "현재 단계: 해설 제작. 해설 생성 후 우측에서 저장 버튼이 활성화됩니다."}
+                "현재 단계: 해설 제작. 수동 지정 해설 생성이 기본이며 자동은 보조 실행입니다."}
             </div>
 
             {currentStep === 1 && (
@@ -1813,7 +1967,7 @@ export default function Home() {
               <div className="h-44 overflow-y-auto rounded-md border border-slate-200">
                 {examFiles.length === 0 ? (
                   <p className="p-3 text-sm text-slate-500">
-                    시험지 폴더에 파일이 없습니다. `시험지` 또는 `exams` 폴더에 png/jpg/pdf 파일을 넣어주세요.
+                    시험지 폴더에 파일이 없습니다. `시험지` 또는 `exams` 폴더에 png/jpg/pdf/hml 파일을 넣어주세요.
                   </p>
                 ) : (
                   <ul className="divide-y divide-slate-200">
@@ -1827,7 +1981,18 @@ export default function Home() {
                               : "hover:bg-slate-50"
                           }`}
                         >
-                          {file}
+                          <span className="flex items-center justify-between gap-2">
+                            <span className="truncate">{file}</span>
+                            <span className="rounded border border-slate-300 px-2 py-0.5 text-[10px] font-semibold text-slate-600">
+                              {(() => {
+                                const kind = getExamSourceKind(file);
+                                if (kind === "hml") return "HML";
+                                if (kind === "hwp") return "HWP/HWPX";
+                                if (kind === "pdf") return "PDF";
+                                return "IMG";
+                              })()}
+                            </span>
+                          </span>
                         </button>
                       </li>
                     ))}
@@ -1850,24 +2015,67 @@ export default function Home() {
 
             <div className="rounded-md border border-violet-200 bg-violet-50 p-3">
               <p className="text-sm font-semibold text-violet-900">
-                (신규) 원본 HML 기반 해설 붙이기
+                (수동 메인) 원본 HML 기반 해설 붙이기
               </p>
               <p className="mt-1 text-xs text-violet-800">
-                .hml 원본을 업로드하면 문항을 추출해 해설을 생성하고, 원본 뒤에 해설을 붙인 DOCX를 저장합니다.
+                기본은 수동 문항 지정으로 처리합니다. 자동은 보조 모드에서만 실행하세요.
               </p>
+              <div className="mt-2 rounded border border-violet-300 bg-white p-2 text-xs text-violet-900">
+                <p className="font-semibold">실행 모드</p>
+                <label className="mt-1 flex items-center gap-2">
+                  <input
+                    type="radio"
+                    name="hmlExecutionMode"
+                    checked={hmlExecutionMode === "manual"}
+                    onChange={() => setHmlExecutionMode("manual")}
+                  />
+                  수동 메인(권장)
+                </label>
+                <label className="mt-1 flex items-center gap-2">
+                  <input
+                    type="radio"
+                    name="hmlExecutionMode"
+                    checked={hmlExecutionMode === "auto_assist"}
+                    onChange={() => setHmlExecutionMode("auto_assist")}
+                  />
+                  자동 보조(품질 경고 시 수동 전환)
+                </label>
+              </div>
+              {selectedExamKind === "hml" && hmlFile && (
+                <p className="mt-2 rounded border border-violet-300 bg-white px-2 py-1 text-xs text-violet-900">
+                  선택된 HML: {selectedExam}
+                </p>
+              )}
               <input
                 type="file"
                 accept=".hml,text/xml,application/xml"
                 onChange={(event) => setHmlFile(event.target.files?.[0] || null)}
                 className="mt-2 block w-full rounded-md border border-violet-300 bg-white p-2 text-sm"
               />
+              <label className="mt-2 block text-xs font-semibold text-violet-900">
+                문항 번호 직접 선택(쉼표/범위 지원)
+              </label>
+              <input
+                type="text"
+                value={hmlManualQuestionSelection}
+                onChange={(event) => setHmlManualQuestionSelection(event.target.value)}
+                placeholder="예: 1-30 또는 1,2,5-8"
+                className="mt-1 block w-full rounded-md border border-violet-300 bg-white p-2 text-sm"
+              />
+              <p className="mt-1 text-[11px] text-violet-800">
+                오토넘버는 보조로 사용하고, 입력한 번호만 해설 생성합니다.
+              </p>
               <button
                 type="button"
                 onClick={handleHmlAppendSolution}
                 disabled={!hmlFile || isProcessingHml}
                 className="mt-2 w-full rounded-md bg-violet-600 px-3 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:bg-slate-300"
               >
-                {isProcessingHml ? "원본 기반 해설 생성 중..." : "원본(HML) 뒤에 해설 추가 생성"}
+                {isProcessingHml
+                  ? "원본 기반 해설 생성 중..."
+                  : hmlExecutionMode === "manual"
+                    ? "수동 메인으로 해설 추가 생성"
+                    : "자동 보조로 해설 추가 생성"}
               </button>
             </div>
               </>
@@ -2217,6 +2425,43 @@ export default function Home() {
                     드래그로 이동, 우하단 핸들로 크기 조절할 수 있습니다.
                   </p>
                 )}
+                {linePlacementMode && !verticalGuideMode && (
+                  <div className="mt-2 rounded-md border border-blue-200 bg-blue-50 p-2">
+                    <p className="text-xs font-semibold text-blue-800">수동 영역 지정(구분선 좌표 입력)</p>
+                    <div className="mt-2 grid grid-cols-3 gap-2">
+                      <input
+                        type="number"
+                        min={0}
+                        max={100}
+                        step={0.1}
+                        value={manualDividerXPercent}
+                        onChange={(event) => setManualDividerXPercent(event.target.value)}
+                        className="rounded border border-blue-300 bg-white px-2 py-1 text-xs"
+                        placeholder="X%"
+                      />
+                      <input
+                        type="number"
+                        min={0}
+                        max={100}
+                        step={0.1}
+                        value={manualDividerYPercent}
+                        onChange={(event) => setManualDividerYPercent(event.target.value)}
+                        className="rounded border border-blue-300 bg-white px-2 py-1 text-xs"
+                        placeholder="Y%"
+                      />
+                      <button
+                        type="button"
+                        onClick={addDividerMarkerByPercent}
+                        className="rounded bg-blue-600 px-2 py-1 text-xs font-semibold text-white"
+                      >
+                        수동 구분선 추가
+                      </button>
+                    </div>
+                    <p className="mt-1 text-[11px] text-blue-700">
+                      클릭이 어려운 경우 좌표(%)로 정확히 구분선을 추가할 수 있습니다.
+                    </p>
+                  </div>
+                )}
                 <button
                   onClick={savePendingAsQueuedProblem}
                   disabled={sortedDividerMarkers.length < 1}
@@ -2369,12 +2614,12 @@ export default function Home() {
               disabled={!canGenerate}
               className="w-full rounded-md bg-blue-600 px-4 py-3 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:bg-slate-300"
             >
-              {isGenerating ? "해설 생성 중..." : "해설 생성 (한 문제)"}
+              {isGenerating ? "해설 생성 중..." : "수동 지정 해설 생성 (한 문제)"}
             </button>
 
             <details className="rounded-md border border-slate-200 p-3">
               <summary className="cursor-pointer text-sm font-semibold text-slate-800">
-                고급 설정 (텍스트 입력/자동생성/상세 옵션)
+                보조 실행 설정 (자동생성/텍스트 입력/상세 옵션)
               </summary>
               <div className="mt-3 space-y-3">
                 <div className="rounded-md border border-slate-200 p-3">
@@ -2431,7 +2676,7 @@ export default function Home() {
 
                 <div className="rounded-md border border-slate-200 p-3">
                   <p className="text-sm font-semibold text-slate-800">
-                    자동 해설 대기열 ({queuedProblems.length})
+                    자동 보조 해설 대기열 ({queuedProblems.length})
                   </p>
                   {queuedProblems.length === 0 ? (
                     <p className="mt-2 text-xs text-slate-500">
@@ -2460,8 +2705,8 @@ export default function Home() {
                     className="mt-3 w-full rounded-md bg-violet-600 px-4 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:bg-slate-300"
                   >
                     {isBatchGenerating
-                      ? "영역 순차 자동 해설 생성 중..."
-                      : "영역 박스 순서대로 자동 해설 생성"}
+                      ? "보조 자동 해설 생성 중..."
+                      : "영역 박스 순서대로 자동 보조 실행"}
                   </button>
                 </div>
               </div>
@@ -2483,7 +2728,7 @@ export default function Home() {
 
             {batchResults.length > 0 && (
               <div className="rounded-md border border-slate-200 p-3 text-xs">
-                <p className="font-semibold text-slate-800">자동 생성 결과</p>
+                <p className="font-semibold text-slate-800">자동 보조 실행 결과</p>
                 <ul className="mt-2 space-y-1">
                   {batchResults.map((result, index) => (
                     <li key={`${result.questionNo}-${index}`} className="rounded bg-slate-50 px-2 py-1">
@@ -2522,7 +2767,7 @@ export default function Home() {
                 <div className="rounded-md border border-amber-300 bg-amber-50 p-5 text-center text-amber-900">
                   <p className="text-sm font-semibold">아직 해설이 생성되지 않았습니다.</p>
                   <p className="mt-1 text-xs">
-                    좌측에서 `해설 생성 (한 문제)` 또는 `영역 박스 순서대로 자동 해설 생성`을 먼저 실행해 주세요.
+                    좌측에서 `수동 지정 해설 생성 (한 문제)`을 먼저 실행하고, 필요 시 자동 보조 실행을 사용해 주세요.
                   </p>
                 </div>
               )}
