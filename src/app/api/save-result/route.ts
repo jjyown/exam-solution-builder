@@ -42,7 +42,9 @@ function simplifyMathText(value: string) {
     .replace(/\\gamma/g, "γ")
     .replace(/\\theta/g, "θ")
     .replace(/\\,/g, " ")
-    .replace(/\s+/g, " ")
+    .replace(/\r\n/g, "\n")
+    .replace(/\t/g, " ")
+    .replace(/[ \f\v]+/g, " ")
     .trim();
 }
 

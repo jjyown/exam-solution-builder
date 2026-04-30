@@ -49,6 +49,9 @@ type VisionPrecheckResponse = {
 
 type ExamSourceKind = "image" | "pdf" | "hml" | "hwp" | "unknown";
 
+const HIGH_VISIBILITY_CROSSHAIR_CURSOR =
+  "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'%3E%3Cpath d='M12 1v22M1 12h22' stroke='white' stroke-width='3'/%3E%3Cpath d='M12 1v22M1 12h22' stroke='black' stroke-width='1'/%3E%3C/svg%3E\") 12 12, crosshair";
+
 function getExamSourceKind(fileName: string): ExamSourceKind {
   const lower = fileName.toLowerCase();
   if (lower.endsWith(".pdf")) return "pdf";
@@ -137,6 +140,12 @@ type VerticalGuide = {
   xRatio: number;
 };
 
+type ExplanationWorkflowStep =
+  | "solve"
+  | "select_explanation"
+  | "confirm_quick_answer"
+  | "generate_sheet";
+
 const DEFAULT_BODY = `해설 생성 버튼을 누르면 이 영역에 결과가 표시됩니다.
 
 [해설]
@@ -144,13 +153,10 @@ const DEFAULT_BODY = `해설 생성 버튼을 누르면 이 영역에 결과가 
 
 function extractSection(text: string, header: string, nextHeaders: string[]) {
   const escapedHeader = header.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const escapedNext = nextHeaders
-    .map((item) => item.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
-    .join("|");
-  const pattern = new RegExp(
-    `\\[${escapedHeader}\\]\\s*:?\\s*([\\s\\S]*?)(?=\\n\\s*\\[(?:${escapedNext})\\]|$)`,
-    "i",
-  );
+  const escapedNext = nextHeaders.map((item) => item.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  const lookahead =
+    escapedNext.length > 0 ? `(?=\\n\\s*\\[(?:${escapedNext.join("|")})\\]|$)` : `(?=$)`;
+  const pattern = new RegExp(`\\[${escapedHeader}\\]\\s*:?\\s*([\\s\\S]*?)${lookahead}`, "i");
   const match = text.match(pattern);
 
   return match?.[1]?.trim() ?? "";
@@ -437,6 +443,9 @@ export default function Home() {
   const diagramIdRef = useRef(1);
   const suppressOverlayClickRef = useRef(false);
   const dividerDragMovedRef = useRef(false);
+  const pdfJsRef = useRef<any>(null);
+  const pdfDocRef = useRef<any>(null);
+  const pdfDocKeyRef = useRef("");
   const [currentStep, setCurrentStep] = useState<1 | 2 | 3>(1);
   const [isLoadingSelectedFile, setIsLoadingSelectedFile] = useState(false);
   const [examFiles, setExamFiles] = useState<string[]>([]);
@@ -460,6 +469,8 @@ export default function Home() {
   >("all");
   const [showAllMethods, setShowAllMethods] = useState(true);
   const [quickAnswer, setQuickAnswer] = useState("-");
+  const [workflowStep, setWorkflowStep] = useState<ExplanationWorkflowStep>("solve");
+  const [methodSelectionPolicy, setMethodSelectionPolicy] = useState<"all" | "selected">("all");
   const [explanationBody, setExplanationBody] = useState(DEFAULT_BODY);
   const [rawResponse, setRawResponse] = useState("");
   const [qualityWarnings, setQualityWarnings] = useState<string[]>([]);
@@ -564,10 +575,18 @@ export default function Home() {
     () =>
       buildSelectedExplanationBody(
         explanationBody,
-        selectedMethodIndexes,
+        methodSelectionPolicy === "all"
+          ? methodBlocks.methods.map((_, index) => index)
+          : selectedMethodIndexes,
         representativeMethodIndex,
       ),
-    [explanationBody, selectedMethodIndexes, representativeMethodIndex],
+    [
+      explanationBody,
+      methodSelectionPolicy,
+      methodBlocks.methods,
+      selectedMethodIndexes,
+      representativeMethodIndex,
+    ],
   );
 
   const syncRenderImageSize = useCallback(() => {
@@ -630,17 +649,25 @@ export default function Home() {
   };
 
   const renderPdfPageToImage = async (file: File, pageNo: number) => {
-    const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
-    (pdfjs.GlobalWorkerOptions as { workerSrc: string }).workerSrc =
-      `https://unpkg.com/pdfjs-dist@${pdfjs.version}/legacy/build/pdf.worker.min.mjs`;
-
-    const arrayBuffer = await file.arrayBuffer();
-    const pdf = await pdfjs.getDocument({
-      data: arrayBuffer,
-    } as unknown as Parameters<typeof pdfjs.getDocument>[0]).promise;
+    if (!pdfJsRef.current) {
+      const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
+      (pdfjs.GlobalWorkerOptions as { workerSrc: string }).workerSrc =
+        `https://unpkg.com/pdfjs-dist@${pdfjs.version}/legacy/build/pdf.worker.min.mjs`;
+      pdfJsRef.current = pdfjs;
+    }
+    const pdfjs = pdfJsRef.current;
+    const docKey = `${file.name}:${file.size}:${file.lastModified}`;
+    if (!pdfDocRef.current || pdfDocKeyRef.current !== docKey) {
+      const arrayBuffer = await file.arrayBuffer();
+      pdfDocRef.current = await pdfjs.getDocument({
+        data: arrayBuffer,
+      } as unknown as Parameters<typeof pdfjs.getDocument>[0]).promise;
+      pdfDocKeyRef.current = docKey;
+    }
+    const pdf = pdfDocRef.current;
     const safePageNo = Math.max(1, Math.min(pageNo, pdf.numPages));
     const page = await pdf.getPage(safePageNo);
-    const viewport = page.getViewport({ scale: 2 });
+    const viewport = page.getViewport({ scale: 1.7 });
     const canvas = document.createElement("canvas");
     const context = canvas.getContext("2d");
     if (!context) {
@@ -688,6 +715,10 @@ export default function Home() {
     setPageDrafts({});
     setQuestionNo("1");
     setBatchResults([]);
+    setWorkflowStep("solve");
+    setMethodSelectionPolicy("all");
+    pdfDocRef.current = null;
+    pdfDocKeyRef.current = "";
 
     if (file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf")) {
       setIsPdfSource(true);
@@ -718,6 +749,8 @@ export default function Home() {
     setDividerMarkers([]);
     setVerticalGuides([]);
     clearPendingSelection();
+    setWorkflowStep("solve");
+    setMethodSelectionPolicy("all");
   };
 
   const loadExamFiles = useCallback(async () => {
@@ -747,6 +780,27 @@ export default function Home() {
   }, [currentStep, loadExamFiles]);
 
   useEffect(() => {
+    if (methodBlocks.methods.length === 0) return;
+    if (methodSelectionPolicy === "all") {
+      const all = methodBlocks.methods.map((_, index) => index);
+      setSelectedMethodIndexes(all);
+      if (representativeMethodIndex === null && all.length > 0) {
+        setRepresentativeMethodIndex(all[0]);
+      }
+      return;
+    }
+    if (selectedMethodIndexes.length === 0) {
+      setSelectedMethodIndexes([0]);
+      if (representativeMethodIndex === null) setRepresentativeMethodIndex(0);
+    }
+  }, [
+    methodBlocks.methods,
+    methodSelectionPolicy,
+    representativeMethodIndex,
+    selectedMethodIndexes.length,
+  ]);
+
+  useEffect(() => {
     if (!imageRef.current) return;
     const target = imageRef.current;
     syncRenderImageSize();
@@ -770,6 +824,7 @@ export default function Home() {
 
   const loadExamImage = async (fileName: string) => {
     try {
+      setSelectedExam(fileName);
       const sourceKind = getExamSourceKind(fileName);
       if (sourceKind === "hwp") {
         setErrorMessage(
@@ -1070,6 +1125,12 @@ export default function Home() {
       );
       setRepresentativeMethodIndex(
         splitMethodBlocks(parsed.body).methods.length > 0 ? 0 : null,
+      );
+      setMethodSelectionPolicy("all");
+      setWorkflowStep(
+        splitMethodBlocks(parsed.body).methods.length > 1
+          ? "select_explanation"
+          : "confirm_quick_answer",
       );
     } catch (error) {
       const message =
@@ -1711,6 +1772,12 @@ export default function Home() {
         setRepresentativeMethodIndex(
           splitMethodBlocks(parsed.body).methods.length > 0 ? 0 : null,
         );
+        setMethodSelectionPolicy("all");
+        setWorkflowStep(
+          splitMethodBlocks(parsed.body).methods.length > 1
+            ? "select_explanation"
+            : "confirm_quick_answer",
+        );
         results.push({
           questionNo: item.questionNo,
           quickAnswer: parsed.quickAnswer,
@@ -1761,6 +1828,7 @@ export default function Home() {
           }
           const savedMessage = (await saveRes.json()) as { message?: string };
           setSuccessMessage(savedMessage.message || "통합 DOCX 저장을 완료했습니다.");
+          setWorkflowStep("generate_sheet");
         } catch (e) {
           const message =
             e instanceof Error
@@ -1868,6 +1936,36 @@ export default function Home() {
     }
   };
 
+  const handleSaveCurrentDocx = async () => {
+    if (!hasGeneratedResult) {
+      setErrorMessage("먼저 문제 풀이/해설 생성을 완료해 주세요.");
+      return;
+    }
+    try {
+      setErrorMessage("");
+      setSuccessMessage("");
+      const formData = new FormData();
+      formData.append("examName", selectedExam || "직접업로드");
+      formData.append("questionNo", questionNo || "1");
+      formData.append("quickAnswer", quickAnswer || "-");
+      formData.append("explanationBody", `[정답] ${quickAnswer}\n${selectedExplanationBody}`);
+      const saveRes = await fetch("/api/save-result", {
+        method: "POST",
+        body: formData,
+      });
+      if (!saveRes.ok) {
+        const data = (await saveRes.json()) as { error?: string };
+        throw new Error(data.error || "DOCX 저장 실패");
+      }
+      const savedMessage = (await saveRes.json()) as { message?: string };
+      setSuccessMessage(savedMessage.message || "해설지 DOCX 생성이 완료되었습니다.");
+      setWorkflowStep("generate_sheet");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "DOCX 저장 중 오류가 발생했습니다.";
+      setErrorMessage(message);
+    }
+  };
+
   return (
     <main className="min-h-screen bg-slate-100 p-4 md:p-6">
       <div className="mx-auto grid max-w-[1600px] grid-cols-1 gap-4 lg:grid-cols-2">
@@ -1922,9 +2020,9 @@ export default function Home() {
               {currentStep === 1 &&
                 "현재 단계: 시험지 선택. 목록에서 파일을 선택하거나 직접 업로드하세요."}
               {currentStep === 2 &&
-                "현재 단계: 수동 영역 지정(메인). 구분선을 배치한 뒤 현재 페이지 작업 저장을 누르세요."}
+                "현재 단계: 수동 영역 지정(메인). 문제 박스를 지정한 뒤 현재 페이지 작업 저장을 누르세요."}
               {currentStep === 3 &&
-                "현재 단계: 해설 제작. 수동 지정 해설 생성이 기본이며 자동은 보조 실행입니다."}
+                "현재 단계: 해설 제작. 문제풀이 → 해설선택 → 빠른정답 → 해설지 생성 순서로 진행하세요."}
             </div>
 
             {currentStep === 1 && (
@@ -1957,11 +2055,12 @@ export default function Home() {
                       <li key={file}>
                         <button
                           onClick={() => loadExamImage(file)}
+                          disabled={isLoadingSelectedFile}
                           className={`w-full px-3 py-2 text-left text-sm ${
                             selectedExam === file
                               ? "bg-blue-50 font-semibold text-blue-700"
                               : "hover:bg-slate-50"
-                          }`}
+                          } disabled:cursor-not-allowed disabled:opacity-70`}
                         >
                           <span className="flex items-center justify-between gap-2">
                             <span className="truncate">{file}</span>
@@ -2166,6 +2265,7 @@ export default function Home() {
                   <div className="relative inline-block">
                     <ReactCrop
                       disabled={linePlacementMode}
+                      className="bg-white"
                       crop={crop}
                       onChange={(nextCrop) => {
                         if (linePlacementMode) return;
@@ -2187,6 +2287,7 @@ export default function Home() {
                         src={sourceImage}
                         alt="문제 이미지"
                         className="max-w-full"
+                        style={{ cursor: HIGH_VISIBILITY_CROSSHAIR_CURSOR }}
                         onLoad={(event) => {
                           setRenderImageSize({
                             width: event.currentTarget.clientWidth,
@@ -2201,7 +2302,10 @@ export default function Home() {
                     <div
                       ref={dividerOverlayRef}
                       className="absolute inset-0"
-                      style={{ pointerEvents: linePlacementMode ? "auto" : "none" }}
+                      style={{
+                        pointerEvents: linePlacementMode ? "auto" : "none",
+                        cursor: HIGH_VISIBILITY_CROSSHAIR_CURSOR,
+                      }}
                       onClick={(event) => {
                         if (!linePlacementMode) return;
                         if (dividerDragState) return;
@@ -2476,6 +2580,37 @@ export default function Home() {
               <>
             <div className="rounded-md border border-slate-200 bg-slate-50 p-3">
               <p className="text-sm font-semibold text-slate-800">현재 문항: {questionNo || "-"}</p>
+              <p className="mt-1 text-xs text-slate-600">
+                단계: 영역지정 → 문제풀이 → 해설 선택 → 빠른정답 → 해설지 생성
+              </p>
+              <div className="mt-2 flex flex-wrap gap-2 text-[11px]">
+                <span className="rounded bg-blue-100 px-2 py-0.5 text-blue-800">1. 문제풀이</span>
+                <span
+                  className={`rounded px-2 py-0.5 ${
+                    workflowStep !== "solve" ? "bg-blue-100 text-blue-800" : "bg-slate-200 text-slate-600"
+                  }`}
+                >
+                  2. 해설 선택
+                </span>
+                <span
+                  className={`rounded px-2 py-0.5 ${
+                    workflowStep === "confirm_quick_answer" || workflowStep === "generate_sheet"
+                      ? "bg-blue-100 text-blue-800"
+                      : "bg-slate-200 text-slate-600"
+                  }`}
+                >
+                  3. 빠른정답
+                </span>
+                <span
+                  className={`rounded px-2 py-0.5 ${
+                    workflowStep === "generate_sheet"
+                      ? "bg-emerald-100 text-emerald-800"
+                      : "bg-slate-200 text-slate-600"
+                  }`}
+                >
+                  4. 해설지 생성
+                </span>
+              </div>
             </div>
 
             {methodBlocks.methods.length > 0 && (
@@ -2483,6 +2618,27 @@ export default function Home() {
                 <p className="font-semibold text-slate-800">
                   풀이 방법 채택 (PDF 반영)
                 </p>
+                <div className="mt-2 rounded-md border border-slate-200 bg-white p-2 text-xs">
+                  <p className="font-semibold text-slate-700">해설 반영 방식</p>
+                  <label className="mt-1 flex items-center gap-2">
+                    <input
+                      type="radio"
+                      name="methodSelectionPolicy"
+                      checked={methodSelectionPolicy === "all"}
+                      onChange={() => setMethodSelectionPolicy("all")}
+                    />
+                    해설이 여러 개면 모두 넣기
+                  </label>
+                  <label className="mt-1 flex items-center gap-2">
+                    <input
+                      type="radio"
+                      name="methodSelectionPolicy"
+                      checked={methodSelectionPolicy === "selected"}
+                      onChange={() => setMethodSelectionPolicy("selected")}
+                    />
+                    선택한 해설만 넣기
+                  </label>
+                </div>
                 <p className="mt-1 text-xs text-slate-500">
                   채택한 방법만 우측 미리보기와 PDF/작업완료 저장에 반영됩니다.
                 </p>
@@ -2540,6 +2696,15 @@ export default function Home() {
                     </div>
                   ))}
                 </div>
+                {methodBlocks.methods.length > 1 && workflowStep === "select_explanation" && (
+                  <button
+                    type="button"
+                    onClick={() => setWorkflowStep("confirm_quick_answer")}
+                    className="mt-3 w-full rounded-md bg-indigo-600 px-3 py-2 text-sm font-semibold text-white"
+                  >
+                    해설 선택 확정
+                  </button>
+                )}
               </div>
             )}
 
@@ -2550,6 +2715,27 @@ export default function Home() {
             >
               {isGenerating ? "해설 생성 중..." : "수동 지정 해설 생성 (한 문제)"}
             </button>
+
+            {hasGeneratedResult && (
+              <div className="rounded-md border border-slate-200 p-3">
+                <p className="text-xs font-semibold text-slate-700">빠른정답 확정</p>
+                <div className="mt-2 flex items-center gap-2">
+                  <input
+                    type="text"
+                    value={quickAnswer}
+                    onChange={(event) => setQuickAnswer(event.target.value)}
+                    className="w-full rounded border border-slate-300 px-2 py-1 text-sm"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setWorkflowStep("generate_sheet")}
+                    className="shrink-0 rounded bg-emerald-600 px-3 py-1 text-xs font-semibold text-white"
+                  >
+                    빠른정답 확정
+                  </button>
+                </div>
+              </div>
+            )}
 
             <details className="rounded-md border border-slate-200 p-3">
               <summary className="cursor-pointer text-sm font-semibold text-slate-800">
@@ -2735,8 +2921,15 @@ export default function Home() {
           {currentStep === 3 && hasGeneratedResult && (
             <div className="mt-4 grid grid-cols-1 gap-3">
               <button
+                onClick={handleSaveCurrentDocx}
+                disabled={workflowStep !== "generate_sheet"}
+                className="w-full rounded-md bg-indigo-600 px-4 py-3 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:bg-slate-300"
+              >
+                해설지 생성 (DOCX)
+              </button>
+              <button
                 onClick={handleSavePdf}
-                disabled={isSavingPdf}
+                disabled={isSavingPdf || workflowStep !== "generate_sheet"}
                 className="w-full rounded-md bg-emerald-600 px-4 py-3 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:bg-slate-300"
               >
                 {isSavingPdf ? "PDF 생성 중..." : "PDF로 저장하기"}

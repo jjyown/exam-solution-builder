@@ -58,6 +58,9 @@ function validateExplanationFormat(text: string) {
   if (!explanationMatch) missing.push("[해설]");
   if (answerMatch && !answerMatch[1]?.trim()) missing.push("[정답] 값");
   if (explanationMatch && !explanationMatch[1]?.trim()) missing.push("[해설] 본문");
+  if (explanationMatch && explanationMatch[1]?.trim()?.length < 35) {
+    missing.push("[해설] 본문 분량");
+  }
 
   return { ok: missing.length === 0, missing };
 }
@@ -227,7 +230,8 @@ export async function POST(request: Request) {
       "- 이미지에서 선택지 ①~⑤ 또는 1~5 보기 형식이 보이면 객관식으로 판단해.",
       "- 객관식이면 [정답]에 정답 번호만 1~5 중 하나로 출력해.",
       "- 단답형이면 [정답]에 최종 식/값만 간단히 출력해.",
-      "- 서술형이면 [정답]은 반드시 '해설참고'로 출력하고, 실제 서술형 답안은 [해설]에 작성해.",
+      "- 서술형(예: 서술하시오/증명하시오/과정을 쓰시오 지시가 명시된 경우)일 때만 [정답]은 '해설참고'로 출력하고, 실제 답안은 [해설]에 작성해.",
+      "- 문제 유형이 애매하면 서술형으로 가정하지 말고 객관식/단답형 기준으로 정답을 출력해.",
       "- 이미지가 일부 흐리거나 누락되어도 '이미지가 제공되지 않았다'고 쓰지 말고, 판독 가능한 정보 기준으로 최선의 해설을 작성해.",
       "- 반드시 중고등학교 교육과정 내 용어/기호만 사용하고 대학 수준 용어/기호는 사용하지 마.",
       "- 영문 수학 용어 대신 한국어 용어를 사용해.",
