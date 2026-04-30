@@ -46,6 +46,122 @@ type GenerateRequestBody = {
 const FINAL_MODEL_CANDIDATES = ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"] as const;
 const TEST_MODEL_CANDIDATES = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.5-pro"] as const;
 
+function validateExplanationFormat(text: string) {
+  const normalized = text.trim();
+  const answerMatch = normalized.match(/\[정답\]\s*([^\n\r]*)/i);
+  const explanationMatch = normalized.match(/\[해설\]\s*([\s\S]+)/i);
+  const missing: string[] = [];
+
+  if (!answerMatch) missing.push("[정답]");
+  if (!explanationMatch) missing.push("[해설]");
+  if (answerMatch && !answerMatch[1]?.trim()) missing.push("[정답] 값");
+  if (explanationMatch && !explanationMatch[1]?.trim()) missing.push("[해설] 본문");
+
+  return { ok: missing.length === 0, missing };
+}
+
+function normalizeChoice(value: string) {
+  return value
+    .trim()
+    .replace("①", "1")
+    .replace("②", "2")
+    .replace("③", "3")
+    .replace("④", "4")
+    .replace("⑤", "5");
+}
+
+function validateExplanationConsistency(text: string) {
+  const issues: string[] = [];
+  const answerRegex = /\[정답\]\s*([^\n\r]*)/gi;
+  const answerMatches = [...text.matchAll(answerRegex)];
+  const answerTypes = new Set<"objective" | "subjective">();
+
+  answerMatches.forEach((match, idx) => {
+    const answerRaw = match[1]?.trim() ?? "";
+    const normalizedAnswer = normalizeChoice(answerRaw);
+    const answerChoice = normalizedAnswer.match(/^[1-5]$/)?.[0];
+    if (answerChoice) {
+      answerTypes.add("objective");
+    } else if (normalizedAnswer) {
+      answerTypes.add("subjective");
+    }
+
+    const currentStart = match.index ?? 0;
+    const nextStart = answerMatches[idx + 1]?.index ?? text.length;
+    const sectionText = text.slice(currentStart, nextStart);
+    const declaredChoices = [...sectionText.matchAll(/정답(?:은|:)?\s*([①②③④⑤1-5])/gi)].map(
+      (item) => normalizeChoice(item[1] ?? ""),
+    );
+
+    if (answerChoice && declaredChoices.length > 0) {
+      const hasConflict = declaredChoices.some((declared) => declared !== answerChoice);
+      if (hasConflict) {
+        issues.push(
+          `${idx + 1}번 문항의 [정답](${answerChoice})과 [해설] 내 정답 표기가 서로 다릅니다.`,
+        );
+      }
+    }
+  });
+
+  if (answerMatches.length > 1 && answerTypes.size > 1) {
+    issues.push(
+      "문항 간 [정답] 형식이 혼합되어 있습니다(객관식 번호/주관식 값). 가능한 한 형식을 일관되게 맞춰 주세요.",
+    );
+  }
+
+  return { ok: issues.length === 0, issues };
+}
+
+function validateCurriculumScope(text: string) {
+  const issues: string[] = [];
+  const bannedPatterns: Array<{ label: string; regex: RegExp }> = [
+    { label: "로피탈", regex: /로피탈|l['’]?\s*h[ôo]pital/i },
+    { label: "편미분", regex: /편미분|partial derivative|∂/i },
+    { label: "선형대수", regex: /선형대수|linear algebra|고유값|고유벡터|eigenvalue|eigenvector/i },
+    { label: "야코비안", regex: /야코비안|jacobian/i },
+    { label: "라그랑주 승수", regex: /라그랑주\s*승수|lagrange multiplier/i },
+    { label: "벡터미적분", regex: /curl|divergence|gradient theorem|스토크스 정리|가우스 발산정리/i },
+    { label: "적분기호 남용", regex: /∮|⨌|삼중적분|다중적분/i },
+  ];
+
+  for (const rule of bannedPatterns) {
+    if (rule.regex.test(text)) {
+      issues.push(`교육과정 외 표현 감지: ${rule.label}`);
+    }
+  }
+
+  return { ok: issues.length === 0, issues };
+}
+
+function buildRetryInstruction(
+  formatMissing: string[],
+  consistencyIssues: string[],
+  scopeIssues: string[],
+) {
+  const lines: string[] = [
+    "[재요청]",
+    "직전 응답은 형식/정합 기준을 만족하지 못했습니다.",
+  ];
+  if (formatMissing.length > 0) {
+    lines.push(`형식 누락 항목: ${formatMissing.join(", ")}`);
+    lines.push("반드시 [정답] 한 줄 + [해설] 본문 구조를 유지하세요.");
+  }
+  if (consistencyIssues.length > 0) {
+    lines.push(`정합 이슈: ${consistencyIssues.join(" / ")}`);
+    lines.push("문항별 [정답]과 [해설] 내부 정답 표기를 서로 일치시키세요.");
+  }
+  if (scopeIssues.length > 0) {
+    lines.push(`교육과정 이탈 이슈: ${scopeIssues.join(" / ")}`);
+    lines.push("중고등 교육과정 외 용어/기호(편미분, 선형대수, 로피탈 등)를 제거하세요.");
+  }
+  lines.push("반드시 아래 형식으로만 다시 작성하세요.");
+  lines.push("[정답] (한 줄)");
+  lines.push("[해설]");
+  lines.push("(해설 본문)");
+  lines.push("다른 제목/머리말/설명문을 추가하지 마세요.");
+  return lines.join("\n");
+}
+
 export async function POST(request: Request) {
   try {
     const apiKey = process.env.GEMINI_API_KEY;
@@ -172,7 +288,61 @@ export async function POST(request: Request) {
           failures.push(`${modelName}: 응답 비어 있음`);
           continue;
         }
-        return NextResponse.json({ result: generatedText, model: modelName }, { status: 200 });
+        const formatCheck = validateExplanationFormat(generatedText);
+        const consistencyCheck = validateExplanationConsistency(generatedText);
+        const scopeCheck = validateCurriculumScope(generatedText);
+        if (formatCheck.ok && consistencyCheck.ok && scopeCheck.ok) {
+          return NextResponse.json(
+            { result: generatedText, model: modelName, qualityWarnings: [] },
+            { status: 200 },
+          );
+        }
+
+        const qualityWarnings = [
+          ...formatCheck.missing.map((item) => `형식 누락: ${item}`),
+          ...consistencyCheck.issues,
+          ...scopeCheck.issues,
+        ];
+        const retryContents: Array<
+          { text: string } | { inlineData: { data: string; mimeType: string } }
+        > = [
+          ...contents,
+          {
+            text: buildRetryInstruction(
+              formatCheck.missing,
+              consistencyCheck.issues,
+              scopeCheck.issues,
+            ),
+          },
+        ];
+        const retryResult = await model.generateContent(retryContents);
+        const retryText = retryResult.response.text()?.trim();
+        if (!retryText) {
+          failures.push(`${modelName}: 형식 재시도 응답 비어 있음`);
+          continue;
+        }
+        const retryFormatCheck = validateExplanationFormat(retryText);
+        const retryConsistencyCheck = validateExplanationConsistency(retryText);
+        const retryScopeCheck = validateCurriculumScope(retryText);
+        if (!retryFormatCheck.ok || !retryConsistencyCheck.ok || !retryScopeCheck.ok) {
+          failures.push(
+            `${modelName}: 형식/정합 검증 실패(재시도 포함) - 누락: ${retryFormatCheck.missing.join(
+              ", ",
+            )} / 정합 이슈: ${retryConsistencyCheck.issues.join(" | ")} / 교육과정 이탈: ${retryScopeCheck.issues.join(
+              " | ",
+            )}`,
+          );
+          continue;
+        }
+        return NextResponse.json(
+          {
+            result: retryText,
+            model: modelName,
+            retriedForFormat: true,
+            qualityWarnings,
+          },
+          { status: 200 },
+        );
       } catch (error) {
         const message =
           error instanceof Error ? error.message : "알 수 없는 모델 호출 오류";

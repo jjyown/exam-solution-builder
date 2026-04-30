@@ -18,6 +18,13 @@
 ## 최근 의사결정 로그
 | 날짜 | 결정 | 이유 | 영향 범위 |
 |---|---|---|---|
+| 2026-04-30 | 문제 추출 비전 사전검증 API(`/api/precheck-extraction`)를 추가하고 생성 전 선차단 정책을 적용 | 크롭 크기 기준만으로 놓치던 누락(선택지/조건/식)을 모델 기반으로 추가 판별 | `src/app/api/precheck-extraction/route.ts`, `src/app/page.tsx` |
+| 2026-04-30 | 해설 생성 API 재시도 지시를 이슈 유형별(형식/정합/교육과정 이탈)로 분기하고 UI에 품질 경고 플래그를 노출 | 자동 보정 발생 사실과 원인을 운영자가 확인 가능하게 하여 품질 추적성 강화 | `src/app/api/generate-explanation/route.ts`, `src/app/page.tsx` |
+| 2026-04-30 | 교육과정 외 용어/기호(로피탈, 편미분, 선형대수 등) 감지 필터를 생성 검증에 추가하고, 감지 시 재생성 지시로 교정 | 대학수학 용어 유입으로 학생 눈높이 해설 품질이 흔들리는 문제를 자동 차단 | `src/app/api/generate-explanation/route.ts` |
+| 2026-04-30 | 생성 결과 검증에 정답-본문 모순/형식 혼합(객관식·주관식) 감지를 추가하고, 실패 시 재생성 지시에 포함 | 형식은 맞아도 내용 정합이 어긋나는 응답을 자동으로 1차 정리 | `src/app/api/generate-explanation/route.ts` |
+| 2026-04-30 | 생성 결과 포맷 검증(`[정답]`, `[해설]`) 실패 시 동일 모델로 1회 자동 재생성하도록 적용 | 형식 누락으로 파서/저장 단계 품질 저하되는 케이스 감소 | `src/app/api/generate-explanation/route.ts` |
+| 2026-04-30 | 해설 생성 전 문제 추출 사전검증(크롭 크기/비율/면적) 도입, 기준 미달 시 생성 차단 | 선택지/조건 누락 상태로 잘못 생성되는 케이스 선제 차단 | `src/app/page.tsx` |
+| 2026-04-30 | 작업 규칙을 `.cursor/rules/docs-workflow.mdc`로 고정(작업 전 docs 3종 확인, 작업 후 docs 기록 의무화) | 작업 누락/맥락 단절 방지, 연속 작업 안정성 확보 | `.cursor/rules/docs-workflow.mdc`, `docs/plan.md`, `docs/checklist.md` |
 | 2026-04-30 | Google Drive 저장 시 `media.body`를 `Readable.from(buffer)` 스트림으로 변경 | Vercel 런타임에서 `body.pipe is not a function` 500 오류 해결 | `src/lib/googleDrive.ts` |
 | 2026-04-30 | Drive 모드에서는 로컬 `작업 완료` 폴더 `mkdir`를 건너뛰도록 수정 | `/var/task/작업 완료` ENOENT 오류 해결 | `src/app/api/save-result/route.ts` |
 | 2026-04-30 | `/api/exams`, `/api/exams/file`, `/api/save-result` 에러 메시지 상세화 | 운영 중 원인 추적 속도 개선 | `src/app/api/exams/route.ts`, `src/app/api/exams/file/route.ts`, `src/app/api/save-result/route.ts` |

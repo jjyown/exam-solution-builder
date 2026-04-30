@@ -63,9 +63,7 @@ export async function POST(request: Request) {
       now.getMinutes(),
     ).padStart(2, "0")}${String(now.getSeconds()).padStart(2, "0")}`;
 
-    const baseName = safeName(
-      `${path.parse(examName).name}_문항${safeName(questionNo)}_${stamp}`,
-    );
+    const baseName = safeName(`${path.parse(examName).name}_해설_${stamp}`);
 
     const docxFileName = `${baseName}.docx`;
     const docxPath = path.join(OUTPUT_DIR, docxFileName);

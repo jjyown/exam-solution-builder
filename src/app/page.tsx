@@ -39,6 +39,19 @@ type BatchResult = {
   message: string;
 };
 
+type VisionPrecheckResponse = {
+  pass: boolean;
+  score: number;
+  missing?: string[];
+  reasons?: string[];
+  error?: string;
+};
+
+type ExtractionPrecheck = {
+  ok: boolean;
+  messages: string[];
+};
+
 type PageDraft = {
   dividerMarkers: DividerMarker[];
   verticalGuides: VerticalGuide[];
@@ -349,6 +362,41 @@ function getNextQuestionNo(current: string) {
   return String(parsed + 1);
 }
 
+function runExtractionPrecheck(
+  crop: PixelCrop,
+  imageWidth: number,
+  imageHeight: number,
+): ExtractionPrecheck {
+  const messages: string[] = [];
+  const minWidth = 220;
+  const minHeight = 120;
+  const minArea = 30000;
+  const minHeightRatio = 0.09;
+  const maxAspectRatio = 4.8;
+  const safeImageHeight = Math.max(1, imageHeight);
+
+  if (crop.width < minWidth) {
+    messages.push("문제 영역 가로가 너무 좁습니다.");
+  }
+  if (crop.height < minHeight) {
+    messages.push("문제 영역 세로가 너무 짧습니다.");
+  }
+  if (crop.width * crop.height < minArea) {
+    messages.push("문제/선택지/조건이 누락될 수 있는 작은 영역입니다.");
+  }
+  if (crop.height / safeImageHeight < minHeightRatio) {
+    messages.push("선택지 또는 조건 영역이 잘렸을 가능성이 높습니다.");
+  }
+  if (crop.width / Math.max(1, crop.height) > maxAspectRatio) {
+    messages.push("영역이 너무 가로로 길어 문항 하단 정보가 누락될 수 있습니다.");
+  }
+  if (crop.x < 0 || crop.y < 0 || crop.x + crop.width > imageWidth + 1 || crop.y + crop.height > imageHeight + 1) {
+    messages.push("선택 영역이 이미지 경계를 벗어났습니다.");
+  }
+
+  return { ok: messages.length === 0, messages };
+}
+
 export default function Home() {
   const resultRef = useRef<HTMLDivElement>(null);
   const imageRef = useRef<HTMLImageElement | null>(null);
@@ -383,6 +431,7 @@ export default function Home() {
   const [quickAnswer, setQuickAnswer] = useState("-");
   const [explanationBody, setExplanationBody] = useState(DEFAULT_BODY);
   const [rawResponse, setRawResponse] = useState("");
+  const [qualityWarnings, setQualityWarnings] = useState<string[]>([]);
   const [isLoadingExams, setIsLoadingExams] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
   const [isSavingPdf, setIsSavingPdf] = useState(false);
@@ -459,6 +508,14 @@ export default function Home() {
       ),
     [explanationBody, selectedMethodIndexes, representativeMethodIndex],
   );
+
+  const syncRenderImageSize = useCallback(() => {
+    if (!imageRef.current) return;
+    setRenderImageSize({
+      width: imageRef.current.clientWidth,
+      height: imageRef.current.clientHeight,
+    });
+  }, []);
 
   const getSegmentBounds = (segmentIndex: number) => {
     const boundaries = [0, ...sortedVerticalGuides.map((g) => g.xRatio), 1];
@@ -611,6 +668,28 @@ export default function Home() {
     return () => window.clearInterval(timer);
   }, [currentStep, loadExamFiles]);
 
+  useEffect(() => {
+    if (!imageRef.current) return;
+    const target = imageRef.current;
+    syncRenderImageSize();
+
+    let observer: ResizeObserver | null = null;
+    if (typeof ResizeObserver !== "undefined") {
+      observer = new ResizeObserver(() => {
+        syncRenderImageSize();
+      });
+      observer.observe(target);
+    }
+    const handleWindowResize = () => {
+      syncRenderImageSize();
+    };
+    window.addEventListener("resize", handleWindowResize);
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener("resize", handleWindowResize);
+    };
+  }, [sourceImage, syncRenderImageSize]);
+
   const loadExamImage = async (fileName: string) => {
     try {
       setIsLoadingSelectedFile(true);
@@ -673,12 +752,50 @@ export default function Home() {
       setIsGenerating(true);
       setErrorMessage("");
       setSuccessMessage("");
+      setQualityWarnings([]);
 
       const mimeType = sourceFile.type || "image/png";
       const selectedProblemCrop = pendingLineCrop ?? (completedCrop ? normalizeCrop(completedCrop) : null);
+      if (selectedProblemCrop && imageRef.current) {
+        const precheck = runExtractionPrecheck(
+          selectedProblemCrop,
+          imageRef.current.width,
+          imageRef.current.height,
+        );
+        if (!precheck.ok) {
+          setErrorMessage(
+            `생성을 중단했습니다. 문제 추출 품질이 낮습니다: ${precheck.messages.join(" / ")} 구분선을 조정하거나 영역을 다시 지정해 주세요.`,
+          );
+          return;
+        }
+      }
       const imageBase64 = selectedProblemCrop
         ? cropImageToBase64(imageRef.current, selectedProblemCrop, mimeType)
         : await toBase64(sourceFile);
+      const visionPrecheckRes = await fetch("/api/precheck-extraction", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          imageBase64,
+          imageMimeType: mimeType,
+          crop: selectedProblemCrop,
+        }),
+      });
+      const visionPrecheckData = (await visionPrecheckRes.json()) as VisionPrecheckResponse;
+      if (!visionPrecheckRes.ok) {
+        throw new Error(
+          visionPrecheckData.error || "문제 이미지 비전 사전검증 호출에 실패했습니다.",
+        );
+      }
+      if (!visionPrecheckData.pass) {
+        const reasons = [...(visionPrecheckData.reasons || []), ...(visionPrecheckData.missing || [])]
+          .filter(Boolean)
+          .join(" / ");
+        setErrorMessage(
+          `생성을 중단했습니다. 문제 추출 비전 사전검증 점수 ${visionPrecheckData.score}점(기준 70점 이상). ${reasons || "핵심 정보 누락 가능성이 높습니다."} 구분선/영역을 다시 조정해 주세요.`,
+        );
+        return;
+      }
       const liveDiagramImages = pendingDiagramBoxes.map((box) => ({
         imageBase64: cropImageToBase64(imageRef.current!, box.crop, box.mimeType || mimeType),
         mimeType: box.mimeType || mimeType,
@@ -711,9 +828,10 @@ export default function Home() {
         throw new Error((data.error || "해설 생성에 실패했습니다.") + detailText);
       }
 
-      const data = (await response.json()) as { result: string };
+      const data = (await response.json()) as { result: string; qualityWarnings?: string[] };
       const parsed = parseExplanation(data.result);
       setRawResponse(data.result);
+      setQualityWarnings(data.qualityWarnings ?? []);
       setQuickAnswer(parsed.quickAnswer);
       setExplanationBody(parsed.body);
       setSelectedMethodIndexes(
@@ -1262,10 +1380,69 @@ export default function Home() {
       setErrorMessage("");
       setSuccessMessage("");
       setBatchResults([]);
+      setQualityWarnings([]);
 
       const results: BatchResult[] = [];
+      const successfulExplanations: Array<{
+        questionNo: string;
+        quickAnswer: string;
+        body: string;
+      }> = [];
 
       for (const item of queuedProblems) {
+        const precheck = runExtractionPrecheck(
+          item.crop,
+          Math.max(item.crop.x + item.crop.width, renderImageSize.width || 0),
+          Math.max(item.crop.y + item.crop.height, renderImageSize.height || 0),
+        );
+        if (!precheck.ok) {
+          results.push({
+            questionNo: item.questionNo,
+            quickAnswer: "-",
+            status: "error",
+            message: `생성 중단(사전검증 실패): ${precheck.messages.join(" / ")}`,
+          });
+          continue;
+        }
+
+        const visionPrecheckRes = await fetch("/api/precheck-extraction", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            imageBase64: item.imageBase64,
+            imageMimeType: item.imageMimeType,
+            crop: item.crop,
+          }),
+        });
+        const visionPrecheckData = (await visionPrecheckRes.json()) as VisionPrecheckResponse;
+        if (!visionPrecheckRes.ok) {
+          results.push({
+            questionNo: item.questionNo,
+            quickAnswer: "-",
+            status: "error",
+            message:
+              visionPrecheckData.error || "생성 중단(비전 사전검증 API 호출 실패)",
+          });
+          continue;
+        }
+        if (!visionPrecheckData.pass) {
+          const reasons = [
+            ...(visionPrecheckData.reasons || []),
+            ...(visionPrecheckData.missing || []),
+          ]
+            .filter(Boolean)
+            .join(" / ");
+          results.push({
+            questionNo: item.questionNo,
+            quickAnswer: "-",
+            status: "error",
+            message: `생성 중단(비전 사전검증 ${visionPrecheckData.score}점): ${
+              reasons || "핵심 정보 누락 가능성"
+            }`,
+          });
+          continue;
+        }
+
         setQuestionNo(item.questionNo);
         const response = await fetch("/api/generate-explanation", {
           method: "POST",
@@ -1300,10 +1477,11 @@ export default function Home() {
           continue;
         }
 
-        const data = (await response.json()) as { result: string };
+        const data = (await response.json()) as { result: string; qualityWarnings?: string[] };
         const rawResult = data.result;
         const parsed = parseExplanation(rawResult);
         setRawResponse(rawResult);
+        setQualityWarnings(data.qualityWarnings ?? []);
         setQuickAnswer(parsed.quickAnswer);
         setExplanationBody(parsed.body);
         setSelectedMethodIndexes(
@@ -1316,33 +1494,65 @@ export default function Home() {
           questionNo: item.questionNo,
           quickAnswer: parsed.quickAnswer,
           status: "success",
-          message: "생성 완료",
+          message:
+            data.qualityWarnings && data.qualityWarnings.length > 0
+              ? `생성 완료(경고 ${data.qualityWarnings.length}건)`
+              : "생성 완료",
         });
+        successfulExplanations.push({
+          questionNo: item.questionNo,
+          quickAnswer: parsed.quickAnswer,
+          body: parsed.body,
+        });
+      }
 
-        // 자동으로 TXT를 작업 완료 폴더에 저장합니다. (PDF는 자동 생성 시 비용/메모리 부담이 커서 제외)
+      if (successfulExplanations.length > 0) {
         try {
+          const combinedBody = successfulExplanations
+            .map(
+              (entry) =>
+                `[문항 ${entry.questionNo}]\n[정답] ${entry.quickAnswer}\n${entry.body}`,
+            )
+            .join("\n\n");
           const formData = new FormData();
           formData.append("examName", selectedExam || "직접업로드");
-          formData.append("questionNo", item.questionNo || "1");
-          formData.append("quickAnswer", parsed.quickAnswer);
-          formData.append("explanationBody", parsed.body);
-          formData.append("rawResponse", rawResult);
+          formData.append(
+            "questionNo",
+            `통합_${successfulExplanations[0]?.questionNo || "1"}-${
+              successfulExplanations[successfulExplanations.length - 1]?.questionNo || "1"
+            }`,
+          );
+          formData.append("quickAnswer", "문항별 정답은 해설 본문의 [정답]을 확인하세요.");
+          formData.append("explanationBody", combinedBody);
+          formData.append(
+            "rawResponse",
+            successfulExplanations
+              .map((entry) => `[문항 ${entry.questionNo}]\n${entry.body}`)
+              .join("\n\n"),
+          );
           const saveRes = await fetch("/api/save-result", {
             method: "POST",
             body: formData,
           });
           if (!saveRes.ok) {
             const data = (await saveRes.json()) as { error?: string };
-            throw new Error(data.error || "작업 완료 TXT 저장 실패");
+            throw new Error(data.error || "통합 DOCX 저장 실패");
           }
+          const savedMessage = (await saveRes.json()) as { message?: string };
+          setSuccessMessage(savedMessage.message || "통합 DOCX 저장을 완료했습니다.");
         } catch (e) {
-          // TXT 저장이 실패해도 전체 생성은 계속 진행
-          console.warn("TXT 저장 실패:", e);
+          const message =
+            e instanceof Error
+              ? e.message
+              : "자동 생성은 성공했지만 통합 DOCX 저장에 실패했습니다.";
+          setErrorMessage(message);
         }
       }
 
       setBatchResults(results);
-      setSuccessMessage("영역 박스 순차 자동 해설 생성을 완료했습니다.");
+      if (successfulExplanations.length === 0) {
+        setSuccessMessage("영역 박스 순차 자동 해설 생성을 완료했습니다.");
+      }
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "자동 해설 생성 중 오류가 발생했습니다.";
@@ -1465,6 +1675,7 @@ export default function Home() {
       setSelectedMethodIndexes([]);
       setRepresentativeMethodIndex(null);
       setRawResponse("");
+      setQualityWarnings([]);
       setSuccessMessage(
         `${data.message || "작업 완료 폴더에 저장했습니다."} 다음 문항 번호는 ${nextNo}번입니다.`,
       );
@@ -1657,8 +1868,8 @@ export default function Home() {
                         className="max-w-full"
                         onLoad={(event) => {
                           setRenderImageSize({
-                            width: event.currentTarget.width,
-                            height: event.currentTarget.height,
+                            width: event.currentTarget.clientWidth,
+                            height: event.currentTarget.clientHeight,
                           });
                           setCrop(undefined);
                           setCompletedCrop(undefined);
@@ -2263,6 +2474,17 @@ export default function Home() {
                       {result.questionNo}번 - {result.status === "success" ? "성공" : "실패"} / 빠른정답:{" "}
                       {result.quickAnswer} / {result.message}
                     </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {qualityWarnings.length > 0 && (
+              <div className="rounded-md border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900">
+                <p className="font-semibold">품질 경고(자동 보정 이력)</p>
+                <ul className="mt-1 list-disc space-y-1 pl-4">
+                  {qualityWarnings.map((item, idx) => (
+                    <li key={`quality-warning-${idx}`}>{item}</li>
                   ))}
                 </ul>
               </div>
