@@ -13,6 +13,9 @@ const ALLOWED_EXTENSIONS = new Set([
   ".webp",
   ".gif",
   ".pdf",
+  ".hml",
+  ".hwp",
+  ".hwpx",
 ]);
 
 function getMimeType(ext: string) {
@@ -28,6 +31,12 @@ function getMimeType(ext: string) {
       return "image/gif";
     case ".pdf":
       return "application/pdf";
+    case ".hml":
+      return "text/xml; charset=utf-8";
+    case ".hwp":
+      return "application/x-hwp";
+    case ".hwpx":
+      return "application/haansofthwpx";
     default:
       return "application/octet-stream";
   }

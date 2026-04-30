@@ -35,24 +35,43 @@ function stripTags(value: string) {
 }
 
 function extractHmlPlainText(hml: string) {
-  const rawChars = [...hml.matchAll(/<CHAR[^>]*>([\s\S]*?)<\/CHAR>/gi)].map((item) =>
+  const normalized = hml
+    .replace(/<LINEBREAK\s*\/>/gi, "\n")
+    .replace(/<\/P>/gi, "\n")
+    .replace(/<\/(TABLE|ROW|CELL|SECTION)>/gi, "\n")
+    .replace(/<TAB\s*\/>/gi, " ");
+
+  const rawChars = [...normalized.matchAll(/<CHAR[^>]*>([\s\S]*?)<\/CHAR>/gi)].map((item) =>
     stripTags(item[1] ?? ""),
   );
-  return rawChars.join(" ").replace(/\s+/g, " ").trim();
+  const rawScripts = [...normalized.matchAll(/<SCRIPT[^>]*>([\s\S]*?)<\/SCRIPT>/gi)].map((item) =>
+    stripTags(item[1] ?? ""),
+  );
+
+  return [...rawChars, ...rawScripts]
+    .join("\n")
+    .replace(/[ \t]+/g, " ")
+    .replace(/\n{2,}/g, "\n")
+    .trim();
 }
 
 function splitQuestions(plainText: string): QuestionItem[] {
   const normalized = plainText
-    .replace(/([1-9][0-9]?)\)\s*/g, "\n$1) ")
-    .replace(/\s+/g, " ")
+    .replace(/\r/g, "\n")
+    .replace(/([1-9][0-9]?)\s*(?:\)|\.|번)\s*/g, "\n$1) ")
+    .replace(/\n{2,}/g, "\n")
     .trim();
-  const matches = [...normalized.matchAll(/(?:^|\n)([1-9][0-9]?)\)\s*([\s\S]*?)(?=(?:\n[1-9][0-9]?\)\s)|$)/g)];
+  const matches = [
+    ...normalized.matchAll(
+      /(?:^|\n)\s*([1-9][0-9]?)\)\s*([\s\S]*?)(?=(?:\n\s*[1-9][0-9]?\)\s)|$)/g,
+    ),
+  ];
   return matches
     .map((item) => ({
       no: Number.parseInt(item[1] ?? "0", 10),
-      text: (item[2] ?? "").trim(),
+      text: (item[2] ?? "").replace(/\s+/g, " ").trim(),
     }))
-    .filter((item) => item.no > 0 && item.text.length > 5);
+    .filter((item) => item.no > 0 && item.text.length > 8);
 }
 
 function validateExplanationFormat(text: string) {
@@ -194,8 +213,13 @@ export async function POST(request: Request) {
     const plain = extractHmlPlainText(text);
     const questions = splitQuestions(plain).slice(0, 30);
     if (questions.length === 0) {
+      const hint = plain.slice(0, 180).replace(/\n/g, " ");
       return NextResponse.json(
-        { error: "문항 번호 패턴(1), 2) ...)을 찾지 못했습니다. 다른 원본 파일을 확인해 주세요." },
+        {
+          error:
+            "문항 번호 패턴(1), 1., 1번)을 찾지 못했습니다. 원본 형식 확인이 필요합니다.",
+          preview: hint,
+        },
         { status: 400 },
       );
     }

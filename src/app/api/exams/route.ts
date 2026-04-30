@@ -13,6 +13,9 @@ const ALLOWED_EXTENSIONS = new Set<string>([
   ".webp",
   ".gif",
   ".pdf",
+  ".hml",
+  ".hwp",
+  ".hwpx",
 ]);
 
 export async function GET() {

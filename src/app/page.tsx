@@ -690,6 +690,13 @@ export default function Home() {
 
   const loadExamImage = async (fileName: string) => {
     try {
+      const lowerName = fileName.toLowerCase();
+      if (lowerName.endsWith(".hml") || lowerName.endsWith(".hwp") || lowerName.endsWith(".hwpx")) {
+        setErrorMessage(
+          "한글 원본 파일은 이미지 미리보기를 지원하지 않습니다. 아래 '.hml 원본 업로드'에서 바로 해설 추가 생성을 사용해 주세요.",
+        );
+        return;
+      }
       setIsLoadingSelectedFile(true);
       setErrorMessage("");
       setSuccessMessage("");
