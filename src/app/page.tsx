@@ -432,6 +432,8 @@ export default function Home() {
   const [explanationBody, setExplanationBody] = useState(DEFAULT_BODY);
   const [rawResponse, setRawResponse] = useState("");
   const [qualityWarnings, setQualityWarnings] = useState<string[]>([]);
+  const [hmlFile, setHmlFile] = useState<File | null>(null);
+  const [isProcessingHml, setIsProcessingHml] = useState(false);
   const [isLoadingExams, setIsLoadingExams] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
   const [isSavingPdf, setIsSavingPdf] = useState(false);
@@ -460,6 +462,7 @@ export default function Home() {
   const [successMessage, setSuccessMessage] = useState("");
 
   const hasImage = Boolean(sourceImage && sourceFile);
+  const hasGeneratedResult = rawResponse.trim().length > 0;
   const canGenerate = hasImage && !isGenerating && !isLoadingExams;
   const sortedVerticalGuides = useMemo(
     () => [...verticalGuides].sort((a, b) => a.xRatio - b.xRatio),
@@ -660,12 +663,7 @@ export default function Home() {
 
   useEffect(() => {
     if (currentStep !== 1) return;
-    const refresh = () => {
-      void loadExamFiles();
-    };
-    refresh();
-    const timer = window.setInterval(refresh, 5000);
-    return () => window.clearInterval(timer);
+    void loadExamFiles();
   }, [currentStep, loadExamFiles]);
 
   useEffect(() => {
@@ -737,6 +735,45 @@ export default function Home() {
       .finally(() => {
         setIsLoadingSelectedFile(false);
       });
+  };
+
+  const handleHmlAppendSolution = async () => {
+    if (!hmlFile) {
+      setErrorMessage("먼저 .hml 원본 파일을 선택해 주세요.");
+      return;
+    }
+    try {
+      setIsProcessingHml(true);
+      setErrorMessage("");
+      setSuccessMessage("");
+      const formData = new FormData();
+      formData.append("hmlFile", hmlFile);
+      const response = await fetch("/api/hml/append-solution", {
+        method: "POST",
+        body: formData,
+      });
+      const data = (await response.json()) as {
+        error?: string;
+        message?: string;
+        fileName?: string;
+        questionCount?: number;
+      };
+      if (!response.ok) {
+        throw new Error(data.error || "원본 기반 해설 생성에 실패했습니다.");
+      }
+      setSuccessMessage(
+        `${data.message || "원본 기반 해설 생성 완료"} (${data.questionCount || 0}문항) ${
+          data.fileName ? `- ${data.fileName}` : ""
+        }`,
+      );
+      setHmlFile(null);
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "원본 기반 해설 처리 중 오류가 발생했습니다.";
+      setErrorMessage(message);
+    } finally {
+      setIsProcessingHml(false);
+    }
   };
 
   const handleGenerateExplanation = async () => {
@@ -1696,7 +1733,7 @@ export default function Home() {
             하이로드 수학 해설지 제작기
           </h1>
           <p className="mt-1 text-sm text-slate-600">
-            단계별 진행: 시험지 선택 → 영역 지정 → 해설 제작
+            필요한 단계만 보이도록 단순화된 제작 흐름
           </p>
 
           <div className="mt-5 space-y-4">
@@ -1736,6 +1773,15 @@ export default function Home() {
               >
                 3) 해설 제작
               </button>
+            </div>
+
+            <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700">
+              {currentStep === 1 &&
+                "현재 단계: 시험지 선택. 목록에서 파일을 선택하거나 직접 업로드하세요."}
+              {currentStep === 2 &&
+                "현재 단계: 영역 지정. 구분선을 배치한 뒤 현재 페이지 작업 저장을 누르세요."}
+              {currentStep === 3 &&
+                "현재 단계: 해설 제작. 해설 생성 후 우측에서 저장 버튼이 활성화됩니다."}
             </div>
 
             {currentStep === 1 && (
@@ -1793,6 +1839,29 @@ export default function Home() {
                 onChange={handleImageUpload}
                 className="block w-full rounded-md border border-slate-300 p-2 text-sm"
               />
+            </div>
+
+            <div className="rounded-md border border-violet-200 bg-violet-50 p-3">
+              <p className="text-sm font-semibold text-violet-900">
+                (신규) 원본 HML 기반 해설 붙이기
+              </p>
+              <p className="mt-1 text-xs text-violet-800">
+                .hml 원본을 업로드하면 문항을 추출해 해설을 생성하고, 원본 뒤에 해설을 붙인 DOCX를 저장합니다.
+              </p>
+              <input
+                type="file"
+                accept=".hml,text/xml,application/xml"
+                onChange={(event) => setHmlFile(event.target.files?.[0] || null)}
+                className="mt-2 block w-full rounded-md border border-violet-300 bg-white p-2 text-sm"
+              />
+              <button
+                type="button"
+                onClick={handleHmlAppendSolution}
+                disabled={!hmlFile || isProcessingHml}
+                className="mt-2 w-full rounded-md bg-violet-600 px-3 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:bg-slate-300"
+              >
+                {isProcessingHml ? "원본 기반 해설 생성 중..." : "원본(HML) 뒤에 해설 추가 생성"}
+              </button>
             </div>
               </>
             )}
@@ -2161,23 +2230,11 @@ export default function Home() {
                     구분선을 먼저 추가해 주세요. 마지막 문제는 마지막 구분선 아래 영역으로 자동 처리됩니다.
                   </p>
                 )}
-                <p className="mt-1 text-xs text-slate-500">
-                  현재 구분선 수: {dividerMarkers.length}개
-                </p>
-                <p className="mt-1 text-xs text-indigo-700">
-                  현재 페이지 구분선 번호:{" "}
-                  {currentPageDividerRange
-                    ? `${currentPageDividerRange.start} ~ ${currentPageDividerRange.end}`
-                    : `없음 (다음 시작 번호: ${nextDividerLabelNo})`}
-                </p>
-                <p className="mt-1 text-xs text-slate-500">
-                  현재 세로선 수: {verticalGuides.length}개
-                </p>
-                <p className="mt-1 text-xs text-blue-700">
-                  페이지 저장 상태: {isCurrentPageExcluded ? "제외됨" : isCurrentPageSaved ? "저장됨" : "미저장"} /
-                  필수 {completedRequiredPageCount}/{requiredPageNumbers.length} (제외{" "}
-                  {excludedPageNumbers.length})
-                </p>
+                <div className="mt-1 rounded-md bg-slate-50 px-2 py-2 text-xs text-slate-600">
+                  구분선 {dividerMarkers.length}개 / 세로선 {verticalGuides.length}개 / 저장상태{" "}
+                  {isCurrentPageExcluded ? "제외됨" : isCurrentPageSaved ? "저장됨" : "미저장"} / 필수{" "}
+                  {completedRequiredPageCount}/{requiredPageNumbers.length}
+                </div>
                 {pendingDiagramBoxes.length > 0 && (
                   <div className="mt-2 rounded-md border border-slate-200 p-2">
                     <p className="text-xs font-semibold text-slate-700">
@@ -2231,101 +2288,8 @@ export default function Home() {
 
             {currentStep >= 3 && (
               <>
-            <div>
-              <label className="mb-2 block text-sm font-semibold text-slate-800">
-                4) 문제 번호 (자동)
-              </label>
-              <input
-                value={questionNo}
-                readOnly
-                placeholder="구분선 2개 이상 지정 시 자동 설정"
-                className="w-full rounded-md border border-slate-300 bg-slate-50 p-2 text-sm"
-              />
-            </div>
-
-            <div className="rounded-md border border-slate-200 p-3">
-              <label className="flex cursor-pointer items-center gap-2 text-sm font-semibold text-slate-800">
-                <input
-                  type="checkbox"
-                  checked={useTextInput}
-                  onChange={(event) => setUseTextInput(event.target.checked)}
-                />
-                문제 텍스트 직접 입력 사용(선택)
-              </label>
-              {useTextInput && (
-                <textarea
-                  value={questionText}
-                  onChange={(event) => setQuestionText(event.target.value)}
-                  placeholder="선택 사항: 텍스트를 넣으면 해설 정확도에 도움됩니다."
-                  className="mt-2 min-h-[130px] w-full rounded-md border border-slate-300 p-3 text-sm leading-6"
-                />
-              )}
-            </div>
-
-            <div className="rounded-md border border-slate-200 p-3 text-sm">
-              <p className="font-semibold text-slate-800">해설 옵션</p>
-              <div className="mt-2 rounded-md border border-slate-200 bg-slate-50 p-2">
-                <p className="text-xs font-semibold text-slate-700">생성 모드</p>
-                <label className="mt-1 flex items-center gap-2 text-xs">
-                  <input
-                    type="radio"
-                    name="generationMode"
-                    checked={generationMode === "test"}
-                    onChange={() => setGenerationMode("test")}
-                  />
-                  테스트 모드(Flash 우선, 비용 절약)
-                </label>
-                <label className="mt-1 flex items-center gap-2 text-xs">
-                  <input
-                    type="radio"
-                    name="generationMode"
-                    checked={generationMode === "final"}
-                    onChange={() => setGenerationMode("final")}
-                  />
-                  최종 모드(Pro 우선, 품질 우선)
-                </label>
-              </div>
-              <label className="mt-2 flex items-center gap-2">
-                <input
-                  type="checkbox"
-                  checked={includeDiagramExplanation}
-                  onChange={(event) =>
-                    setIncludeDiagramExplanation(event.target.checked)
-                  }
-                />
-                그림/도형/그래프 해설 포함
-              </label>
-              <label className="mt-2 flex items-center gap-2">
-                <input
-                  type="checkbox"
-                  checked={showAllMethods}
-                  onChange={(event) => setShowAllMethods(event.target.checked)}
-                />
-                풀이가 여러 개면 모두 제시
-              </label>
-              <div className="mt-2">
-                <p className="text-xs font-semibold text-slate-700">
-                  여러 해설 관점 처리
-                </p>
-                <label className="mt-1 flex items-center gap-2 text-xs">
-                  <input
-                    type="radio"
-                    name="explanationSelectionMode"
-                    checked={explanationSelectionMode === "all"}
-                    onChange={() => setExplanationSelectionMode("all")}
-                  />
-                  괜찮은 해설이 여러 개면 모두 수록
-                </label>
-                <label className="mt-1 flex items-center gap-2 text-xs">
-                  <input
-                    type="radio"
-                    name="explanationSelectionMode"
-                    checked={explanationSelectionMode === "core"}
-                    onChange={() => setExplanationSelectionMode("core")}
-                  />
-                  핵심 해설만 엄선해서 수록
-                </label>
-              </div>
+            <div className="rounded-md border border-slate-200 bg-slate-50 p-3">
+              <p className="text-sm font-semibold text-slate-800">현재 문항: {questionNo || "-"}</p>
             </div>
 
             {methodBlocks.methods.length > 0 && (
@@ -2401,44 +2365,100 @@ export default function Home() {
               {isGenerating ? "해설 생성 중..." : "해설 생성 (한 문제)"}
             </button>
 
-            <div className="rounded-md border border-slate-200 p-3">
-              <p className="text-sm font-semibold text-slate-800">
-                자동 해설 대기열 ({queuedProblems.length})
-              </p>
-              {queuedProblems.length === 0 ? (
-                <p className="mt-2 text-xs text-slate-500">
-                  영역 박스를 추가하면 여기서 순서대로 자동 해설 생성할 수 있습니다.
-                </p>
-              ) : (
-                <ul className="mt-2 space-y-1 text-xs text-slate-700">
-                  {queuedProblems.map((item, index) => (
-                    <li key={item.id} className="flex items-center justify-between rounded bg-slate-50 px-2 py-1">
-                      <span>
-                        {index + 1}. {item.questionNo}번 ({item.pageLabel})
-                        {item.diagramCrops && item.diagramCrops.length > 0
-                          ? ` + 그림박스 ${item.diagramCrops.length}`
-                          : ""}
-                      </span>
-                      <button
-                        onClick={() => removeQueuedProblem(item.id)}
-                        className="rounded border border-slate-300 px-2 py-0.5 text-[11px]"
-                      >
-                        삭제
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              )}
-              <button
-                onClick={runBatchGeneration}
-                disabled={queuedProblems.length === 0 || isBatchGenerating}
-                className="mt-3 w-full rounded-md bg-violet-600 px-4 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:bg-slate-300"
-              >
-                {isBatchGenerating
-                  ? "영역 순차 자동 해설 생성 중..."
-                  : "영역 박스 순서대로 자동 해설 생성"}
-              </button>
-            </div>
+            <details className="rounded-md border border-slate-200 p-3">
+              <summary className="cursor-pointer text-sm font-semibold text-slate-800">
+                고급 설정 (텍스트 입력/자동생성/상세 옵션)
+              </summary>
+              <div className="mt-3 space-y-3">
+                <div className="rounded-md border border-slate-200 p-3">
+                  <label className="flex cursor-pointer items-center gap-2 text-sm font-semibold text-slate-800">
+                    <input
+                      type="checkbox"
+                      checked={useTextInput}
+                      onChange={(event) => setUseTextInput(event.target.checked)}
+                    />
+                    문제 텍스트 직접 입력
+                  </label>
+                  {useTextInput && (
+                    <textarea
+                      value={questionText}
+                      onChange={(event) => setQuestionText(event.target.value)}
+                      placeholder="선택 사항: 텍스트를 넣으면 해설 정확도에 도움됩니다."
+                      className="mt-2 min-h-[130px] w-full rounded-md border border-slate-300 p-3 text-sm leading-6"
+                    />
+                  )}
+                </div>
+
+                <div className="rounded-md border border-slate-200 p-3 text-sm">
+                  <p className="font-semibold text-slate-800">해설 옵션</p>
+                  <div className="mt-2 rounded-md border border-slate-200 bg-slate-50 p-2">
+                    <p className="text-xs font-semibold text-slate-700">생성 모드</p>
+                    <label className="mt-1 flex items-center gap-2 text-xs">
+                      <input
+                        type="radio"
+                        name="generationMode"
+                        checked={generationMode === "test"}
+                        onChange={() => setGenerationMode("test")}
+                      />
+                      테스트 모드(속도/비용 우선)
+                    </label>
+                    <label className="mt-1 flex items-center gap-2 text-xs">
+                      <input
+                        type="radio"
+                        name="generationMode"
+                        checked={generationMode === "final"}
+                        onChange={() => setGenerationMode("final")}
+                      />
+                      최종 모드(품질 우선)
+                    </label>
+                  </div>
+                  <label className="mt-2 flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={includeDiagramExplanation}
+                      onChange={(event) => setIncludeDiagramExplanation(event.target.checked)}
+                    />
+                    그림/도형 해설 포함
+                  </label>
+                </div>
+
+                <div className="rounded-md border border-slate-200 p-3">
+                  <p className="text-sm font-semibold text-slate-800">
+                    자동 해설 대기열 ({queuedProblems.length})
+                  </p>
+                  {queuedProblems.length === 0 ? (
+                    <p className="mt-2 text-xs text-slate-500">
+                      영역 박스를 저장하면 자동 생성에 추가됩니다.
+                    </p>
+                  ) : (
+                    <ul className="mt-2 space-y-1 text-xs text-slate-700">
+                      {queuedProblems.map((item, index) => (
+                        <li key={item.id} className="flex items-center justify-between rounded bg-slate-50 px-2 py-1">
+                          <span>
+                            {index + 1}. {item.questionNo}번 ({item.pageLabel})
+                          </span>
+                          <button
+                            onClick={() => removeQueuedProblem(item.id)}
+                            className="rounded border border-slate-300 px-2 py-0.5 text-[11px]"
+                          >
+                            삭제
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  <button
+                    onClick={runBatchGeneration}
+                    disabled={queuedProblems.length === 0 || isBatchGenerating}
+                    className="mt-3 w-full rounded-md bg-violet-600 px-4 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:bg-slate-300"
+                  >
+                    {isBatchGenerating
+                      ? "영역 순차 자동 해설 생성 중..."
+                      : "영역 박스 순서대로 자동 해설 생성"}
+                  </button>
+                </div>
+              </div>
+            </details>
               </>
             )}
 
@@ -2452,17 +2472,6 @@ export default function Home() {
               <p className="rounded-md bg-emerald-50 p-3 text-sm text-emerald-700">
                 {successMessage}
               </p>
-            )}
-
-            {rawResponse && (
-              <details className="rounded-md border border-slate-200 p-3 text-sm">
-                <summary className="cursor-pointer font-semibold text-slate-700">
-                  AI 원문 보기
-                </summary>
-                <pre className="mt-3 whitespace-pre-wrap break-words text-xs text-slate-600">
-                  {rawResponse}
-                </pre>
-              </details>
             )}
 
             {batchResults.length > 0 && (
@@ -2501,46 +2510,63 @@ export default function Home() {
               </p>
             </div>
           ) : (
-          <div ref={resultRef} className="mx-auto max-w-[794px] bg-white p-6 md:p-10">
-            <header className="mb-6 border-b border-slate-300 pb-4">
-              <h2 className="text-center text-2xl font-bold text-slate-900">
-                하이로드 수학 모의고사 해설
-              </h2>
-              <p className="mt-2 text-center text-sm text-slate-500">
-                시험지: {selectedExam || "선택 안됨"} | 문항: {questionNo || "-"}
-              </p>
-            </header>
+            <>
+              {!hasGeneratedResult && (
+                <div className="rounded-md border border-amber-300 bg-amber-50 p-5 text-center text-amber-900">
+                  <p className="text-sm font-semibold">아직 해설이 생성되지 않았습니다.</p>
+                  <p className="mt-1 text-xs">
+                    좌측에서 `해설 생성 (한 문제)` 또는 `영역 박스 순서대로 자동 해설 생성`을 먼저 실행해 주세요.
+                  </p>
+                </div>
+              )}
 
-            <div className="mb-6 rounded-md border-2 border-blue-400 bg-blue-50 p-4">
-              <p className="text-sm font-semibold text-blue-900">[빠른 정답 체크]</p>
-              <p className="mt-2 text-2xl font-bold tracking-wide text-blue-950">
-                {quickAnswer}
-              </p>
-            </div>
+              {hasGeneratedResult && (
+                <div ref={resultRef} className="mx-auto max-w-[794px] bg-white p-6 md:p-10">
+                  <header className="mb-6 border-b border-slate-300 pb-4">
+                    <h2 className="text-center text-2xl font-bold text-slate-900">
+                      하이로드 수학 모의고사 해설
+                    </h2>
+                    <p className="mt-2 text-center text-sm text-slate-500">
+                      시험지: {selectedExam || "선택 안됨"} | 문항: {questionNo || "-"}
+                    </p>
+                  </header>
 
-            <article className="newspaper-columns text-[15px] leading-7 text-slate-800">
-              {renderMethodBlocks(selectedExplanationBody)}
-            </article>
-          </div>
+                  <div className="mb-6 rounded-md border-2 border-blue-400 bg-blue-50 p-4">
+                    <p className="text-sm font-semibold text-blue-900">[빠른 정답 체크]</p>
+                    <p className="mt-2 text-2xl font-bold tracking-wide text-blue-950">
+                      {quickAnswer}
+                    </p>
+                  </div>
+
+                  <article className="newspaper-columns text-[15px] leading-7 text-slate-800">
+                    {renderMethodBlocks(selectedExplanationBody)}
+                  </article>
+                </div>
+              )}
+            </>
           )}
 
-          <button
-            onClick={handleSavePdf}
-            disabled={isSavingPdf || currentStep !== 3}
-            className="mt-4 w-full rounded-md bg-emerald-600 px-4 py-3 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:bg-slate-300"
-          >
-            {isSavingPdf ? "PDF 생성 중..." : "PDF로 저장하기"}
-          </button>
+          {currentStep === 3 && hasGeneratedResult && (
+            <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2">
+              <button
+                onClick={handleSavePdf}
+                disabled={isSavingPdf}
+                className="w-full rounded-md bg-emerald-600 px-4 py-3 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:bg-slate-300"
+              >
+                {isSavingPdf ? "PDF 생성 중..." : "PDF로 저장하기"}
+              </button>
 
-          <button
-            onClick={handleSaveToCompletedFolder}
-            disabled={isSavingToFolder || currentStep !== 3}
-            className="mt-3 w-full rounded-md bg-indigo-600 px-4 py-3 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:bg-slate-300"
-          >
-            {isSavingToFolder
-              ? "작업 완료 폴더 저장 중..."
-              : "작업 완료 폴더로 저장"}
-          </button>
+              <button
+                onClick={handleSaveToCompletedFolder}
+                disabled={isSavingToFolder}
+                className="w-full rounded-md bg-indigo-600 px-4 py-3 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:bg-slate-300"
+              >
+                {isSavingToFolder
+                  ? "작업 완료 폴더 저장 중..."
+                  : "작업 완료 폴더로 저장"}
+              </button>
+            </div>
+          )}
         </section>
       </div>
     </main>

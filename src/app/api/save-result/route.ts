@@ -9,6 +9,7 @@ import {
   TextRun,
   AlignmentType,
   HeadingLevel,
+  TabStopType,
 } from "docx";
 
 const OUTPUT_DIR = path.join(process.cwd(), "작업 완료");
@@ -17,33 +18,130 @@ function safeName(value: string) {
   return value.replace(/[<>:"/\\|?*\u0000-\u001F]/g, "_").trim();
 }
 
-function buildExplanationParagraphs(explanationBody: string) {
-  const lines = explanationBody
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0);
+function simplifyMathText(value: string) {
+  return value
+    .replace(/\$\$?/g, "")
+    .replace(/\\left|\\right/g, "")
+    .replace(/\\times|\\cdot/g, "×")
+    .replace(/\\div/g, "÷")
+    .replace(/\\pi/g, "π")
+    .replace(/\\sqrt\{([^}]+)\}/g, "√$1")
+    .replace(/\\frac\{([^}]+)\}\{([^}]+)\}/g, "$1/$2")
+    .replace(/\\geq|\\ge/g, "≥")
+    .replace(/\\leq|\\le/g, "≤")
+    .replace(/\\neq/g, "≠")
+    .replace(/\\pm/g, "±")
+    .replace(/\\sin/g, "sin")
+    .replace(/\\cos/g, "cos")
+    .replace(/\\tan/g, "tan")
+    .replace(/\\log/g, "log")
+    .replace(/\\ln/g, "ln")
+    .replace(/\\alpha/g, "α")
+    .replace(/\\beta/g, "β")
+    .replace(/\\gamma/g, "γ")
+    .replace(/\\theta/g, "θ")
+    .replace(/\\,/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
 
+type ExplanationBlock = {
+  questionLabel: string;
+  answer: string;
+  explanationLines: string[];
+};
+
+function parseExplanationBlocks(explanationBody: string, fallbackQuickAnswer: string) {
+  const normalized = simplifyMathText(explanationBody);
+  const chunks = normalized
+    .split(/\[문항\s*\d+\]/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+  const hasLabeledQuestions = /\[문항\s*\d+\]/.test(normalized);
+
+  const blocks: ExplanationBlock[] = [];
+
+  if (hasLabeledQuestions && chunks.length > 0) {
+    chunks.forEach((chunk, idx) => {
+      const answerMatch = chunk.match(/\[정답\]\s*([^\n\r]*)/i);
+      const answer = answerMatch?.[1]?.trim() || fallbackQuickAnswer || "-";
+      const explanationText = chunk
+        .replace(/\[정답\]\s*[^\n\r]*/i, "")
+        .replace(/\[해설\]/gi, "")
+        .trim();
+      const explanationLines = explanationText
+        .split("\n")
+        .map((line) => line.trim())
+        .filter(Boolean);
+      blocks.push({
+        questionLabel: String(idx + 1),
+        answer,
+        explanationLines,
+      });
+    });
+    return blocks;
+  }
+
+  const answers = [...normalized.matchAll(/\[정답\]\s*([^\n\r]*)/gi)].map(
+    (item) => item[1]?.trim() || "-",
+  );
+  const explanations = [...normalized.matchAll(/\[해설\]\s*([\s\S]*?)(?=\n\s*\[정답\]|\s*$)/gi)].map(
+    (item) =>
+      item[1]
+        .split("\n")
+        .map((line) => line.trim())
+        .filter(Boolean),
+  );
+  const maxLen = Math.max(answers.length, explanations.length, 1);
+  for (let i = 0; i < maxLen; i += 1) {
+    blocks.push({
+      questionLabel: String(i + 1),
+      answer: answers[i] || (i === 0 ? fallbackQuickAnswer || "-" : "-"),
+      explanationLines: explanations[i] || [],
+    });
+  }
+  return blocks;
+}
+
+function buildExplanationParagraphs(blocks: ExplanationBlock[]) {
   const paragraphs: Paragraph[] = [];
-  for (const line of lines) {
-    const isSectionTitle = /^\[[^\]]+\]\s*:/.test(line) || /^\[[^\]]+\]$/.test(line);
-    if (isSectionTitle) {
-      paragraphs.push(
-        new Paragraph({
-          heading: HeadingLevel.HEADING_3,
-          children: [new TextRun({ text: line, bold: true })],
-          spacing: { before: 240, after: 120 },
-        }),
-      );
-      continue;
-    }
 
+  blocks.forEach((block, idx) => {
     paragraphs.push(
       new Paragraph({
-        children: [new TextRun({ text: line })],
-        spacing: { after: 140 },
+        tabStops: [{ type: TabStopType.LEFT, position: 1800 }],
+        children: [
+          new TextRun({ text: `${block.questionLabel})`, bold: true }),
+          new TextRun({ text: "\t[정답] ", bold: true }),
+          new TextRun({ text: block.answer, bold: true }),
+        ],
+        spacing: { before: idx === 0 ? 0 : 220, after: 80 },
       }),
     );
-  }
+    paragraphs.push(
+      new Paragraph({
+        children: [new TextRun({ text: "[해설]", bold: true })],
+        spacing: { after: 120 },
+      }),
+    );
+    if (block.explanationLines.length === 0) {
+      paragraphs.push(
+        new Paragraph({
+          children: [new TextRun({ text: "해설 본문이 제공되지 않았습니다." })],
+          spacing: { after: 140 },
+        }),
+      );
+      return;
+    }
+    block.explanationLines.forEach((line) => {
+      paragraphs.push(
+        new Paragraph({
+          children: [new TextRun({ text: line })],
+          spacing: { after: 140 },
+        }),
+      );
+    });
+  });
 
   return paragraphs;
 }
@@ -68,7 +166,15 @@ export async function POST(request: Request) {
     const docxFileName = `${baseName}.docx`;
     const docxPath = path.join(OUTPUT_DIR, docxFileName);
 
-    const explanationParagraphs = buildExplanationParagraphs(explanationBody);
+    const blocks = parseExplanationBlocks(explanationBody, quickAnswer);
+    const explanationParagraphs = buildExplanationParagraphs(blocks);
+    const quickAnswerSummary = blocks
+      .map((item) => `${item.questionLabel}) ${item.answer || "-"}`)
+      .join("   ");
+    const headerTitle = `${path.parse(examName).name}(해설)`;
+    const docDate = `${now.getFullYear()}.${String(now.getMonth() + 1).padStart(2, "0")}.${String(
+      now.getDate(),
+    ).padStart(2, "0")}`;
 
     const doc = new Document({
       sections: [
@@ -77,41 +183,62 @@ export async function POST(request: Request) {
           children: [
             new Paragraph({
               alignment: AlignmentType.CENTER,
+              children: [new TextRun({ text: "수학영역", bold: true, size: 40 })],
+              spacing: { after: 100 },
+            }),
+            new Paragraph({
+              alignment: AlignmentType.CENTER,
               heading: HeadingLevel.HEADING_1,
               children: [
                 new TextRun({
-                  text: "수학 해설지",
+                  text: headerTitle,
                   bold: true,
                 }),
               ],
-              spacing: { after: 220 },
+              spacing: { after: 60 },
             }),
             new Paragraph({
               alignment: AlignmentType.CENTER,
+              children: [new TextRun({ text: docDate })],
+              spacing: { after: 180 },
+            }),
+            new Paragraph({
+              alignment: AlignmentType.LEFT,
               children: [
                 new TextRun({
-                  text: "[빠른 정답 체크]",
+                  text: "[빠른 정답]",
                   bold: true,
                 }),
               ],
-              spacing: { after: 200 },
+              spacing: { after: 100 },
             }),
             new Paragraph({
-              alignment: AlignmentType.CENTER,
-              children: [new TextRun({ text: quickAnswer, bold: true, size: 36 })],
-              spacing: { after: 300 },
+              alignment: AlignmentType.LEFT,
+              children: [new TextRun({ text: quickAnswerSummary, bold: true })],
+              spacing: { after: 260 },
             }),
+          ],
+        },
+        {
+          properties: {
+            column: {
+              count: 2,
+              space: 708,
+            },
+          },
+          children: [
             new Paragraph({
               heading: HeadingLevel.HEADING_2,
-              children: [
-                new TextRun({
-                  text: "[해설]",
-                  bold: true,
-                }),
-              ],
+              children: [new TextRun({ text: "[해설]", bold: true })],
               spacing: { before: 120, after: 180 },
             }),
-            ...explanationParagraphs,
+            ...(explanationParagraphs.length > 0
+              ? explanationParagraphs
+              : [
+                  new Paragraph({
+                    children: [new TextRun({ text: "해설 본문이 제공되지 않았습니다." })],
+                  }),
+                ]),
           ],
         },
       ],
