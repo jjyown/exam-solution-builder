@@ -58,6 +58,26 @@ function getExamSourceKind(fileName: string): ExamSourceKind {
   return "unknown";
 }
 
+function parsePageSelection(value: string, maxPage: number) {
+  const out = new Set<number>();
+  for (const token of value.split(",")) {
+    const part = token.trim();
+    if (!part) continue;
+    const range = part.match(/^(\d+)\s*-\s*(\d+)$/);
+    if (range) {
+      const from = Math.min(Number(range[1]), Number(range[2]));
+      const to = Math.max(Number(range[1]), Number(range[2]));
+      for (let n = from; n <= to; n += 1) {
+        if (n >= 1 && n <= Math.max(1, maxPage)) out.add(n);
+      }
+      continue;
+    }
+    const no = Number(part);
+    if (Number.isFinite(no) && no >= 1 && no <= Math.max(1, maxPage)) out.add(no);
+  }
+  return [...out].sort((a, b) => a - b);
+}
+
 type ExtractionPrecheck = {
   ok: boolean;
   messages: string[];
@@ -446,13 +466,14 @@ export default function Home() {
   const [hmlFile, setHmlFile] = useState<File | null>(null);
   const [hmlManualQuestionSelection, setHmlManualQuestionSelection] = useState("1-30");
   const [hmlExecutionMode, setHmlExecutionMode] = useState<"manual" | "auto_assist">("manual");
-  const [manualDividerXPercent, setManualDividerXPercent] = useState("50");
-  const [manualDividerYPercent, setManualDividerYPercent] = useState("50");
+  const [quickAnswerPageSelection, setQuickAnswerPageSelection] = useState("");
+  const [explanationRefPageSelection, setExplanationRefPageSelection] = useState("");
+  const [noQuickAnswerPage, setNoQuickAnswerPage] = useState(false);
+  const [noExplanationRefPage, setNoExplanationRefPage] = useState(false);
   const [isProcessingHml, setIsProcessingHml] = useState(false);
   const [isLoadingExams, setIsLoadingExams] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
   const [isSavingPdf, setIsSavingPdf] = useState(false);
-  const [isSavingToFolder, setIsSavingToFolder] = useState(false);
   const [queuedProblems, setQueuedProblems] = useState<QueuedProblem[]>([]);
   const [savedPageNumbers, setSavedPageNumbers] = useState<number[]>([]);
   const [excludedPageNumbers, setExcludedPageNumbers] = useState<number[]>([]);
@@ -464,7 +485,7 @@ export default function Home() {
   const [dividerDragState, setDividerDragState] = useState<DividerDragState | null>(null);
   const [diagramDragState, setDiagramDragState] = useState<DiagramDragState | null>(null);
   const [diagramResizeState, setDiagramResizeState] = useState<DiagramResizeState | null>(null);
-  const [linePlacementMode, setLinePlacementMode] = useState(true);
+  const [linePlacementMode] = useState(false);
   const [verticalGuideMode, setVerticalGuideMode] = useState(false);
   const [pendingDiagramBoxes, setPendingDiagramBoxes] = useState<DiagramBox[]>([]);
   const [batchResults, setBatchResults] = useState<BatchResult[]>([]);
@@ -500,12 +521,33 @@ export default function Home() {
     return (allLabels.length > 0 ? Math.max(...allLabels) : 0) + 1;
   }, [pageDrafts]);
   const totalPageCount = isPdfSource ? pdfPageCount : 1;
+  const quickAnswerPages = useMemo(
+    () => (isPdfSource && !noQuickAnswerPage ? parsePageSelection(quickAnswerPageSelection, totalPageCount) : []),
+    [isPdfSource, noQuickAnswerPage, quickAnswerPageSelection, totalPageCount],
+  );
+  const explanationRefPages = useMemo(
+    () =>
+      isPdfSource && !noExplanationRefPage
+        ? parsePageSelection(explanationRefPageSelection, totalPageCount)
+        : [],
+    [isPdfSource, noExplanationRefPage, explanationRefPageSelection, totalPageCount],
+  );
+  const referenceOnlyPages = useMemo(
+    () => [...new Set([...quickAnswerPages, ...explanationRefPages])].sort((a, b) => a - b),
+    [quickAnswerPages, explanationRefPages],
+  );
+  const hasQuickAnswerSelectionInput = !noQuickAnswerPage && quickAnswerPageSelection.trim().length > 0;
+  const hasExplanationRefSelectionInput =
+    !noExplanationRefPage && explanationRefPageSelection.trim().length > 0;
+  const invalidQuickAnswerSelection = hasQuickAnswerSelectionInput && quickAnswerPages.length === 0;
+  const invalidExplanationRefSelection = hasExplanationRefSelectionInput && explanationRefPages.length === 0;
   const requiredPageNumbers = useMemo(
     () =>
       Array.from({ length: totalPageCount }, (_, idx) => idx + 1).filter(
-        (pageNo) => !excludedPageNumbers.includes(pageNo),
+        (pageNo) =>
+          !excludedPageNumbers.includes(pageNo) && !referenceOnlyPages.includes(pageNo),
       ),
-    [totalPageCount, excludedPageNumbers],
+    [totalPageCount, excludedPageNumbers, referenceOnlyPages],
   );
   const completedRequiredPageCount = useMemo(
     () => requiredPageNumbers.filter((pageNo) => savedPageNumbers.includes(pageNo)).length,
@@ -935,7 +977,8 @@ export default function Home() {
       setQualityWarnings([]);
 
       const mimeType = sourceFile.type || "image/png";
-      const selectedProblemCrop = pendingLineCrop ?? (completedCrop ? normalizeCrop(completedCrop) : null);
+      const selectedProblemCrop =
+        pendingDiagramBoxes[0]?.crop ?? (completedCrop ? normalizeCrop(completedCrop) : null);
       if (selectedProblemCrop && imageRef.current) {
         const precheck = runExtractionPrecheck(
           selectedProblemCrop,
@@ -944,7 +987,7 @@ export default function Home() {
         );
         if (!precheck.ok) {
           setErrorMessage(
-            `생성을 중단했습니다. 문제 추출 품질이 낮습니다: ${precheck.messages.join(" / ")} 구분선을 조정하거나 영역을 다시 지정해 주세요.`,
+            `생성을 중단했습니다. 문제 추출 품질이 낮습니다: ${precheck.messages.join(" / ")} 영역 박스를 다시 지정해 주세요.`,
           );
           return;
         }
@@ -972,7 +1015,7 @@ export default function Home() {
           .filter(Boolean)
           .join(" / ");
         setErrorMessage(
-          `생성을 중단했습니다. 문제 추출 비전 사전검증 점수 ${visionPrecheckData.score}점(기준 70점 이상). ${reasons || "핵심 정보 누락 가능성이 높습니다."} 구분선/영역을 다시 조정해 주세요.`,
+          `생성을 중단했습니다. 문제 추출 비전 사전검증 점수 ${visionPrecheckData.score}점(기준 70점 이상). ${reasons || "핵심 정보 누락 가능성이 높습니다."} 영역 박스를 다시 지정해 주세요.`,
         );
         return;
       }
@@ -991,6 +1034,14 @@ export default function Home() {
           imageBase64,
           imageMimeType: mimeType,
           diagramImages: liveDiagramImages,
+          quickAnswerPageHint:
+            quickAnswerPages.length > 0
+              ? `빠른정답 참고 페이지: ${quickAnswerPages.join(", ")}`
+              : "",
+          explanationReferenceHint:
+            explanationRefPages.length > 0
+              ? `해설 참고 페이지: ${explanationRefPages.join(", ")}`
+              : "",
           generationMode,
           includeDiagramExplanation,
           explanationSelectionMode,
@@ -1113,24 +1164,6 @@ export default function Home() {
       `${marker.labelNo}번 구분선을 추가했습니다. ${queuedProblems.length + 1}번 문제가 생성 준비되었습니다.`,
     );
     setErrorMessage("");
-  };
-
-  const addDividerMarkerByPercent = () => {
-    if (!imageRef.current) {
-      setErrorMessage("이미지가 로드된 뒤 수동 구분선을 추가해 주세요.");
-      return;
-    }
-    const x = Number.parseFloat(manualDividerXPercent);
-    const y = Number.parseFloat(manualDividerYPercent);
-    if (!Number.isFinite(x) || !Number.isFinite(y)) {
-      setErrorMessage("수동 좌표는 숫자로 입력해 주세요. 예: X=50, Y=34.5");
-      return;
-    }
-    if (x < 0 || x > 100 || y < 0 || y > 100) {
-      setErrorMessage("수동 좌표 범위를 확인해 주세요. X/Y는 0~100%입니다.");
-      return;
-    }
-    addDividerMarkerAt((x / 100) * imageRef.current.width, (y / 100) * imageRef.current.height);
   };
 
   const addVerticalGuideAt = (x: number) => {
@@ -1440,13 +1473,11 @@ export default function Home() {
       setErrorMessage("이미지를 먼저 불러와 주세요.");
       return;
     }
-    if (sortedDividerMarkers.length < 1) {
-      setErrorMessage("현재 페이지에 최소 1개 이상의 구분선을 추가해 주세요.");
+    if (pendingDiagramBoxes.length < 1) {
+      setErrorMessage("현재 페이지에 최소 1개 이상의 영역 박스를 추가해 주세요.");
       return;
     }
 
-    const imageWidth = imageRef.current.width;
-    const imageHeight = imageRef.current.height;
     const mimeType = sourceFile?.type || "image/png";
     const pageNumber = isPdfSource ? pdfPageNo : 1;
     const pageLabel = isPdfSource ? `PDF ${pageNumber}p` : "이미지";
@@ -1459,20 +1490,8 @@ export default function Home() {
       0,
     );
 
-    const pageProblems: QueuedProblem[] = sortedDividerMarkers.map((start, idx) => {
-      const end = sortedDividerMarkers[idx + 1];
-      const top = start.yRatio * imageHeight;
-      const problemPaddingRatio = 0.03; // 객관식 선택지 인식 보정(아래 여백 포함)
-      const bottomRaw = end ? end.yRatio * imageHeight : imageHeight;
-      const bottom = Math.min(imageHeight, bottomRaw + imageHeight * problemPaddingRatio);
-      const segmentBounds = getSegmentBounds(start.segmentIndex);
-      const crop: PixelCrop = {
-        unit: "px",
-        x: Math.max(0, segmentBounds.left * imageWidth),
-        y: Math.max(0, Math.min(top, imageHeight - 1)),
-        width: Math.max(10, (segmentBounds.right - segmentBounds.left) * imageWidth),
-        height: Math.max(10, Math.min(imageHeight, bottom) - Math.max(0, top)),
-      };
+    const pageProblems: QueuedProblem[] = pendingDiagramBoxes.map((box, idx) => {
+      const crop = box.crop;
       const imageBase64 = cropImageToBase64(imageRef.current!, crop, mimeType);
       return {
         id: `${Date.now()}-${pageNumber}-${idx}`,
@@ -1506,10 +1525,6 @@ export default function Home() {
     setSavedPageNumbers((prev) =>
       prev.includes(pageNumber) ? prev : [...prev, pageNumber].sort((a, b) => a - b),
     );
-    if (sortedDividerMarkers.length > 0) {
-      recomputePendingFromMarkers(sortedDividerMarkers);
-    }
-
     const nextSavedList = savedPageNumbers.includes(pageNumber)
       ? savedPageNumbers
       : [...savedPageNumbers, pageNumber];
@@ -1528,7 +1543,7 @@ export default function Home() {
       return;
     }
     setSuccessMessage(
-      `${pageLabel} 작업을 저장했습니다. (${nextCompletedRequired}/${requiredPageNumbers.length} 필수 페이지 완료, 제외 ${excludedPageNumbers.length})`,
+      `${pageLabel} 영역 박스를 저장했습니다. (${nextCompletedRequired}/${requiredPageNumbers.length} 필수 페이지 완료, 제외 ${excludedPageNumbers.length})`,
     );
   };
 
@@ -1656,6 +1671,14 @@ export default function Home() {
             includeDiagramExplanation,
             explanationSelectionMode,
             showAllMethods,
+            quickAnswerPageHint:
+              quickAnswerPages.length > 0
+                ? `빠른정답 참고 페이지: ${quickAnswerPages.join(", ")}`
+                : "",
+            explanationReferenceHint:
+              explanationRefPages.length > 0
+                ? `해설 참고 페이지: ${explanationRefPages.join(", ")}`
+                : "",
             crop: item.crop,
           }),
         });
@@ -1842,47 +1865,6 @@ export default function Home() {
       setErrorMessage(`PDF 저장 중 오류가 발생했습니다: ${message}`);
     } finally {
       setIsSavingPdf(false);
-    }
-  };
-
-  const handleSaveToCompletedFolder = async () => {
-    try {
-      setIsSavingToFolder(true);
-      setErrorMessage("");
-      setSuccessMessage("");
-      const formData = new FormData();
-      formData.append("examName", selectedExam || "직접업로드");
-      formData.append("questionNo", questionNo || "1");
-      formData.append("quickAnswer", quickAnswer);
-      formData.append("explanationBody", selectedExplanationBody);
-      formData.append("rawResponse", rawResponse);
-
-      const response = await fetch("/api/save-result", {
-        method: "POST",
-        body: formData,
-      });
-      const data = (await response.json()) as { message?: string; error?: string };
-      if (!response.ok) {
-        throw new Error(data.error || "작업 완료 폴더 저장에 실패했습니다.");
-      }
-      const nextNo = getNextQuestionNo(questionNo);
-      setQuestionNo(nextNo);
-      setQuestionText("");
-      setQuickAnswer("-");
-      setExplanationBody(DEFAULT_BODY);
-      setSelectedMethodIndexes([]);
-      setRepresentativeMethodIndex(null);
-      setRawResponse("");
-      setQualityWarnings([]);
-      setSuccessMessage(
-        `${data.message || "작업 완료 폴더에 저장했습니다."} 다음 문항 번호는 ${nextNo}번입니다.`,
-      );
-    } catch (error) {
-      const message =
-        error instanceof Error ? error.message : "저장 중 오류가 발생했습니다.";
-      setErrorMessage(message);
-    } finally {
-      setIsSavingToFolder(false);
     }
   };
 
@@ -2123,6 +2105,61 @@ export default function Home() {
                         {isCurrentPageExcluded ? "이 페이지 제외 해제" : "이 페이지 제외"}
                       </button>
                     </div>
+                    <div className="mt-2 grid grid-cols-1 gap-2 md:grid-cols-2">
+                      <div>
+                        <p className="text-xs font-semibold text-slate-700">빠른정답 페이지 지정(선택)</p>
+                        <label className="mt-1 flex items-center gap-2 text-[11px] text-slate-600">
+                          <input
+                            type="checkbox"
+                            checked={noQuickAnswerPage}
+                            onChange={(event) => setNoQuickAnswerPage(event.target.checked)}
+                          />
+                          빠른정답 없음
+                        </label>
+                        <input
+                          type="text"
+                          value={quickAnswerPageSelection}
+                          onChange={(event) => setQuickAnswerPageSelection(event.target.value)}
+                          placeholder="예: 9 또는 9-10"
+                          disabled={noQuickAnswerPage}
+                          className="mt-1 w-full rounded border border-slate-300 bg-white px-2 py-1 text-xs"
+                        />
+                      </div>
+                      <div>
+                        <p className="text-xs font-semibold text-slate-700">해설참고 페이지 지정(선택)</p>
+                        <label className="mt-1 flex items-center gap-2 text-[11px] text-slate-600">
+                          <input
+                            type="checkbox"
+                            checked={noExplanationRefPage}
+                            onChange={(event) => setNoExplanationRefPage(event.target.checked)}
+                          />
+                          해설참고 없음
+                        </label>
+                        <input
+                          type="text"
+                          value={explanationRefPageSelection}
+                          onChange={(event) => setExplanationRefPageSelection(event.target.value)}
+                          placeholder="예: 11-14"
+                          disabled={noExplanationRefPage}
+                          className="mt-1 w-full rounded border border-slate-300 bg-white px-2 py-1 text-xs"
+                        />
+                      </div>
+                    </div>
+                    {referenceOnlyPages.length > 0 && (
+                      <p className="mt-2 rounded bg-blue-50 px-2 py-1 text-xs text-blue-700">
+                        참고 전용 페이지(필수 작업 제외): {referenceOnlyPages.join(", ")}
+                      </p>
+                    )}
+                    {referenceOnlyPages.length === 0 && (
+                      <p className="mt-2 rounded bg-slate-100 px-2 py-1 text-xs text-slate-600">
+                        빠른정답/해설 참고 페이지가 없어도 정상입니다. 빈칸으로 두면 일반 모드로 진행됩니다.
+                      </p>
+                    )}
+                    {(invalidQuickAnswerSelection || invalidExplanationRefSelection) && (
+                      <p className="mt-2 rounded bg-rose-50 px-2 py-1 text-xs text-rose-700">
+                        페이지 지정값을 확인해 주세요. 현재 PDF 페이지 범위와 맞지 않아 반영되지 않았습니다.
+                      </p>
+                    )}
                   </div>
                 )}
                 <div className="max-h-[420px] overflow-auto rounded-md border border-slate-200 p-2">
@@ -2372,125 +2409,38 @@ export default function Home() {
                   </div>
                 </div>
                 <p className="mt-2 rounded bg-blue-50 p-2 text-xs text-blue-700">
-                  {linePlacementMode
-                    ? verticalGuideMode
-                      ? "세로선 모드: 클릭하면 세로 가이드가 추가되고, 마커는 이를 넘지 못합니다."
-                      : "구분선 모드: 페이지 클릭으로 시작점 마커 추가, 마커 드래그 이동, X 버튼 삭제"
-                    : "그림 박스 모드: 드래그해서 그림/도형 영역을 선택"}
+                  영역 박스 모드: 드래그해서 문제 영역을 추가하고, 저장 후 자동 보조 실행에 포함하세요.
                 </p>
-                <div className="mt-2 grid grid-cols-3 gap-2">
-                  <button
-                    onClick={() => {
-                      setLinePlacementMode(true);
-                      setVerticalGuideMode(false);
-                    }}
-                    className={`rounded-md px-3 py-2 text-sm font-semibold ${
-                      linePlacementMode && !verticalGuideMode
-                        ? "bg-blue-600 text-white"
-                        : "border border-slate-300 bg-white text-slate-700"
-                    }`}
-                  >
-                    구분선 모드
-                  </button>
-                  <button
-                    onClick={() => {
-                      setLinePlacementMode(true);
-                      setVerticalGuideMode(true);
-                    }}
-                    className={`rounded-md px-3 py-2 text-sm font-semibold ${
-                      linePlacementMode && verticalGuideMode
-                        ? "bg-orange-600 text-white"
-                        : "border border-slate-300 bg-white text-slate-700"
-                    }`}
-                  >
-                    세로선 모드
-                  </button>
-                  <button
-                    onClick={() => {
-                      setLinePlacementMode(false);
-                      setVerticalGuideMode(false);
-                    }}
-                    className={`rounded-md px-3 py-2 text-sm font-semibold ${
-                      !linePlacementMode
-                        ? "bg-emerald-600 text-white"
-                        : "border border-slate-300 bg-white text-slate-700"
-                    }`}
-                  >
-                    그림 박스 모드
-                  </button>
-                </div>
-                {!linePlacementMode && (
-                  <p className="mt-2 rounded bg-emerald-50 p-2 text-xs text-emerald-700">
-                    그림 박스 모드에서는 드래그를 마치면 박스가 자동으로 추가됩니다. 추가된 박스는
-                    드래그로 이동, 우하단 핸들로 크기 조절할 수 있습니다.
-                  </p>
-                )}
-                {linePlacementMode && !verticalGuideMode && (
-                  <div className="mt-2 rounded-md border border-blue-200 bg-blue-50 p-2">
-                    <p className="text-xs font-semibold text-blue-800">수동 영역 지정(구분선 좌표 입력)</p>
-                    <div className="mt-2 grid grid-cols-3 gap-2">
-                      <input
-                        type="number"
-                        min={0}
-                        max={100}
-                        step={0.1}
-                        value={manualDividerXPercent}
-                        onChange={(event) => setManualDividerXPercent(event.target.value)}
-                        className="rounded border border-blue-300 bg-white px-2 py-1 text-xs"
-                        placeholder="X%"
-                      />
-                      <input
-                        type="number"
-                        min={0}
-                        max={100}
-                        step={0.1}
-                        value={manualDividerYPercent}
-                        onChange={(event) => setManualDividerYPercent(event.target.value)}
-                        className="rounded border border-blue-300 bg-white px-2 py-1 text-xs"
-                        placeholder="Y%"
-                      />
-                      <button
-                        type="button"
-                        onClick={addDividerMarkerByPercent}
-                        className="rounded bg-blue-600 px-2 py-1 text-xs font-semibold text-white"
-                      >
-                        수동 구분선 추가
-                      </button>
-                    </div>
-                    <p className="mt-1 text-[11px] text-blue-700">
-                      클릭이 어려운 경우 좌표(%)로 정확히 구분선을 추가할 수 있습니다.
-                    </p>
-                  </div>
-                )}
+                <p className="mt-2 rounded bg-emerald-50 p-2 text-xs text-emerald-700">
+                  박스를 드래그해 추가하면 자동 저장 목록에 포함됩니다. 추가된 박스는 드래그 이동, 우하단
+                  핸들로 크기 조절할 수 있습니다.
+                </p>
                 <button
                   onClick={savePendingAsQueuedProblem}
-                  disabled={sortedDividerMarkers.length < 1}
+                  disabled={pendingDiagramBoxes.length < 1}
                   className="mt-2 w-full rounded-md bg-indigo-600 px-3 py-2 text-sm font-semibold text-white"
                 >
                   현재 페이지 작업 저장
                 </button>
-                {(pendingLineCrop || pendingDiagramBoxes.length > 0) && (
+                {pendingDiagramBoxes.length > 0 && (
                   <p className="mt-2 rounded bg-slate-50 p-2 text-xs text-slate-600">
-                    설정됨: {pendingLineCrop ? "문제 구분선 " : ""}
-                    {pendingDiagramBoxes.length > 0
-                      ? `+ 그림 박스 ${pendingDiagramBoxes.length}개`
-                      : ""}
+                    설정됨: 영역 박스 {pendingDiagramBoxes.length}개
                   </p>
                 )}
-                {!pendingLineCrop && (
+                {pendingDiagramBoxes.length === 0 && (
                   <p className="mt-1 text-xs text-rose-600">
-                    구분선을 먼저 추가해 주세요. 마지막 문제는 마지막 구분선 아래 영역으로 자동 처리됩니다.
+                    문제 영역 박스를 먼저 추가해 주세요.
                   </p>
                 )}
                 <div className="mt-1 rounded-md bg-slate-50 px-2 py-2 text-xs text-slate-600">
-                  구분선 {dividerMarkers.length}개 / 세로선 {verticalGuides.length}개 / 저장상태{" "}
+                  영역 박스 {pendingDiagramBoxes.length}개 / 저장상태{" "}
                   {isCurrentPageExcluded ? "제외됨" : isCurrentPageSaved ? "저장됨" : "미저장"} / 필수{" "}
                   {completedRequiredPageCount}/{requiredPageNumbers.length}
                 </div>
                 {pendingDiagramBoxes.length > 0 && (
                   <div className="mt-2 rounded-md border border-slate-200 p-2">
                     <p className="text-xs font-semibold text-slate-700">
-                      그림 박스 목록 ({pendingDiagramBoxes.length})
+                      영역 박스 목록 ({pendingDiagramBoxes.length})
                     </p>
                     <div className="mt-1 flex flex-wrap gap-2">
                       {pendingDiagramBoxes.map((box, idx) => (
@@ -2499,23 +2449,7 @@ export default function Home() {
                           onClick={() => removePendingDiagramBox(box.id)}
                           className="rounded border border-slate-300 bg-white px-2 py-1 text-[11px]"
                         >
-                          그림 {box.labelNo ?? idx + 1} 삭제
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                )}
-                {dividerMarkers.length > 0 && (
-                  <div className="mt-2 rounded-md border border-slate-200 p-2">
-                    <p className="text-xs font-semibold text-slate-700">구분선 삭제</p>
-                    <div className="mt-1 flex flex-wrap gap-2">
-                      {sortedDividerMarkers.map((marker) => (
-                        <button
-                          key={`remove-divider-${marker.id}`}
-                          onClick={() => removeDividerMarker(marker.id)}
-                          className="rounded border border-slate-300 bg-white px-2 py-1 text-[11px]"
-                        >
-                          {marker.labelNo}번 선 삭제
+                          영역 {box.labelNo ?? idx + 1} 삭제
                         </button>
                       ))}
                     </div>
@@ -2799,23 +2733,13 @@ export default function Home() {
           )}
 
           {currentStep === 3 && hasGeneratedResult && (
-            <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2">
+            <div className="mt-4 grid grid-cols-1 gap-3">
               <button
                 onClick={handleSavePdf}
                 disabled={isSavingPdf}
                 className="w-full rounded-md bg-emerald-600 px-4 py-3 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:bg-slate-300"
               >
                 {isSavingPdf ? "PDF 생성 중..." : "PDF로 저장하기"}
-              </button>
-
-              <button
-                onClick={handleSaveToCompletedFolder}
-                disabled={isSavingToFolder}
-                className="w-full rounded-md bg-indigo-600 px-4 py-3 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:bg-slate-300"
-              >
-                {isSavingToFolder
-                  ? "작업 완료 폴더 저장 중..."
-                  : "작업 완료 폴더로 저장"}
               </button>
             </div>
           )}
