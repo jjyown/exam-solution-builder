@@ -53,6 +53,26 @@ function toPreview(text: string | null, max = 90) {
   return normalized.length > max ? `${normalized.slice(0, max)}...` : normalized;
 }
 
+function mergeRuleText(previous: string | null, incoming: string | undefined) {
+  const prevLines = String(previous || "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const newLines = String(incoming || "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (prevLines.length === 0 && newLines.length === 0) return null;
+  const unique = new Set<string>();
+  const merged: string[] = [];
+  [...prevLines, ...newLines].forEach((line) => {
+    if (unique.has(line)) return;
+    unique.add(line);
+    merged.push(line);
+  });
+  return merged.join("\n");
+}
+
 function getSupabaseConfig() {
   const url = process.env.SUPABASE_URL?.trim() || "";
   const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim() || "";
@@ -95,12 +115,34 @@ export async function applyRuntimePromptRules(rules: RuntimePromptRules) {
     throw new Error("SUPABASE_URL 또는 SUPABASE_SERVICE_ROLE_KEY가 설정되지 않았습니다.");
   }
 
+  const { data: currentActive } = await client
+    .from("prompt_rules")
+    .select("extra_constraints,examples_easy,examples_balanced,examples_killer")
+    .eq("is_active", true)
+    .order("updated_at", { ascending: false })
+    .limit(1)
+    .maybeSingle<PromptRulesRow>();
+
+  const mergedExtraConstraints = mergeRuleText(
+    currentActive?.extra_constraints ?? null,
+    rules.extraConstraints,
+  );
+  const mergedExamplesEasy = mergeRuleText(currentActive?.examples_easy ?? null, rules.examplesEasy);
+  const mergedExamplesBalanced = mergeRuleText(
+    currentActive?.examples_balanced ?? null,
+    rules.examplesBalanced,
+  );
+  const mergedExamplesKiller = mergeRuleText(
+    currentActive?.examples_killer ?? null,
+    rules.examplesKiller,
+  );
+
   const payload: PromptRulesRow = {
     is_active: true,
-    extra_constraints: rules.extraConstraints?.trim() || null,
-    examples_easy: rules.examplesEasy?.trim() || null,
-    examples_balanced: rules.examplesBalanced?.trim() || null,
-    examples_killer: rules.examplesKiller?.trim() || null,
+    extra_constraints: mergedExtraConstraints,
+    examples_easy: mergedExamplesEasy,
+    examples_balanced: mergedExamplesBalanced,
+    examples_killer: mergedExamplesKiller,
     updated_at: new Date().toISOString(),
   };
 
