@@ -14,7 +14,20 @@ type VisionPrecheckResult = {
   reasons: string[];
 };
 
-const PRECHECK_MODEL_CANDIDATES = ["gemini-2.5-flash", "gemini-2.0-flash"] as const;
+function parseModelCandidatesFromEnv(envKey: string, fallback: string[]) {
+  const raw = process.env[envKey]?.trim();
+  if (!raw) return fallback;
+  const parsed = raw
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+  return parsed.length > 0 ? parsed : fallback;
+}
+
+const PRECHECK_MODEL_CANDIDATES = parseModelCandidatesFromEnv("GEMINI_MODELS_PRECHECK", [
+  "gemini-2.0-flash",
+  "gemini-1.5-flash",
+]);
 
 function extractJsonObject(raw: string) {
   const first = raw.indexOf("{");

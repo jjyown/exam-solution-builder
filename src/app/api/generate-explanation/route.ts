@@ -46,11 +46,41 @@ type GenerateRequestBody = {
   explanationReferenceHint?: string;
 };
 
-const FINAL_MODEL_CANDIDATES = ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"] as const;
-const TEST_MODEL_CANDIDATES = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.5-pro"] as const;
-const EASY_MODEL_CANDIDATES = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.5-pro"] as const;
-const BALANCED_MODEL_CANDIDATES = ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"] as const;
-const KILLER_MODEL_CANDIDATES = ["gemini-2.5-pro", "gemini-2.0-flash", "gemini-2.5-flash"] as const;
+function parseModelCandidatesFromEnv(envKey: string, fallback: string[]) {
+  const raw = process.env[envKey]?.trim();
+  if (!raw) return fallback;
+  const parsed = raw
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+  return parsed.length > 0 ? parsed : fallback;
+}
+
+const FINAL_MODEL_CANDIDATES = parseModelCandidatesFromEnv("GEMINI_MODELS_GENERATE_FINAL", [
+  "gemini-1.5-pro",
+  "gemini-2.0-flash",
+  "gemini-1.5-flash",
+]);
+const TEST_MODEL_CANDIDATES = parseModelCandidatesFromEnv("GEMINI_MODELS_GENERATE_TEST", [
+  "gemini-2.0-flash",
+  "gemini-1.5-flash",
+  "gemini-1.5-pro",
+]);
+const EASY_MODEL_CANDIDATES = parseModelCandidatesFromEnv("GEMINI_MODELS_GENERATE_EASY", [
+  "gemini-2.0-flash",
+  "gemini-1.5-flash",
+  "gemini-1.5-pro",
+]);
+const BALANCED_MODEL_CANDIDATES = parseModelCandidatesFromEnv("GEMINI_MODELS_GENERATE_BALANCED", [
+  "gemini-1.5-pro",
+  "gemini-2.0-flash",
+  "gemini-1.5-flash",
+]);
+const KILLER_MODEL_CANDIDATES = parseModelCandidatesFromEnv("GEMINI_MODELS_GENERATE_KILLER", [
+  "gemini-1.5-pro",
+  "gemini-2.0-flash",
+  "gemini-1.5-flash",
+]);
 
 function pickModelCandidates(params: {
   generationMode: "test" | "final";
@@ -58,14 +88,10 @@ function pickModelCandidates(params: {
 }) {
   const { generationMode, solverModelProfile } = params;
   if (solverModelProfile === "easy") {
-    return generationMode === "test"
-      ? [...EASY_MODEL_CANDIDATES]
-      : (["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"] as const);
+    return generationMode === "test" ? [...EASY_MODEL_CANDIDATES] : [...FINAL_MODEL_CANDIDATES];
   }
   if (solverModelProfile === "killer") {
-    return generationMode === "test"
-      ? (["gemini-2.0-flash", "gemini-2.5-flash", "gemini-2.5-pro"] as const)
-      : [...KILLER_MODEL_CANDIDATES];
+    return generationMode === "test" ? [...TEST_MODEL_CANDIDATES] : [...KILLER_MODEL_CANDIDATES];
   }
   if (solverModelProfile === "balanced") {
     return generationMode === "test"

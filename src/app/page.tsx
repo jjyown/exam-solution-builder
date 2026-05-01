@@ -330,6 +330,19 @@ function validateDocEntriesBeforeExport(entries: ExportDocEntry[]) {
   return { ok: issues.length === 0, issues };
 }
 
+async function parseApiErrorMessage(response: Response, fallback: string) {
+  const raw = await response.text();
+  if (!raw) return fallback;
+  try {
+    const json = JSON.parse(raw) as { error?: string; message?: string; details?: string[] };
+    const detailText =
+      json.details && json.details.length > 0 ? ` / 상세: ${json.details.join(" | ")}` : "";
+    return (json.error || json.message || fallback) + detailText;
+  } catch {
+    return raw;
+  }
+}
+
 function extractSection(text: string, header: string, nextHeaders: string[]) {
   const escapedHeader = header.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const escapedNext = nextHeaders.map((item) => item.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
@@ -2425,7 +2438,8 @@ export default function Home() {
           body: JSON.stringify({ entries: exportEntries }),
         });
         if (!repairRes.ok) {
-          throw new Error("내보내기 전 자동 보정에 실패했습니다.");
+          const msg = await parseApiErrorMessage(repairRes, "내보내기 전 자동 보정에 실패했습니다.");
+          throw new Error(msg);
         }
         const repairData = (await repairRes.json()) as {
           entries?: ExportDocEntry[];
@@ -2468,8 +2482,8 @@ export default function Home() {
         body: formData,
       });
       if (!saveRes.ok) {
-        const data = (await saveRes.json()) as { error?: string };
-        throw new Error(data.error || "DOCX 저장 실패");
+        const msg = await parseApiErrorMessage(saveRes, "DOCX 저장 실패");
+        throw new Error(msg);
       }
       const savedMessage = (await saveRes.json()) as { message?: string };
       setSuccessMessage(savedMessage.message || "문항 카드 편집 결과로 해설지 DOCX 생성이 완료되었습니다.");
