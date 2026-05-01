@@ -597,26 +597,69 @@ export async function POST(request: Request) {
           const consistencyCheck = validateExplanationConsistency(openAiText);
           const scopeCheck = validateCurriculumScope(openAiText);
           const pedagogyCheck = validatePedagogicalPolicy(openAiText);
-          if (
-            formatCheck.ok &&
-            consistencyCheck.ok &&
-            scopeCheck.ok &&
-            pedagogyCheck.ok &&
-            !isLikelyTruncatedResult(openAiText)
-          ) {
+          const truncated = isLikelyTruncatedResult(openAiText);
+
+          if (formatCheck.ok && consistencyCheck.ok && scopeCheck.ok && !truncated) {
             return NextResponse.json(
               {
                 result: openAiText,
                 model: `${openAiModel} (openai-fallback)`,
-                qualityWarnings: [],
+                qualityWarnings: pedagogyCheck.ok ? [] : [...pedagogyCheck.issues],
                 diagramAidRecommendation: diagramAid,
               },
               { status: 200 },
             );
           }
-          failures.push(
-            `openai:${openAiModel}: 형식/정합 검증 실패 - 누락: ${formatCheck.missing.join(", ")} / 정합: ${consistencyCheck.issues.join(" | ")} / 범위: ${scopeCheck.issues.join(" | ")} / 수업기준: ${pedagogyCheck.issues.join(" | ")}`,
+
+          const retryInstruction = buildRetryInstruction(
+            formatCheck.missing,
+            consistencyCheck.issues,
+            scopeCheck.issues,
+            pedagogyCheck.issues,
           );
+          const retryText = await generateWithOpenAiFallback({
+            apiKey: openAiApiKey,
+            model: openAiModel,
+            prompt: `${prompt}\n\n${retryInstruction}`,
+            imageBase64,
+            mimeType,
+            diagramImageBase64,
+            diagramMimeType,
+            diagramImages: diagramImages.map((item) => ({
+              imageBase64: item.imageBase64,
+              mimeType: item.mimeType,
+            })),
+          });
+          if (retryText) {
+            const retryFormatCheck = validateExplanationFormat(retryText);
+            const retryConsistencyCheck = validateExplanationConsistency(retryText);
+            const retryScopeCheck = validateCurriculumScope(retryText);
+            const retryPedagogyCheck = validatePedagogicalPolicy(retryText);
+            const retryTruncated = isLikelyTruncatedResult(retryText);
+
+            if (
+              retryFormatCheck.ok &&
+              retryConsistencyCheck.ok &&
+              retryScopeCheck.ok &&
+              !retryTruncated
+            ) {
+              return NextResponse.json(
+                {
+                  result: retryText,
+                  model: `${openAiModel} (openai-fallback)`,
+                  retriedForFormat: true,
+                  qualityWarnings: retryPedagogyCheck.ok ? [] : [...retryPedagogyCheck.issues],
+                  diagramAidRecommendation: diagramAid,
+                },
+                { status: 200 },
+              );
+            }
+            failures.push(
+              `openai:${openAiModel}: 형식/정합 검증 실패(재시도 포함) - 누락: ${retryFormatCheck.missing.join(", ")} / 정합: ${retryConsistencyCheck.issues.join(" | ")} / 범위: ${retryScopeCheck.issues.join(" | ")} / 수업기준: ${retryPedagogyCheck.issues.join(" | ")}`,
+            );
+          } else {
+            failures.push(`openai:${openAiModel}: 재시도 응답 비어 있음`);
+          }
         } else {
           failures.push(`openai:${openAiModel}: 응답 비어 있음`);
         }
