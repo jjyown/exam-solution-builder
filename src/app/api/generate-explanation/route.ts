@@ -174,10 +174,30 @@ function validateCurriculumScope(text: string) {
   return { ok: issues.length === 0, issues };
 }
 
+function validatePedagogicalPolicy(text: string) {
+  const issues: string[] = [];
+  const explanation = text.match(/\[해설\]\s*([\s\S]+)/i)?.[1]?.trim() ?? "";
+  const estimationPattern = /추정|근사|어림|대략|감으로|찍어서|적당히|approx|approximately|≈/i;
+  if (estimationPattern.test(explanation)) {
+    issues.push("근삿값/추정 중심 풀이 표현이 감지되었습니다.");
+  }
+  const sentenceCount =
+    explanation
+      .split(/[\n.!?]+/)
+      .map((line) => line.trim())
+      .filter(Boolean).length || 0;
+  const methodCount = (explanation.match(/\[방법\s*\d+\]/g) ?? []).length;
+  if (methodCount <= 1 && sentenceCount > 12) {
+    issues.push("단일 풀이 기준으로 해설이 과도하게 장문입니다. 핵심 수식 중심으로 압축해 주세요.");
+  }
+  return { ok: issues.length === 0, issues };
+}
+
 function buildRetryInstruction(
   formatMissing: string[],
   consistencyIssues: string[],
   scopeIssues: string[],
+  pedagogyIssues: string[],
 ) {
   const lines: string[] = [
     "[재요청]",
@@ -194,6 +214,11 @@ function buildRetryInstruction(
   if (scopeIssues.length > 0) {
     lines.push(`교육과정 이탈 이슈: ${scopeIssues.join(" / ")}`);
     lines.push("중고등 교육과정 외 용어/기호(편미분, 선형대수, 로피탈 등)를 제거하세요.");
+  }
+  if (pedagogyIssues.length > 0) {
+    lines.push(`수업/출제 기준 이슈: ${pedagogyIssues.join(" / ")}`);
+    lines.push("중고등학교 20년 교사 + 출제위원 토론을 거쳐 정석 풀이/학생 친화 요약본으로 다시 작성하세요.");
+    lines.push("간단한 문제는 핵심 수식과 결론 중심으로 4~8문장 내외로 간결히 정리하세요.");
   }
   lines.push("반드시 아래 형식으로만 다시 작성하세요.");
   lines.push("[정답] (한 줄)");
@@ -262,8 +287,8 @@ export async function POST(request: Request) {
       }))
       .filter((item) => item.imageBase64);
     const includeDiagramExplanation = body.includeDiagramExplanation !== false;
-    const explanationSelectionMode = body.explanationSelectionMode || "all";
-    const showAllMethods = body.showAllMethods !== false;
+    const explanationSelectionMode = body.explanationSelectionMode || "core";
+    const showAllMethods = body.showAllMethods === true;
     const generationMode = body.generationMode === "test" ? "test" : "final";
     const solverModelProfile =
       body.solverModelProfile === "easy" ||
@@ -293,6 +318,8 @@ export async function POST(request: Request) {
       questionText || "(텍스트 미입력 - 이미지의 문제를 직접 읽어 해설해줘)",
       "",
       "[추가 지시]",
+      "- 너는 내부적으로 '중고등학교 수학 20년 경력 교사'와 '수능/내신 출제위원'이 토론해 합의한 최종 해설만 출력한다.",
+      "- 내부 토론 과정은 출력하지 말고, 최종 결론만 제시해.",
       "- 내부 처리 순서를 반드시 지켜: 1) 문제 풀이 2) 빠른정답 확정 3) 해설 작성.",
       "- 출력 양식을 정확히 지켜줘.",
       "- 수식은 LaTeX 표기(\\binom, \\frac 등)로 쓰지 말고 학생이 읽기 쉬운 일반 표기로 작성해.",
@@ -307,6 +334,8 @@ export async function POST(request: Request) {
       "- 이미지가 일부 흐리거나 누락되어도 '이미지가 제공되지 않았다'고 쓰지 말고, 판독 가능한 정보 기준으로 최선의 해설을 작성해.",
       "- 반드시 중고등학교 교육과정 내 용어/기호만 사용하고 대학 수준 용어/기호는 사용하지 마.",
       "- 영문 수학 용어 대신 한국어 용어를 사용해.",
+      "- 정석 풀이가 가능한 문제에서 근삿값/추정/어림 계산으로 답을 내지 마.",
+      "- 간단한 문제는 장황하게 쓰지 말고 핵심 수식과 결론 중심으로 간결하게 써.",
       "- 문제 텍스트가 없으면 이미지의 문제를 직접 해석해 풀이해.",
       includeDiagramExplanation
         ? "- 그림/도형/그래프가 있으면 해설에 의미와 해석 포인트를 반드시 포함해."
@@ -392,10 +421,12 @@ export async function POST(request: Request) {
         const formatCheck = validateExplanationFormat(generatedText);
         const consistencyCheck = validateExplanationConsistency(generatedText);
         const scopeCheck = validateCurriculumScope(generatedText);
+        const pedagogyCheck = validatePedagogicalPolicy(generatedText);
         if (
           formatCheck.ok &&
           consistencyCheck.ok &&
           scopeCheck.ok &&
+          pedagogyCheck.ok &&
           !isLikelyTruncatedResult(generatedText)
         ) {
           return NextResponse.json(
@@ -413,6 +444,7 @@ export async function POST(request: Request) {
           ...formatCheck.missing.map((item) => `형식 누락: ${item}`),
           ...consistencyCheck.issues,
           ...scopeCheck.issues,
+          ...pedagogyCheck.issues,
         ];
         const retryContents: Array<
           { text: string } | { inlineData: { data: string; mimeType: string } }
@@ -423,6 +455,7 @@ export async function POST(request: Request) {
               formatCheck.missing,
               consistencyCheck.issues,
               scopeCheck.issues,
+              pedagogyCheck.issues,
             ),
           },
         ];
@@ -435,10 +468,12 @@ export async function POST(request: Request) {
         const retryFormatCheck = validateExplanationFormat(retryText);
         const retryConsistencyCheck = validateExplanationConsistency(retryText);
         const retryScopeCheck = validateCurriculumScope(retryText);
+        const retryPedagogyCheck = validatePedagogicalPolicy(retryText);
         if (
           !retryFormatCheck.ok ||
           !retryConsistencyCheck.ok ||
           !retryScopeCheck.ok ||
+          !retryPedagogyCheck.ok ||
           isLikelyTruncatedResult(retryText)
         ) {
           failures.push(
@@ -446,7 +481,7 @@ export async function POST(request: Request) {
               ", ",
             )} / 정합 이슈: ${retryConsistencyCheck.issues.join(" | ")} / 교육과정 이탈: ${retryScopeCheck.issues.join(
               " | ",
-            )}`,
+            )} / 수업기준 이슈: ${retryPedagogyCheck.issues.join(" | ")}`,
           );
           continue;
         }
