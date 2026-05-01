@@ -424,18 +424,37 @@ function getNextQuestionNo(current: string) {
   return String(parsed + 1);
 }
 
+/** 화면에 맞춰 축소된 img 좌표계 crop → 실제 비트맵(natural) 픽셀 crop */
+function pixelCropToNatural(crop: PixelCrop, image: HTMLImageElement): PixelCrop {
+  const sx = image.naturalWidth / Math.max(1, image.width);
+  const sy = image.naturalHeight / Math.max(1, image.height);
+  return {
+    unit: "px",
+    x: crop.x * sx,
+    y: crop.y * sy,
+    width: crop.width * sx,
+    height: crop.height * sy,
+  };
+}
+
+/**
+ * 추출 품질 사전검증. crop·image 크기는 같은 좌표계(보통 natural 픽셀)여야 합니다.
+ * 임계값은 고정 픽셀만 쓰지 않고 페이지 크기 비율을 함께 써서, 미리보기 축소 시 오탐을 줄입니다.
+ */
 function runExtractionPrecheck(
   crop: PixelCrop,
   imageWidth: number,
   imageHeight: number,
 ): ExtractionPrecheck {
   const messages: string[] = [];
-  const minWidth = 220;
-  const minHeight = 120;
-  const minArea = 30000;
-  const minHeightRatio = 0.09;
-  const maxAspectRatio = 4.8;
+  const safeImageWidth = Math.max(1, imageWidth);
   const safeImageHeight = Math.max(1, imageHeight);
+
+  const minWidth = Math.max(200, Math.round(safeImageWidth * 0.024));
+  const minHeight = Math.max(72, Math.round(safeImageHeight * 0.02));
+  const minArea = Math.max(22000, Math.round(minWidth * minHeight * 0.35));
+  const minHeightRatio = 0.045;
+  const maxAspectRatio = 4.8;
 
   if (crop.width < minWidth) {
     messages.push("문제 영역 가로가 너무 좁습니다.");
@@ -457,6 +476,17 @@ function runExtractionPrecheck(
   }
 
   return { ok: messages.length === 0, messages };
+}
+
+function runExtractionPrecheckForDisplayedCrop(
+  crop: PixelCrop,
+  image: HTMLImageElement | null,
+): ExtractionPrecheck {
+  if (!image || image.naturalWidth < 1 || image.naturalHeight < 1) {
+    return runExtractionPrecheck(crop, Math.max(1, crop.x + crop.width), Math.max(1, crop.y + crop.height));
+  }
+  const naturalCrop = pixelCropToNatural(crop, image);
+  return runExtractionPrecheck(naturalCrop, image.naturalWidth, image.naturalHeight);
 }
 
 export default function Home() {
@@ -1136,10 +1166,9 @@ export default function Home() {
       const selectedProblemCrop =
         pendingDiagramBoxes[0]?.crop ?? (completedCrop ? normalizeCrop(completedCrop) : null);
       if (selectedProblemCrop && imageRef.current) {
-        const precheck = runExtractionPrecheck(
+        const precheck = runExtractionPrecheckForDisplayedCrop(
           selectedProblemCrop,
-          imageRef.current.width,
-          imageRef.current.height,
+          imageRef.current,
         );
         if (!precheck.ok) {
           setErrorMessage(
@@ -1780,6 +1809,10 @@ export default function Home() {
       setErrorMessage("먼저 문제 박스를 하나 이상 추가해 주세요.");
       return;
     }
+    if (!imageRef.current) {
+      setErrorMessage("이미지 로딩이 완료된 뒤 순차 생성을 다시 시도해 주세요.");
+      return;
+    }
 
     try {
       setIsBatchGenerating(true);
@@ -1797,11 +1830,7 @@ export default function Home() {
       }> = [];
 
       for (const item of queuedProblems) {
-        const precheck = runExtractionPrecheck(
-          item.crop,
-          Math.max(item.crop.x + item.crop.width, renderImageSize.width || 0),
-          Math.max(item.crop.y + item.crop.height, renderImageSize.height || 0),
-        );
+        const precheck = runExtractionPrecheckForDisplayedCrop(item.crop, imageRef.current);
         if (!precheck.ok) {
           results.push({
             questionNo: item.questionNo,
