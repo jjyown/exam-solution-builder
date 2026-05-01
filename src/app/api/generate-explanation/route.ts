@@ -56,16 +56,23 @@ function pickModelCandidates(params: {
   generationMode: "test" | "final";
   solverModelProfile: "easy" | "balanced" | "killer";
 }) {
-  if (params.solverModelProfile === "easy") {
-    return [...EASY_MODEL_CANDIDATES];
+  const { generationMode, solverModelProfile } = params;
+  if (solverModelProfile === "easy") {
+    return generationMode === "test"
+      ? [...EASY_MODEL_CANDIDATES]
+      : (["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"] as const);
   }
-  if (params.solverModelProfile === "killer") {
-    return [...KILLER_MODEL_CANDIDATES];
+  if (solverModelProfile === "killer") {
+    return generationMode === "test"
+      ? (["gemini-2.0-flash", "gemini-2.5-flash", "gemini-2.5-pro"] as const)
+      : [...KILLER_MODEL_CANDIDATES];
   }
-  if (params.solverModelProfile === "balanced") {
-    return [...BALANCED_MODEL_CANDIDATES];
+  if (solverModelProfile === "balanced") {
+    return generationMode === "test"
+      ? [...TEST_MODEL_CANDIDATES]
+      : [...BALANCED_MODEL_CANDIDATES];
   }
-  return params.generationMode === "test" ? [...TEST_MODEL_CANDIDATES] : [...FINAL_MODEL_CANDIDATES];
+  return generationMode === "test" ? [...TEST_MODEL_CANDIDATES] : [...FINAL_MODEL_CANDIDATES];
 }
 
 function validateExplanationFormat(text: string) {

@@ -224,6 +224,12 @@ const DEFAULT_BODY = `해설 생성 버튼을 누르면 이 영역에 결과가 
 [해설]
 문제의 핵심 개념과 단계별 풀이를 학생 눈높이에 맞게 작성합니다.`;
 
+function hasCompletedExplanationBody(body: string) {
+  const t = body.trim();
+  if (!t) return false;
+  return t !== DEFAULT_BODY.trim();
+}
+
 function extractSection(text: string, header: string, nextHeaders: string[]) {
   const escapedHeader = header.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const escapedNext = nextHeaders.map((item) => item.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
@@ -643,6 +649,14 @@ export default function Home() {
     [questionSolverProfileOverrides, questionNo, solverModelProfile],
   );
   const hasGeneratedResult = rawResponse.trim().length > 0;
+  const currentQuestionExplanationReady = useMemo(() => {
+    if (!questionNo) return false;
+    const draft = questionCardDraftMap[questionNo];
+    const ver = pickSelectedVersionForQuestion(questionVersionMap[questionNo]);
+    const body = draft?.explanationBody ?? ver?.explanationBody ?? "";
+    return hasCompletedExplanationBody(body);
+  }, [questionNo, questionCardDraftMap, questionVersionMap]);
+  const explanationGenerationBusy = isBatchGenerating || isGenerating;
   const canGenerate = hasImage && !isGenerating && !isLoadingExams;
   const sortedVerticalGuides = useMemo(
     () => [...verticalGuides].sort((a, b) => a.xRatio - b.xRatio),
@@ -1010,13 +1024,36 @@ export default function Home() {
     };
   }, [sourceImage, syncRenderImageSize]);
 
-  const draftForActiveQuestion = questionNo ? questionCardDraftMap[questionNo] : undefined;
-  const versionStateForActiveQuestion = questionNo ? questionVersionMap[questionNo] : undefined;
+  /** 참조가 아니라 내용이 바뀔 때만 문항 동기화(무한 렌더 #185 방지) */
+  const questionCardHydrationKey = useMemo(() => {
+    const d = questionNo ? questionCardDraftMap[questionNo] : undefined;
+    if (!d || !questionNo) return "";
+    return [
+      questionNo,
+      d.quickAnswer,
+      d.explanationBody,
+      d.rawResponse ?? "",
+      d.methodSelectionPolicy,
+      d.workflowStep,
+      String(d.representativeMethodIndex ?? ""),
+      d.selectedMethodIndexes.join(","),
+    ].join("\u001f");
+  }, [questionNo, questionCardDraftMap]);
+
+  const questionVersionHydrationKey = useMemo(() => {
+    const st = questionNo ? questionVersionMap[questionNo] : undefined;
+    if (!st || !questionNo) return "";
+    return [
+      questionNo,
+      st.selectedVersionId,
+      st.versions.map((v) => `${v.id}:${v.createdAt}`).join(","),
+    ].join("\u001f");
+  }, [questionNo, questionVersionMap]);
 
   useLayoutEffect(() => {
     if (!questionNo) return;
-    const draft = draftForActiveQuestion;
-    const selected = pickSelectedVersionForQuestion(versionStateForActiveQuestion);
+    const draft = questionCardDraftMap[questionNo];
+    const selected = pickSelectedVersionForQuestion(questionVersionMap[questionNo]);
     if (draft) {
       setQuickAnswer(draft.quickAnswer);
       setExplanationBody(draft.explanationBody);
@@ -1034,15 +1071,15 @@ export default function Home() {
   }, [
     applyVersionToEditor,
     questionNo,
-    draftForActiveQuestion,
-    versionStateForActiveQuestion,
+    questionCardHydrationKey,
+    questionVersionHydrationKey,
   ]);
 
   useEffect(() => {
     if (!questionNo || !hasGeneratedResult) return;
     const hasStoredForQuestion =
-      Boolean(questionCardDraftMap[questionNo]) ||
-      Boolean(pickSelectedVersionForQuestion(questionVersionMap[questionNo]));
+      Boolean(questionCardDraftMapRef.current[questionNo]) ||
+      Boolean(pickSelectedVersionForQuestion(questionVersionMapRef.current[questionNo]));
     if (!hasStoredForQuestion) return;
     setQuestionCardDraftMap((prev) => {
       const nextDraft: QuestionCardDraft = {
@@ -1077,8 +1114,6 @@ export default function Home() {
     hasGeneratedResult,
     methodSelectionPolicy,
     questionNo,
-    questionCardDraftMap,
-    questionVersionMap,
     quickAnswer,
     rawResponse,
     representativeMethodIndex,
@@ -2716,7 +2751,7 @@ export default function Home() {
                   </div>
                 </div>
                 <p className="mt-2 rounded bg-blue-50 p-2 text-xs text-blue-700">
-                  문제 박스 모드: 드래그해서 문제 영역을 추가하고, 저장 후 자동 보조 실행에 포함하세요.
+                  문제 박스 모드: 드래그해서 문제 영역을 추가하고, 저장 후 해설 대기열에 포함하세요.
                 </p>
                 <p className="mt-2 rounded bg-emerald-50 p-2 text-xs text-emerald-700">
                   박스를 드래그해 추가하면 자동 저장 목록에 포함됩니다. 추가된 박스는 드래그 이동, 우하단
@@ -2783,11 +2818,11 @@ export default function Home() {
               <>
             <div className="rounded-md border border-violet-200 bg-violet-50 p-3">
               <p className="text-sm font-semibold text-violet-900">
-                자동 보조 해설 대기열 ({queuedProblems.length})
+                해설 대기열 ({queuedProblems.length})
               </p>
               {queuedProblems.length === 0 ? (
                 <p className="mt-2 text-xs text-violet-700">
-                  문제 박스를 저장하면 순차 자동 실행 대기열 카드가 생성됩니다.
+                  문제 박스를 저장하면 해설 대기열에 항목이 추가됩니다.
                 </p>
               ) : (
                 <ul className="mt-2 space-y-1 text-xs text-violet-900">
@@ -2811,7 +2846,7 @@ export default function Home() {
                 disabled={queuedProblems.length === 0 || isBatchGenerating}
                 className="mt-3 w-full rounded-md bg-violet-600 px-4 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:bg-slate-300"
               >
-                {isBatchGenerating ? "순차 자동 해설 생성 중..." : "문제 박스 순서대로 자동 보조 실행"}
+                {isBatchGenerating ? "해설 제작 중..." : "해설 제작 실행"}
               </button>
             </div>
 
@@ -3114,7 +3149,7 @@ export default function Home() {
 
             <details className="rounded-md border border-slate-200 p-3">
               <summary className="cursor-pointer text-sm font-semibold text-slate-800">
-                보조 실행 설정 (텍스트 입력/상세 옵션)
+                실행 설정 (텍스트 입력/상세 옵션)
               </summary>
               <div className="mt-3 space-y-3">
                 <div className="rounded-md border border-slate-200 p-3">
@@ -3224,7 +3259,7 @@ export default function Home() {
 
             {batchResults.length > 0 && (
               <div className="rounded-md border border-slate-200 p-3 text-xs">
-                <p className="font-semibold text-slate-800">자동 보조 실행 결과</p>
+                <p className="font-semibold text-slate-800">해설 제작 결과</p>
                 <ul className="mt-2 space-y-1">
                   {batchResults.map((result, index) => (
                     <li key={`${result.questionNo}-${index}`}>
@@ -3302,7 +3337,7 @@ export default function Home() {
                 <div className="rounded-md border border-amber-300 bg-amber-50 p-5 text-center text-amber-900">
                   <p className="text-sm font-semibold">아직 해설이 생성되지 않았습니다.</p>
                   <p className="mt-1 text-xs">
-                    좌측에서 `문제 박스 순서대로 자동 보조 실행`을 먼저 실행해 문항 카드를 생성해 주세요.
+                    좌측에서 `해설 제작 실행`을 먼저 눌러 문항 카드를 생성해 주세요.
                   </p>
                 </div>
               )}
@@ -3318,19 +3353,39 @@ export default function Home() {
                     </p>
                   </header>
 
-                  <div className="mb-6 rounded-md border-2 border-blue-400 bg-blue-50 p-4">
-                    <p className="text-sm font-semibold text-blue-900">[빠른 정답 체크]</p>
-                    <p className="mt-2 text-2xl font-bold tracking-wide text-blue-950">
-                      {quickAnswer}
-                    </p>
-                  </div>
+                  {currentQuestionExplanationReady ? (
+                    <>
+                      <div className="mb-6 rounded-md border-2 border-blue-400 bg-blue-50 p-4">
+                        <p className="text-sm font-semibold text-blue-900">[빠른 정답 체크]</p>
+                        <p className="mt-2 text-2xl font-bold tracking-wide text-blue-950">
+                          {quickAnswer}
+                        </p>
+                      </div>
 
-                  <article
-                    key={`explanation-preview-${questionNo}`}
-                    className="newspaper-columns text-[15px] leading-7 text-slate-800"
-                  >
-                    {renderMethodBlocks(selectedExplanationBody)}
-                  </article>
+                      <article
+                        key={`explanation-preview-${questionNo}`}
+                        className="newspaper-columns text-[15px] leading-7 text-slate-800"
+                      >
+                        {renderMethodBlocks(selectedExplanationBody)}
+                      </article>
+                    </>
+                  ) : explanationGenerationBusy ? (
+                    <div className="rounded-md border border-sky-300 bg-sky-50 p-10 text-center text-sky-900">
+                      <p className="text-base font-semibold">해설 생성 중입니다</p>
+                      <p className="mt-2 text-sm text-sky-800">
+                        {questionNo ? `${questionNo}번 문항` : "선택 문항"}의 해설을 준비하고 있습니다.
+                        잠시만 기다려 주세요.
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="rounded-md border border-slate-300 bg-slate-50 p-10 text-center text-slate-700">
+                      <p className="text-base font-semibold">이 문항의 해설이 아직 없습니다</p>
+                      <p className="mt-2 text-sm text-slate-600">
+                        해설 제작이 끝난 뒤에도 보이지 않으면, 해당 문항 생성이 실패했을 수 있습니다.
+                        좌측 결과 목록을 확인하거나 문항을 다시 생성해 주세요.
+                      </p>
+                    </div>
+                  )}
                 </div>
               )}
             </>
