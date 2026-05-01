@@ -37,6 +37,12 @@ type BatchResult = {
   message: string;
 };
 
+type ExportDocEntry = {
+  questionNo: string;
+  quickAnswer: string;
+  body: string;
+};
+
 type VisionPrecheckResponse = {
   pass: boolean;
   score: number;
@@ -228,6 +234,34 @@ function hasCompletedExplanationBody(body: string) {
   const t = body.trim();
   if (!t) return false;
   return t !== DEFAULT_BODY.trim();
+}
+
+function validateDocEntriesBeforeExport(entries: ExportDocEntry[]) {
+  const issues: string[] = [];
+  const latexPattern =
+    /\$\$?[^$]*\$?\$?|\\(frac|sqrt|binom|left|right|cdot|times|div|pi|sin|cos|tan|log|ln|alpha|beta|gamma|theta)\b|\\[()[\]{}]/i;
+
+  entries.forEach((entry) => {
+    const quick = entry.quickAnswer.trim();
+    const body = entry.body.trim();
+    if (!quick || quick === "-") {
+      issues.push(`${entry.questionNo}번: [정답] 값이 비어 있습니다.`);
+    }
+    if (!hasCompletedExplanationBody(body)) {
+      issues.push(`${entry.questionNo}번: [해설] 본문이 비어 있거나 기본 템플릿 상태입니다.`);
+    }
+    if (body.length < 35) {
+      issues.push(`${entry.questionNo}번: [해설] 분량이 너무 짧습니다.`);
+    }
+    if (latexPattern.test(`${quick}\n${body}`)) {
+      issues.push(`${entry.questionNo}번: LaTeX 표기(\\frac, $, \\sqrt 등)가 남아 있습니다.`);
+    }
+    if (/이미지가\s*제공되지\s*않/.test(body)) {
+      issues.push(`${entry.questionNo}번: 이미지 부재 문구가 포함되어 있습니다.`);
+    }
+  });
+
+  return { ok: issues.length === 0, issues };
 }
 
 function extractSection(text: string, header: string, nextHeaders: string[]) {
@@ -596,6 +630,8 @@ export default function Home() {
   );
   const questionCardDraftMapRef = useRef<Record<string, QuestionCardDraft>>({});
   const questionVersionMapRef = useRef<Record<string, QuestionVersionState>>({});
+  const isHydratingQuestionRef = useRef(false);
+  const hydrationReleaseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   questionCardDraftMapRef.current = questionCardDraftMap;
   questionVersionMapRef.current = questionVersionMap;
   const [hmlFile, setHmlFile] = useState<File | null>(null);
@@ -624,6 +660,7 @@ export default function Home() {
   const [pendingDiagramBoxes, setPendingDiagramBoxes] = useState<DiagramBox[]>([]);
   const [batchResults, setBatchResults] = useState<BatchResult[]>([]);
   const [isBatchGenerating, setIsBatchGenerating] = useState(false);
+  const [isExportChecking, setIsExportChecking] = useState(false);
   const [selectedMethodIndexes, setSelectedMethodIndexes] = useState<number[]>([]);
   const [representativeMethodIndex, setRepresentativeMethodIndex] = useState<number | null>(
     null,
@@ -1052,22 +1089,43 @@ export default function Home() {
 
   useLayoutEffect(() => {
     if (!questionNo) return;
+    isHydratingQuestionRef.current = true;
+    if (hydrationReleaseTimerRef.current) {
+      clearTimeout(hydrationReleaseTimerRef.current);
+      hydrationReleaseTimerRef.current = null;
+    }
     const draft = questionCardDraftMap[questionNo];
     const selected = pickSelectedVersionForQuestion(questionVersionMap[questionNo]);
     if (draft) {
-      setQuickAnswer(draft.quickAnswer);
-      setExplanationBody(draft.explanationBody);
-      setSelectedMethodIndexes(
-        draft.selectedMethodIndexes.length > 0 ? draft.selectedMethodIndexes : [0],
-      );
-      setRepresentativeMethodIndex(draft.representativeMethodIndex);
-      setMethodSelectionPolicy(draft.methodSelectionPolicy);
-      setWorkflowStep(draft.workflowStep);
-      setRawResponse(draft.rawResponse?.trim() ? draft.rawResponse : selected?.rawResponse ?? "");
-      return;
+      const safeIndexes = draft.selectedMethodIndexes.length > 0 ? draft.selectedMethodIndexes : [0];
+      if (quickAnswer !== draft.quickAnswer) setQuickAnswer(draft.quickAnswer);
+      if (explanationBody !== draft.explanationBody) setExplanationBody(draft.explanationBody);
+      if (!isSameNumberArray(selectedMethodIndexes, safeIndexes)) {
+        setSelectedMethodIndexes(safeIndexes);
+      }
+      if (representativeMethodIndex !== draft.representativeMethodIndex) {
+        setRepresentativeMethodIndex(draft.representativeMethodIndex);
+      }
+      if (methodSelectionPolicy !== draft.methodSelectionPolicy) {
+        setMethodSelectionPolicy(draft.methodSelectionPolicy);
+      }
+      if (workflowStep !== draft.workflowStep) setWorkflowStep(draft.workflowStep);
+      const nextRaw = draft.rawResponse?.trim() ? draft.rawResponse : selected?.rawResponse ?? "";
+      if (rawResponse !== nextRaw) setRawResponse(nextRaw);
+    } else if (selected) {
+      applyVersionToEditor(selected);
     }
-    if (!selected) return;
-    applyVersionToEditor(selected);
+    hydrationReleaseTimerRef.current = setTimeout(() => {
+      isHydratingQuestionRef.current = false;
+      hydrationReleaseTimerRef.current = null;
+    }, 0);
+    return () => {
+      if (hydrationReleaseTimerRef.current) {
+        clearTimeout(hydrationReleaseTimerRef.current);
+        hydrationReleaseTimerRef.current = null;
+      }
+      isHydratingQuestionRef.current = false;
+    };
   }, [
     applyVersionToEditor,
     questionNo,
@@ -1077,6 +1135,7 @@ export default function Home() {
 
   useEffect(() => {
     if (!questionNo || !hasGeneratedResult) return;
+    if (isHydratingQuestionRef.current) return;
     const hasStoredForQuestion =
       Boolean(questionCardDraftMapRef.current[questionNo]) ||
       Boolean(pickSelectedVersionForQuestion(questionVersionMapRef.current[questionNo]));
@@ -2195,6 +2254,7 @@ export default function Home() {
       return;
     }
     try {
+      setIsExportChecking(true);
       setErrorMessage("");
       setSuccessMessage("");
       const docEntries = cardQuestionNos
@@ -2219,12 +2279,26 @@ export default function Home() {
             body: body.trim() || baseBody.trim() || "(해설 본문 없음)",
           };
         })
-        .filter(Boolean) as Array<{ questionNo: string; quickAnswer: string; body: string }>;
+        .filter(Boolean) as ExportDocEntry[];
 
       if (docEntries.length === 0) {
         setErrorMessage("DOCX에 넣을 문항 카드가 없습니다. 카드 생성/선택 상태를 확인해 주세요.");
         return;
       }
+
+      const exportValidation = validateDocEntriesBeforeExport(docEntries);
+      if (!exportValidation.ok) {
+        const preview = exportValidation.issues.slice(0, 8).join("\n- ");
+        const omitted =
+          exportValidation.issues.length > 8
+            ? `\n(외 ${exportValidation.issues.length - 8}건)`
+            : "";
+        setErrorMessage(
+          `DOCX 내보내기 전 규칙 검증에서 ${exportValidation.issues.length}건이 발견되었습니다.\n- ${preview}${omitted}\n수정 후 다시 내보내기해 주세요.`,
+        );
+        return;
+      }
+      setSuccessMessage("내보내기 전 규칙 검증을 통과했습니다. DOCX를 생성합니다...");
 
       const formData = new FormData();
       formData.append("examName", selectedExam || "직접업로드");
@@ -2256,6 +2330,8 @@ export default function Home() {
     } catch (error) {
       const message = error instanceof Error ? error.message : "DOCX 저장 중 오류가 발생했습니다.";
       setErrorMessage(message);
+    } finally {
+      setIsExportChecking(false);
     }
   };
 
@@ -2856,6 +2932,12 @@ export default function Home() {
                 <p className="mt-1 text-xs text-sky-800">
                   자동 생성 후 카드를 눌러 빠른정답/해설 채택/메인 풀이 순서를 편집하세요.
                 </p>
+                {explanationGenerationBusy && (
+                  <p className="mt-2 rounded border border-amber-300 bg-amber-50 px-2 py-1.5 text-[11px] text-amber-900">
+                    해설 제작 중에는 문항 카드·문항 선택·결과 목록에서 문항을 바꿀 수 없습니다. 완료 후
+                    전환해 주세요.
+                  </p>
+                )}
                 <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
                   {cardQuestionNos.map((no) => {
                     const draft = questionCardDraftMap[no];
@@ -2878,8 +2960,11 @@ export default function Home() {
                       >
                         <button
                           type="button"
+                          disabled={explanationGenerationBusy}
                           onClick={() => openQuestionCard(no)}
-                          className="w-full text-left"
+                          className={`w-full text-left ${
+                            explanationGenerationBusy ? "cursor-not-allowed opacity-60" : ""
+                          }`}
                         >
                           <p className="font-semibold">{no}번 문항</p>
                           <p className="mt-1">빠른정답: {answerDisplay}</p>
@@ -2905,6 +2990,7 @@ export default function Home() {
                           </label>
                           <select
                             value={cardProfileOverride ?? ""}
+                            disabled={explanationGenerationBusy}
                             onChange={(event) => {
                               const v = event.target.value as SolverModelProfile | "";
                               setQuestionSolverProfileOverrides((prev) => {
@@ -2915,6 +3001,8 @@ export default function Home() {
                               });
                             }}
                             className={`min-w-0 flex-1 rounded border px-1 py-0.5 text-[10px] ${
+                              explanationGenerationBusy ? "cursor-not-allowed opacity-70" : ""
+                            } ${
                               isActive
                                 ? "border-sky-400 bg-white text-slate-900"
                                 : "border-slate-300 bg-white"
@@ -2942,8 +3030,11 @@ export default function Home() {
                   <label className="text-[11px] font-semibold text-slate-600">문항 선택</label>
                   <select
                     value={questionNo}
+                    disabled={explanationGenerationBusy}
                     onChange={(event) => openQuestionCard(event.target.value)}
-                    className="mt-1 w-full rounded border border-slate-300 bg-white px-2 py-1 text-xs"
+                    className={`mt-1 w-full rounded border border-slate-300 bg-white px-2 py-1 text-xs ${
+                      explanationGenerationBusy ? "cursor-not-allowed opacity-70" : ""
+                    }`}
                   >
                     {questionNoOptions.map((item) => (
                       <option key={`q-opt-${item}`} value={item}>
@@ -3265,8 +3356,13 @@ export default function Home() {
                     <li key={`${result.questionNo}-${index}`}>
                       <button
                         type="button"
+                        disabled={explanationGenerationBusy}
                         onClick={() => openQuestionCard(result.questionNo)}
-                        className="w-full rounded bg-slate-50 px-2 py-1 text-left hover:bg-slate-100"
+                        className={`w-full rounded px-2 py-1 text-left ${
+                          explanationGenerationBusy
+                            ? "cursor-not-allowed bg-slate-100 text-slate-500"
+                            : "bg-slate-50 hover:bg-slate-100"
+                        }`}
                       >
                         {result.questionNo}번 - {result.status === "success" ? "성공" : "실패"} / 빠른정답:{" "}
                         {normalizeQuickAnswerForDisplay(result.quickAnswer)} / {result.message}
@@ -3395,10 +3491,10 @@ export default function Home() {
             <div className="mt-4 grid grid-cols-1 gap-3">
               <button
                 onClick={handleSaveCurrentDocx}
-                disabled={cardQuestionNos.length === 0}
+                disabled={cardQuestionNos.length === 0 || isExportChecking}
                 className="w-full rounded-md bg-indigo-600 px-4 py-3 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:bg-slate-300"
               >
-                해설 제작 (DOCX)
+                {isExportChecking ? "내보내기 전 규칙 검증 중..." : "해설 제작 (DOCX)"}
               </button>
             </div>
           )}
