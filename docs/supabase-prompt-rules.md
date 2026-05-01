@@ -40,6 +40,9 @@ insert into public.prompt_rules (
 - `SUPABASE_URL`
 - `SUPABASE_SERVICE_ROLE_KEY`
 - `PROMPT_RULES_ADMIN_TOKEN` (선택: 규칙 자동 업데이트 API 보호용)
+- `PROMPT_RULES_RUNTIME_ENABLED` (선택: `false`면 Supabase 런타임 규칙 주입 비활성화)
+- `PROMPT_RULES_MAX_CONSTRAINT_CHARS` (선택: 생성 시 `extraConstraints` 주입 길이 상한, 기본 1200)
+- `PROMPT_RULES_MAX_EXAMPLES_CHARS` (선택: 생성 시 난이도별 examples 주입 길이 상한, 기본 900)
 
 값이 없거나 조회 실패하면 기존 내장 프롬프트로 자동 폴백합니다.
 
@@ -55,8 +58,18 @@ insert into public.prompt_rules (
 - 입력 상한:
   - `weakExplanation`: 최대 4000자
   - `targetStyleHint`: 최대 1000자
+- 내부 저장 상한(코드 가드):
+  - `extraConstraints`: 최대 1200자 / 최대 40줄
+  - `examples_easy|balanced|killer`: 각각 최대 900자 / 최대 40줄
 - 보안:
   - `PROMPT_RULES_ADMIN_TOKEN`이 설정된 경우 요청 헤더 `x-admin-token`이 필요합니다.
+
+## 5-1) 과누적 방지/안전장치
+
+- Supabase에 규칙을 적용할 때 기존 active 규칙과 병합되며, 라인 단위 중복 제거를 수행합니다.
+- 병합 결과는 길이/줄 수 하드캡을 적용해 과도 누적을 제한합니다.
+- 생성 시점에도 프롬프트 예산 가드를 적용해, 런타임 예시가 길면 내장 예시로 자동 폴백합니다.
+- 운영 중 품질 이상 시 `PROMPT_RULES_RUNTIME_ENABLED=false`로 즉시 런타임 규칙 주입을 끌 수 있습니다.
 
 ## 6) 규칙 이력/롤백 API
 

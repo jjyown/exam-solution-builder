@@ -15,17 +15,28 @@ type VisionPrecheckResult = {
 };
 
 function parseModelCandidatesFromEnv(envKey: string, fallback: string[]) {
+  const normalize = (models: string[]) =>
+    Array.from(
+      new Set(
+        models
+          .map((item) => item.trim())
+          .filter(Boolean)
+          .filter((name) => !/^gemini-1\.5-(pro|flash)$/i.test(name)),
+      ),
+    );
+
   const raw = process.env[envKey]?.trim();
-  if (!raw) return fallback;
-  const parsed = raw
-    .split(",")
-    .map((item) => item.trim())
-    .filter(Boolean);
-  return parsed.length > 0 ? parsed : fallback;
+  if (!raw) {
+    const normalizedFallback = normalize(fallback);
+    return normalizedFallback.length > 0 ? normalizedFallback : ["gemini-2.0-flash"];
+  }
+  const parsed = normalize(raw.split(","));
+  if (parsed.length > 0) return parsed;
+  const normalizedFallback = normalize(fallback);
+  return normalizedFallback.length > 0 ? normalizedFallback : ["gemini-2.0-flash"];
 }
 
 const PRECHECK_MODEL_CANDIDATES = parseModelCandidatesFromEnv("GEMINI_MODELS_PRECHECK", [
-  "gemini-1.5-flash",
   "gemini-2.0-flash",
 ]);
 
@@ -125,6 +136,10 @@ export async function POST(request: Request) {
       } catch (error) {
         const message =
           error instanceof Error ? error.message : "알 수 없는 사전검증 모델 오류";
+        // 모델 미지원(404) 메시지는 소음이 커서 details에서 제외하고 다음 후보로 넘어간다.
+        if (/not found|is not supported/i.test(message)) {
+          continue;
+        }
         failures.push(`${modelName}: ${message}`);
       }
     }

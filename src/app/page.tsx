@@ -359,6 +359,13 @@ function isRetryableStatus(status: number) {
   return status === 429 || status === 408 || status === 502 || status === 503 || status === 504;
 }
 
+function hasRateLimitSignal(status: number, details?: string[], message?: string) {
+  if (status === 429) return true;
+  const pattern = /429|Too Many Requests|Resource exhausted/i;
+  if (message && pattern.test(message)) return true;
+  return !!details?.some((detail) => pattern.test(detail));
+}
+
 async function fetchWithBackoff(
   input: RequestInfo | URL,
   init: RequestInit,
@@ -806,6 +813,12 @@ export default function Home() {
   );
   const [errorMessage, setErrorMessage] = useState("");
   const [successMessage, setSuccessMessage] = useState("");
+
+  const appendQualityWarningUnique = useCallback((message: string) => {
+    const normalized = message.trim();
+    if (!normalized) return;
+    setQualityWarnings((prev) => (prev.includes(normalized) ? prev : [...prev, normalized]));
+  }, []);
 
   const hasImage = Boolean(sourceImage && sourceFile);
   const selectedExamKind = selectedExam ? getExamSourceKind(selectedExam) : "unknown";
@@ -1585,25 +1598,43 @@ export default function Home() {
       const imageBase64 = selectedProblemCrop
         ? cropImageToBase64(imageRef.current, selectedProblemCrop, mimeType)
         : await toBase64(sourceFile);
-      const visionPrecheckRes = await fetch("/api/precheck-extraction", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          imageBase64,
-          imageMimeType: mimeType,
-          crop: selectedProblemCrop,
-        }),
-      });
+      const visionPrecheckRes = await fetchWithBackoff(
+        "/api/precheck-extraction",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            imageBase64,
+            imageMimeType: mimeType,
+            crop: selectedProblemCrop,
+          }),
+        },
+        { retries: 1 },
+      );
       const visionPrecheckData = (await visionPrecheckRes.json()) as VisionPrecheckResponse;
+      if (visionPrecheckRes.status === 429) {
+        appendQualityWarningUnique(
+          "비전 사전검증 429 혼잡이 감지되어 자동 재시도 후 진행했습니다. 잠시 후 다시 시도하면 더 안정적입니다.",
+        );
+      }
       if (!visionPrecheckRes.ok) {
+        const precheckRateLimited = hasRateLimitSignal(
+          visionPrecheckRes.status,
+          visionPrecheckData.details,
+          visionPrecheckData.error,
+        );
+        if (precheckRateLimited) {
+          throw new Error(
+            "비전 사전검증이 429 혼잡으로 실패하여 생성을 중단했습니다. 잠시 후 다시 시도해 주세요.",
+          );
+        }
         if (visionPrecheckRes.status >= 500) {
           const details = visionPrecheckData.details?.join(" | ");
-          setQualityWarnings((prev) => [
-            ...prev,
+          appendQualityWarningUnique(
             `비전 사전검증 서버 오류(${visionPrecheckRes.status})로 검증을 건너뛰고 생성을 계속합니다.${
               details ? ` 상세: ${details}` : ""
             }`,
-          ]);
+          );
         } else {
           throw new Error(
             visionPrecheckData.error || "문제 이미지 비전 사전검증 호출에 실패했습니다.",
@@ -1624,35 +1655,48 @@ export default function Home() {
         mimeType: box.mimeType || mimeType,
       }));
 
-      const response = await fetch("/api/generate-explanation", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
+      const response = await fetchWithBackoff(
+        "/api/generate-explanation",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            questionText: useTextInput ? questionText : "",
+            imageBase64,
+            imageMimeType: mimeType,
+            diagramImages: liveDiagramImages,
+            quickAnswerPageHint:
+              quickAnswerPages.length > 0
+                ? `빠른정답 참고 페이지: ${quickAnswerPages.join(", ")}`
+                : "",
+            explanationReferenceHint:
+              explanationRefPages.length > 0
+                ? `해설 참고 페이지: ${explanationRefPages.join(", ")}`
+                : "",
+            generationMode,
+            solverModelProfile: effectiveSolverProfileForCurrentQuestion,
+            includeDiagramExplanation,
+            explanationSelectionMode,
+            showAllMethods,
+            crop: selectedProblemCrop,
+          }),
         },
-        body: JSON.stringify({
-          questionText: useTextInput ? questionText : "",
-          imageBase64,
-          imageMimeType: mimeType,
-          diagramImages: liveDiagramImages,
-          quickAnswerPageHint:
-            quickAnswerPages.length > 0
-              ? `빠른정답 참고 페이지: ${quickAnswerPages.join(", ")}`
-              : "",
-          explanationReferenceHint:
-            explanationRefPages.length > 0
-              ? `해설 참고 페이지: ${explanationRefPages.join(", ")}`
-              : "",
-          generationMode,
-          solverModelProfile: effectiveSolverProfileForCurrentQuestion,
-          includeDiagramExplanation,
-          explanationSelectionMode,
-          showAllMethods,
-          crop: selectedProblemCrop,
-        }),
-      });
+        { retries: 1 },
+      );
 
       if (!response.ok) {
         const data = (await response.json()) as { error?: string; details?: string[] };
+        const hasRateLimitSignal =
+          response.status === 429 ||
+          !!data.details?.some((detail) => /429|Too Many Requests|Resource exhausted/i.test(detail)) ||
+          /429|Too Many Requests|Resource exhausted/i.test(data.error ?? "");
+        if (hasRateLimitSignal) {
+          appendQualityWarningUnique(
+            "해설 생성 429 혼잡이 감지되었습니다. 자동 재시도를 수행했으며, 반복 시 잠시 후 재시도해 주세요.",
+          );
+        }
         const detailText =
           data.details && data.details.length > 0
             ? `\n상세: ${data.details.join(" | ")}`
@@ -2269,7 +2313,24 @@ export default function Home() {
 
       const results: BatchResult[] = [];
       const successfulQuestionNos: string[] = [];
-      const perQuestionDelayMs = 4000;
+      const basePerQuestionDelayMs = 4000;
+      const maxPerQuestionDelayMs = 14000;
+      const perQuestionDelayStepMs = 2000;
+      let perQuestionDelayMs = basePerQuestionDelayMs;
+
+      const bumpBackpressureDelay = (contextLabel: string) => {
+        const nextDelayMs = Math.min(maxPerQuestionDelayMs, perQuestionDelayMs + perQuestionDelayStepMs);
+        if (nextDelayMs === perQuestionDelayMs) return;
+        perQuestionDelayMs = nextDelayMs;
+        appendQualityWarningUnique(
+          `${contextLabel}: 429 혼잡 감지로 다음 문항 대기시간을 ${Math.round(perQuestionDelayMs / 1000)}초로 늘렸습니다.`,
+        );
+      };
+
+      const relaxBackpressureDelay = () => {
+        if (perQuestionDelayMs <= basePerQuestionDelayMs) return;
+        perQuestionDelayMs = Math.max(basePerQuestionDelayMs, perQuestionDelayMs - 500);
+      };
 
       for (let itemIndex = 0; itemIndex < queuedProblems.length; itemIndex += 1) {
         const item = queuedProblems[itemIndex];
@@ -2285,25 +2346,46 @@ export default function Home() {
             continue;
           }
 
-          const visionPrecheckRes = await fetchWithBackoff("/api/precheck-extraction", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              imageBase64: item.imageBase64,
-              imageMimeType: item.imageMimeType,
-              crop: item.crop,
-            }),
-          });
+          const visionPrecheckRes = await fetchWithBackoff(
+            "/api/precheck-extraction",
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                imageBase64: item.imageBase64,
+                imageMimeType: item.imageMimeType,
+                crop: item.crop,
+              }),
+            },
+            { retries: 0 },
+          );
           const visionPrecheckData = (await visionPrecheckRes.json()) as VisionPrecheckResponse;
+          if (visionPrecheckRes.status === 429) {
+            bumpBackpressureDelay(`${item.questionNo}번 사전검증`);
+          }
           if (!visionPrecheckRes.ok) {
+            const precheckRateLimited = hasRateLimitSignal(
+              visionPrecheckRes.status,
+              visionPrecheckData.details,
+              visionPrecheckData.error,
+            );
+            if (precheckRateLimited) {
+              results.push({
+                questionNo: item.questionNo,
+                quickAnswer: "-",
+                status: "error",
+                message:
+                  "생성 중단(비전 사전검증 429 혼잡): 잠시 후 다시 시도해 주세요.",
+              });
+              continue;
+            }
             if (visionPrecheckRes.status >= 500) {
               const detailText = visionPrecheckData.details?.join(" | ");
-              setQualityWarnings((prev) => [
-                ...prev,
+              appendQualityWarningUnique(
                 `${item.questionNo}번: 비전 사전검증 서버 오류(${visionPrecheckRes.status})로 검증을 건너뛰고 생성을 계속합니다.${
                   detailText ? ` 상세: ${detailText}` : ""
                 }`,
-              ]);
+              );
             } else {
               results.push({
                 questionNo: item.questionNo,
@@ -2364,6 +2446,13 @@ export default function Home() {
 
           if (!response.ok) {
             const data = (await response.json()) as { error?: string; details?: string[] };
+            const hasRateLimitSignal =
+              response.status === 429 ||
+              !!data.details?.some((detail) => /429|Too Many Requests|Resource exhausted/i.test(detail)) ||
+              /429|Too Many Requests|Resource exhausted/i.test(data.error ?? "");
+            if (hasRateLimitSignal) {
+              bumpBackpressureDelay(`${item.questionNo}번 해설생성`);
+            }
             const detailText =
               data.details && data.details.length > 0
                 ? ` / 상세: ${data.details.join(" | ")}`
@@ -2430,6 +2519,7 @@ export default function Home() {
                 }`,
           });
           successfulQuestionNos.push(item.questionNo);
+          relaxBackpressureDelay();
         } finally {
           if (itemIndex < queuedProblems.length - 1) {
             await sleep(perQuestionDelayMs);
@@ -2497,10 +2587,9 @@ export default function Home() {
         "Supabase 규칙을 자동 업데이트했습니다. 다음 해설 생성부터 바로 반영됩니다.",
       );
       if (data.rulesPreview?.extraConstraints) {
-        setQualityWarnings((prev) => [
-          ...prev,
+        appendQualityWarningUnique(
           "규칙 자동 업데이트 완료: 운영자 추가 제한 규칙이 갱신되었습니다.",
-        ]);
+        );
       }
       await loadPromptRuleVersions();
     } catch (error) {

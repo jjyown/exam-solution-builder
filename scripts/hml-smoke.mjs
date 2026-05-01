@@ -106,7 +106,15 @@ async function main() {
       2,
     ),
   );
-  if (failed.length > 0) process.exit(1);
+  return failed.length > 0 ? 1 : 0;
 }
 
-await main();
+let exitCode = 0;
+try {
+  exitCode = await main();
+} catch (error) {
+  console.error(error);
+  exitCode = 1;
+} finally {
+  process.exit(exitCode);
+}

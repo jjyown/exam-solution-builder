@@ -58,13 +58,30 @@ export function buildSystemInstruction(
   profile: "easy" | "balanced" | "killer",
   runtimeRules?: RuntimePromptRules | null,
 ) {
-  const examples =
+  const fallbackExamples =
     profile === "easy"
-      ? runtimeRules?.examplesEasy || EXAMPLES_EASY
+      ? EXAMPLES_EASY
       : profile === "killer"
-        ? runtimeRules?.examplesKiller || EXAMPLES_KILLER
-        : runtimeRules?.examplesBalanced || EXAMPLES_BALANCED;
-  const constraintText = runtimeRules?.extraConstraints?.trim();
+        ? EXAMPLES_KILLER
+        : EXAMPLES_BALANCED;
+  const runtimeExamples =
+    profile === "easy"
+      ? runtimeRules?.examplesEasy
+      : profile === "killer"
+        ? runtimeRules?.examplesKiller
+        : runtimeRules?.examplesBalanced;
+  const maxConstraintChars = Number(process.env.PROMPT_RULES_MAX_CONSTRAINT_CHARS || "1200");
+  const maxExamplesChars = Number(process.env.PROMPT_RULES_MAX_EXAMPLES_CHARS || "900");
+  const normalizedConstraint = runtimeRules?.extraConstraints?.trim() || "";
+  const normalizedExamples = runtimeExamples?.trim() || "";
+  const constraintText =
+    normalizedConstraint.length > maxConstraintChars
+      ? normalizedConstraint.slice(normalizedConstraint.length - maxConstraintChars).trim()
+      : normalizedConstraint;
+  const examples =
+    normalizedExamples.length > 0 && normalizedExamples.length <= maxExamplesChars
+      ? normalizedExamples
+      : fallbackExamples;
   return `${SYSTEM_PROMPT_BASE}
 
 ${constraintText ? `[운영자 추가 제한 규칙]\n${constraintText}\n` : ""}

@@ -35,6 +35,51 @@ export type PromptRuleVersionItem = {
   extra_constraints_preview: string;
 };
 
+const DEFAULT_RULE_LIMITS = {
+  extraConstraints: { maxChars: 1200, maxLines: 40 },
+  examplesEasy: { maxChars: 900, maxLines: 30 },
+  examplesBalanced: { maxChars: 900, maxLines: 30 },
+  examplesKiller: { maxChars: 900, maxLines: 30 },
+} as const;
+
+function trimByLimits(text: string | null | undefined, maxChars: number, maxLines: number) {
+  const normalized = String(text || "")
+    .replace(/\r\n/g, "\n")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (normalized.length === 0) return null;
+  const lineLimited = normalized.slice(-maxLines);
+  const joined = lineLimited.join("\n");
+  if (joined.length <= maxChars) return joined;
+  return joined.slice(joined.length - maxChars).trim() || null;
+}
+
+function normalizeRuntimeRules(rules: RuntimePromptRules): RuntimePromptRules {
+  return {
+    extraConstraints: trimByLimits(
+      rules.extraConstraints,
+      DEFAULT_RULE_LIMITS.extraConstraints.maxChars,
+      DEFAULT_RULE_LIMITS.extraConstraints.maxLines,
+    ) || undefined,
+    examplesEasy: trimByLimits(
+      rules.examplesEasy,
+      DEFAULT_RULE_LIMITS.examplesEasy.maxChars,
+      DEFAULT_RULE_LIMITS.examplesEasy.maxLines,
+    ) || undefined,
+    examplesBalanced: trimByLimits(
+      rules.examplesBalanced,
+      DEFAULT_RULE_LIMITS.examplesBalanced.maxChars,
+      DEFAULT_RULE_LIMITS.examplesBalanced.maxLines,
+    ) || undefined,
+    examplesKiller: trimByLimits(
+      rules.examplesKiller,
+      DEFAULT_RULE_LIMITS.examplesKiller.maxChars,
+      DEFAULT_RULE_LIMITS.examplesKiller.maxLines,
+    ) || undefined,
+  };
+}
+
 function isMissingTableError(error: unknown) {
   if (!error || typeof error !== "object") return false;
   const code = "code" in error ? String((error as { code?: string }).code || "") : "";
@@ -89,6 +134,9 @@ function createSupabaseAdminClient() {
 }
 
 export async function getRuntimePromptRules(): Promise<RuntimePromptRules | null> {
+  const runtimeEnabled = (process.env.PROMPT_RULES_RUNTIME_ENABLED || "true").trim().toLowerCase();
+  if (runtimeEnabled === "false") return null;
+
   const client = createSupabaseAdminClient();
   if (!client) return null;
 
@@ -101,12 +149,12 @@ export async function getRuntimePromptRules(): Promise<RuntimePromptRules | null
     .maybeSingle<PromptRulesRow>();
 
   if (error || !data) return null;
-  return {
+  return normalizeRuntimeRules({
     extraConstraints: data.extra_constraints || undefined,
     examplesEasy: data.examples_easy || undefined,
     examplesBalanced: data.examples_balanced || undefined,
     examplesKiller: data.examples_killer || undefined,
-  };
+  });
 }
 
 export async function applyRuntimePromptRules(rules: RuntimePromptRules) {
@@ -137,12 +185,19 @@ export async function applyRuntimePromptRules(rules: RuntimePromptRules) {
     rules.examplesKiller,
   );
 
+  const normalizedMerged = normalizeRuntimeRules({
+    extraConstraints: mergedExtraConstraints || undefined,
+    examplesEasy: mergedExamplesEasy || undefined,
+    examplesBalanced: mergedExamplesBalanced || undefined,
+    examplesKiller: mergedExamplesKiller || undefined,
+  });
+
   const payload: PromptRulesRow = {
     is_active: true,
-    extra_constraints: mergedExtraConstraints,
-    examples_easy: mergedExamplesEasy,
-    examples_balanced: mergedExamplesBalanced,
-    examples_killer: mergedExamplesKiller,
+    extra_constraints: normalizedMerged.extraConstraints || null,
+    examples_easy: normalizedMerged.examplesEasy || null,
+    examples_balanced: normalizedMerged.examplesBalanced || null,
+    examples_killer: normalizedMerged.examplesKiller || null,
     updated_at: new Date().toISOString(),
   };
 

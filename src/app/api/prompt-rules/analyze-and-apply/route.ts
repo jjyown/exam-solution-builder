@@ -24,6 +24,9 @@ type RulesPayload = {
 
 const MAX_WEAK_EXPLANATION_LEN = 4000;
 const MAX_STYLE_HINT_LEN = 1000;
+const MAX_RULE_EXTRA_CHARS = 1200;
+const MAX_RULE_EXAMPLE_CHARS = 900;
+const MAX_RULE_LINES = 40;
 
 function extractJsonObject(raw: string) {
   const cleaned = raw.replace(/```json|```/gi, "").trim();
@@ -45,11 +48,24 @@ function parseJsonSafely(raw: string) {
 }
 
 function sanitizeRules(payload: RulesPayload): RuntimePromptRules {
+  const compactText = (raw: string | undefined, maxChars: number) => {
+    const lines = String(raw || "")
+      .replace(/\r\n/g, "\n")
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .slice(0, MAX_RULE_LINES);
+    if (lines.length === 0) return undefined;
+    const joined = lines.join("\n");
+    if (joined.length <= maxChars) return joined;
+    return joined.slice(0, maxChars).trim() || undefined;
+  };
+
   return {
-    extraConstraints: String(payload.extraConstraints || "").trim() || undefined,
-    examplesEasy: String(payload.examplesEasy || "").trim() || undefined,
-    examplesBalanced: String(payload.examplesBalanced || "").trim() || undefined,
-    examplesKiller: String(payload.examplesKiller || "").trim() || undefined,
+    extraConstraints: compactText(payload.extraConstraints, MAX_RULE_EXTRA_CHARS),
+    examplesEasy: compactText(payload.examplesEasy, MAX_RULE_EXAMPLE_CHARS),
+    examplesBalanced: compactText(payload.examplesBalanced, MAX_RULE_EXAMPLE_CHARS),
+    examplesKiller: compactText(payload.examplesKiller, MAX_RULE_EXAMPLE_CHARS),
   };
 }
 
