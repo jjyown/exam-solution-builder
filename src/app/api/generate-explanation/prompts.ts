@@ -1,3 +1,10 @@
+export type RuntimePromptRules = {
+  extraConstraints?: string;
+  examplesEasy?: string;
+  examplesBalanced?: string;
+  examplesKiller?: string;
+};
+
 export const SYSTEM_PROMPT_BASE = `당신은 중고등학생 대상 수학 전문 학원의 교재 및 해설 제작 마스터입니다.
 사용자가 구분선(예: '---' 또는 '===')으로 구분하여 여러 개의 수학 문제를 한 번에 입력할 수 있습니다.
 당신의 임무는 각 문제를 정확히 풀이하고, 학생이 따라올 수 있는 정석 풀이를 제공하는 것입니다.
@@ -47,9 +54,20 @@ export function getProfileExamples(profile: "easy" | "balanced" | "killer") {
   return EXAMPLES_BALANCED;
 }
 
-export function buildSystemInstruction(profile: "easy" | "balanced" | "killer") {
-  const examples = getProfileExamples(profile);
+export function buildSystemInstruction(
+  profile: "easy" | "balanced" | "killer",
+  runtimeRules?: RuntimePromptRules | null,
+) {
+  const examples =
+    profile === "easy"
+      ? runtimeRules?.examplesEasy || EXAMPLES_EASY
+      : profile === "killer"
+        ? runtimeRules?.examplesKiller || EXAMPLES_KILLER
+        : runtimeRules?.examplesBalanced || EXAMPLES_BALANCED;
+  const constraintText = runtimeRules?.extraConstraints?.trim();
   return `${SYSTEM_PROMPT_BASE}
+
+${constraintText ? `[운영자 추가 제한 규칙]\n${constraintText}\n` : ""}
 
 [스타일 기준 예시]
 ${examples}`;
