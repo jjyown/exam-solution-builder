@@ -1,0 +1,130 @@
+# Supabase Prompt Rules
+
+앱에서 제한 규칙을 동적으로 반영하려면 Supabase `prompt_rules` 테이블을 사용합니다.
+
+## 1) 테이블 생성 SQL
+
+```sql
+create table if not exists public.prompt_rules (
+  id bigserial primary key,
+  is_active boolean not null default true,
+  extra_constraints text,
+  examples_easy text,
+  examples_balanced text,
+  examples_killer text,
+  updated_at timestamptz not null default now()
+);
+
+create index if not exists idx_prompt_rules_active_updated
+  on public.prompt_rules (is_active, updated_at desc);
+```
+
+## 2) 초기 데이터 예시
+
+```sql
+insert into public.prompt_rules (
+  is_active,
+  extra_constraints,
+  examples_balanced
+) values (
+  true,
+  '- 근사/추정/어림/약/≈ 표현을 절대 사용하지 마.\n- [정답], [해설] 형식을 유지해.',
+  '[예시]\n[정답] 2\n[해설]\n1. ...\n2. ...\n3. 따라서 정답은 2이다.'
+);
+```
+
+## 3) 환경변수
+
+아래 환경변수가 설정되면 `generate-explanation` API가 활성 규칙 1건을 읽어 시스템 프롬프트에 주입합니다.
+
+- `SUPABASE_URL`
+- `SUPABASE_SERVICE_ROLE_KEY`
+- `PROMPT_RULES_ADMIN_TOKEN` (선택: 규칙 자동 업데이트 API 보호용)
+
+값이 없거나 조회 실패하면 기존 내장 프롬프트로 자동 폴백합니다.
+
+## 4) 반영 방식
+
+- 요청 시마다 `prompt_rules`에서 `is_active = true`인 최신 1건 조회
+- `extra_constraints`는 `[운영자 추가 제한 규칙]` 섹션으로 주입
+- 난이도별 예시(`examples_easy/balanced/killer`)는 해당 프로필 예시를 덮어씀
+
+## 5) 자동 규칙 업데이트 API
+
+- 엔드포인트: `POST /api/prompt-rules/analyze-and-apply`
+- 입력 상한:
+  - `weakExplanation`: 최대 4000자
+  - `targetStyleHint`: 최대 1000자
+- 보안:
+  - `PROMPT_RULES_ADMIN_TOKEN`이 설정된 경우 요청 헤더 `x-admin-token`이 필요합니다.
+
+## 6) 규칙 이력/롤백 API
+
+- 이력 조회: `GET /api/prompt-rules/history?limit=10`
+- 롤백: `POST /api/prompt-rules/rollback` (body: `{ "ruleId": number }`)
+- 롤백도 운영자 토큰(`x-admin-token`) 검증을 동일하게 사용합니다.
+
+## 7) 이벤트 로그 테이블(선택)
+
+아래 테이블을 만들면 규칙 적용/롤백 이력이 저장됩니다.
+
+```sql
+create table if not exists public.prompt_rule_events (
+  id bigserial primary key,
+  event_type text not null,
+  rule_id bigint,
+  actor text,
+  reason text,
+  weak_explanation_hash text,
+  model text,
+  failure_details text,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists idx_prompt_rule_events_created_at
+  on public.prompt_rule_events (created_at desc);
+```
+
+## 8) 원자적 적용 RPC(권장)
+
+아래 함수를 만들면 `analyze-and-apply`가 우선 RPC를 사용해 원자적으로 규칙을 교체합니다.
+(함수가 없으면 코드가 자동으로 일반 insert/update 방식으로 폴백합니다.)
+
+```sql
+create or replace function public.apply_prompt_rules(
+  p_extra_constraints text,
+  p_examples_easy text,
+  p_examples_balanced text,
+  p_examples_killer text
+)
+returns table (id bigint, updated_at timestamptz)
+language plpgsql
+as $$
+declare
+  v_id bigint;
+  v_updated timestamptz := now();
+begin
+  insert into public.prompt_rules (
+    is_active,
+    extra_constraints,
+    examples_easy,
+    examples_balanced,
+    examples_killer,
+    updated_at
+  ) values (
+    true,
+    p_extra_constraints,
+    p_examples_easy,
+    p_examples_balanced,
+    p_examples_killer,
+    v_updated
+  ) returning prompt_rules.id into v_id;
+
+  update public.prompt_rules
+  set is_active = false
+  where is_active = true and prompt_rules.id <> v_id;
+
+  return query select v_id, v_updated;
+end;
+$$;
+```

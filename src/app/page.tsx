@@ -37,6 +37,13 @@ type BatchResult = {
   message: string;
 };
 
+type PromptRuleVersion = {
+  id: number;
+  is_active: boolean;
+  updated_at: string;
+  extra_constraints_preview: string;
+};
+
 type ExportDocEntry = {
   questionNo: string;
   quickAnswer: string;
@@ -740,6 +747,13 @@ export default function Home() {
   const [explanationBody, setExplanationBody] = useState(DEFAULT_BODY);
   const [rawResponse, setRawResponse] = useState("");
   const [qualityWarnings, setQualityWarnings] = useState<string[]>([]);
+  const [ruleAnalyzeInput, setRuleAnalyzeInput] = useState("");
+  const [ruleTargetStyleInput, setRuleTargetStyleInput] = useState("");
+  const [ruleAdminTokenInput, setRuleAdminTokenInput] = useState("");
+  const [isApplyingRuleFeedback, setIsApplyingRuleFeedback] = useState(false);
+  const [ruleVersions, setRuleVersions] = useState<PromptRuleVersion[]>([]);
+  const [isLoadingRuleVersions, setIsLoadingRuleVersions] = useState(false);
+  const [isRollingBackRule, setIsRollingBackRule] = useState(false);
   const [diagramAidRecommendation, setDiagramAidRecommendation] =
     useState<DiagramAidRecommendation | null>(null);
   const [questionVersionMap, setQuestionVersionMap] = useState<
@@ -2421,6 +2435,116 @@ export default function Home() {
     }
   };
 
+  const handleAnalyzeAndApplyRules = async () => {
+    const weakText = ruleAnalyzeInput.trim();
+    if (!weakText) {
+      setErrorMessage("분석할 해설 내용을 먼저 입력해 주세요.");
+      return;
+    }
+    try {
+      setIsApplyingRuleFeedback(true);
+      setErrorMessage("");
+      setSuccessMessage("");
+      const response = await fetch("/api/prompt-rules/analyze-and-apply", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(ruleAdminTokenInput.trim()
+            ? { "x-admin-token": ruleAdminTokenInput.trim() }
+            : {}),
+        },
+        body: JSON.stringify({
+          weakExplanation: weakText,
+          targetStyleHint: ruleTargetStyleInput.trim(),
+          profile: solverModelProfile,
+        }),
+      });
+      if (!response.ok) {
+        const message = await parseApiErrorMessage(
+          response,
+          "규칙 자동 분석/적용에 실패했습니다.",
+        );
+        throw new Error(message);
+      }
+      const data = (await response.json()) as {
+        rulesPreview?: { extraConstraints?: string };
+      };
+      setSuccessMessage(
+        "Supabase 규칙을 자동 업데이트했습니다. 다음 해설 생성부터 바로 반영됩니다.",
+      );
+      if (data.rulesPreview?.extraConstraints) {
+        setQualityWarnings((prev) => [
+          ...prev,
+          "규칙 자동 업데이트 완료: 운영자 추가 제한 규칙이 갱신되었습니다.",
+        ]);
+      }
+      await loadPromptRuleVersions();
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "규칙 자동 적용 중 오류가 발생했습니다.";
+      setErrorMessage(message);
+    } finally {
+      setIsApplyingRuleFeedback(false);
+    }
+  };
+
+  const loadPromptRuleVersions = async () => {
+    try {
+      setIsLoadingRuleVersions(true);
+      const response = await fetch("/api/prompt-rules/history?limit=10", {
+        headers: {
+          ...(ruleAdminTokenInput.trim()
+            ? { "x-admin-token": ruleAdminTokenInput.trim() }
+            : {}),
+        },
+      });
+      if (!response.ok) {
+        const message = await parseApiErrorMessage(response, "규칙 이력 조회에 실패했습니다.");
+        throw new Error(message);
+      }
+      const data = (await response.json()) as { versions?: PromptRuleVersion[] };
+      setRuleVersions(Array.isArray(data.versions) ? data.versions : []);
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "규칙 이력 조회 중 오류가 발생했습니다.";
+      setErrorMessage(message);
+    } finally {
+      setIsLoadingRuleVersions(false);
+    }
+  };
+
+  const handleRollbackRule = async (ruleId: number) => {
+    try {
+      setIsRollingBackRule(true);
+      setErrorMessage("");
+      setSuccessMessage("");
+      const response = await fetch("/api/prompt-rules/rollback", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(ruleAdminTokenInput.trim()
+            ? { "x-admin-token": ruleAdminTokenInput.trim() }
+            : {}),
+        },
+        body: JSON.stringify({
+          ruleId,
+          reason: "ui-manual-rollback",
+        }),
+      });
+      if (!response.ok) {
+        const message = await parseApiErrorMessage(response, "규칙 롤백에 실패했습니다.");
+        throw new Error(message);
+      }
+      setSuccessMessage(`${ruleId}번 규칙으로 롤백했습니다. 다음 생성부터 즉시 반영됩니다.`);
+      await loadPromptRuleVersions();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "규칙 롤백 중 오류가 발생했습니다.";
+      setErrorMessage(message);
+    } finally {
+      setIsRollingBackRule(false);
+    }
+  };
+
   const movePdfPage = async (delta: number) => {
     if (!originalFile || !isPdfSource) return;
     const nextPage = pdfPageNo + delta;
@@ -3593,6 +3717,90 @@ export default function Home() {
                 </ul>
               </div>
             )}
+
+            <div className="rounded-md border border-indigo-200 bg-indigo-50 p-3 text-xs text-indigo-900">
+              <p className="font-semibold">규칙 자동 업데이트 (Supabase)</p>
+              <p className="mt-1 text-[11px] text-indigo-800">
+                아쉬운 해설을 입력하면 모델이 문제점을 분석해 제한 규칙을 만들고, Supabase
+                `prompt_rules`에 자동 반영합니다.
+              </p>
+              <textarea
+                value={ruleAnalyzeInput}
+                onChange={(event) => setRuleAnalyzeInput(event.target.value)}
+                maxLength={4000}
+                placeholder="예: 근사값(약 1.414, ≈)으로 풀고 정석 전개를 생략한 해설을 여기에 붙여넣으세요."
+                className="mt-2 min-h-[110px] w-full rounded-md border border-indigo-200 bg-white p-2 text-xs leading-5 text-slate-700"
+              />
+              <p className="mt-1 text-[11px] text-indigo-700">
+                해설 입력 길이: {ruleAnalyzeInput.length}/4000
+              </p>
+              <textarea
+                value={ruleTargetStyleInput}
+                onChange={(event) => setRuleTargetStyleInput(event.target.value)}
+                maxLength={1000}
+                placeholder="선택: 원하는 정석 스타일(예: 식 전개 3단계, 결론 1문장, 객관식은 번호만)"
+                className="mt-2 min-h-[64px] w-full rounded-md border border-indigo-200 bg-white p-2 text-xs leading-5 text-slate-700"
+              />
+              <p className="mt-1 text-[11px] text-indigo-700">
+                스타일 힌트 길이: {ruleTargetStyleInput.length}/1000
+              </p>
+              <input
+                type="password"
+                value={ruleAdminTokenInput}
+                onChange={(event) => setRuleAdminTokenInput(event.target.value)}
+                placeholder="선택: 운영자 토큰(PROMPT_RULES_ADMIN_TOKEN)"
+                className="mt-2 w-full rounded-md border border-indigo-200 bg-white px-2 py-2 text-xs text-slate-700"
+              />
+              <button
+                type="button"
+                onClick={handleAnalyzeAndApplyRules}
+                disabled={isApplyingRuleFeedback || explanationGenerationBusy}
+                className="mt-2 w-full rounded bg-indigo-600 px-3 py-2 text-xs font-semibold text-white disabled:cursor-not-allowed disabled:bg-indigo-300"
+              >
+                {isApplyingRuleFeedback
+                  ? "규칙 분석/적용 중..."
+                  : "아쉬운 해설 분석 후 규칙 자동 반영"}
+              </button>
+              <button
+                type="button"
+                onClick={() => void loadPromptRuleVersions()}
+                disabled={isLoadingRuleVersions || isApplyingRuleFeedback || isRollingBackRule}
+                className="mt-2 w-full rounded border border-indigo-300 bg-white px-3 py-2 text-xs font-semibold text-indigo-700 disabled:cursor-not-allowed disabled:bg-indigo-100"
+              >
+                {isLoadingRuleVersions ? "규칙 이력 불러오는 중..." : "규칙 이력 새로고침"}
+              </button>
+              {ruleVersions.length > 0 && (
+                <div className="mt-2 rounded border border-indigo-200 bg-white p-2">
+                  <p className="text-[11px] font-semibold text-indigo-900">최근 규칙 버전 (최대 10개)</p>
+                  <ul className="mt-1 space-y-1">
+                    {ruleVersions.map((item) => (
+                      <li
+                        key={`rule-version-${item.id}`}
+                        className="rounded border border-slate-200 bg-slate-50 px-2 py-1"
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <p className="text-[11px] text-slate-700">
+                            #{item.id} {item.is_active ? "(활성)" : ""} /{" "}
+                            {new Date(item.updated_at).toLocaleString()}
+                          </p>
+                          <button
+                            type="button"
+                            onClick={() => void handleRollbackRule(item.id)}
+                            disabled={item.is_active || isRollingBackRule || isApplyingRuleFeedback}
+                            className="rounded border border-rose-300 bg-white px-2 py-0.5 text-[11px] font-semibold text-rose-700 disabled:cursor-not-allowed disabled:border-slate-200 disabled:text-slate-400"
+                          >
+                            {isRollingBackRule ? "롤백 중..." : "이 버전으로 롤백"}
+                          </button>
+                        </div>
+                        <p className="mt-1 line-clamp-2 text-[11px] text-slate-600">
+                          {item.extra_constraints_preview || "(미리보기 없음)"}
+                        </p>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </div>
 
             {diagramAidRecommendation && (
               <div
