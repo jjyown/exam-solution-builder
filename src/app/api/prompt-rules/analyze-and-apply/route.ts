@@ -1,8 +1,11 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { NextResponse } from "next/server";
 import { createHash } from "crypto";
-import { applyRuntimePromptRules, logPromptRuleEvent } from "@/lib/supabasePromptRules";
-import type { RuntimePromptRules } from "@/app/api/generate-explanation/prompts";
+import {
+  applyRuntimePromptRules,
+  logPromptRuleEvent,
+  type RuntimePromptRules,
+} from "@/lib/supabasePromptRules";
 
 type AnalyzeAndApplyBody = {
   weakExplanation?: string;

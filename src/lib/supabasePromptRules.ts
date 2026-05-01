@@ -1,5 +1,11 @@
 import { createClient } from "@supabase/supabase-js";
-import type { RuntimePromptRules } from "@/app/api/generate-explanation/prompts";
+
+export type RuntimePromptRules = {
+  extraConstraints?: string;
+  examplesEasy?: string;
+  examplesBalanced?: string;
+  examplesKiller?: string;
+};
 
 type PromptRulesRow = {
   id?: number;
