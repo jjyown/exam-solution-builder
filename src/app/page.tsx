@@ -183,6 +183,7 @@ type DiagramBox = {
   id: string;
   labelNo: number;
   crop: PixelCrop;
+  cropRatio: { x: number; y: number; width: number; height: number };
   imageBase64: string;
   mimeType: string;
 };
@@ -236,10 +237,72 @@ function hasCompletedExplanationBody(body: string) {
   return t !== DEFAULT_BODY.trim();
 }
 
+function clampPixelCropToSize(crop: PixelCrop, width: number, height: number): PixelCrop {
+  const safeW = Math.max(1, width);
+  const safeH = Math.max(1, height);
+  const w = Math.max(1, Math.min(crop.width, safeW));
+  const h = Math.max(1, Math.min(crop.height, safeH));
+  return {
+    ...crop,
+    width: w,
+    height: h,
+    x: Math.max(0, Math.min(crop.x, safeW - w)),
+    y: Math.max(0, Math.min(crop.y, safeH - h)),
+  };
+}
+
+function scalePixelCrop(crop: PixelCrop, scaleX: number, scaleY: number, width: number, height: number) {
+  return clampPixelCropToSize(
+    {
+      ...crop,
+      x: crop.x * scaleX,
+      y: crop.y * scaleY,
+      width: crop.width * scaleX,
+      height: crop.height * scaleY,
+    },
+    width,
+    height,
+  );
+}
+
+function pixelCropToRatioCrop(crop: PixelCrop, width: number, height: number) {
+  const safeW = Math.max(1, width);
+  const safeH = Math.max(1, height);
+  const clamped = clampPixelCropToSize(crop, safeW, safeH);
+  return {
+    x: clamped.x / safeW,
+    y: clamped.y / safeH,
+    width: clamped.width / safeW,
+    height: clamped.height / safeH,
+  };
+}
+
+function ratioCropToPixelCrop(
+  cropRatio: { x: number; y: number; width: number; height: number },
+  width: number,
+  height: number,
+): PixelCrop {
+  const safeW = Math.max(1, width);
+  const safeH = Math.max(1, height);
+  return clampPixelCropToSize(
+    {
+      unit: "px",
+      x: cropRatio.x * safeW,
+      y: cropRatio.y * safeH,
+      width: cropRatio.width * safeW,
+      height: cropRatio.height * safeH,
+    },
+    safeW,
+    safeH,
+  );
+}
+
 function validateDocEntriesBeforeExport(entries: ExportDocEntry[]) {
   const issues: string[] = [];
   const latexPattern =
     /\$\$?[^$]*\$?\$?|\\(frac|sqrt|binom|left|right|cdot|times|div|pi|sin|cos|tan|log|ln|alpha|beta|gamma|theta)\b|\\[()[\]{}]/i;
+  const estimationPattern =
+    /추정|근사|어림|대략|감으로|찍어서|적당히|approx|approximately|대충/i;
 
   entries.forEach((entry) => {
     const quick = entry.quickAnswer.trim();
@@ -255,6 +318,9 @@ function validateDocEntriesBeforeExport(entries: ExportDocEntry[]) {
     }
     if (latexPattern.test(`${quick}\n${body}`)) {
       issues.push(`${entry.questionNo}번: LaTeX 표기(\\frac, $, \\sqrt 등)가 남아 있습니다.`);
+    }
+    if (estimationPattern.test(body)) {
+      issues.push(`${entry.questionNo}번: 추정/근사 중심 풀이가 감지되었습니다.`);
     }
     if (/이미지가\s*제공되지\s*않/.test(body)) {
       issues.push(`${entry.questionNo}번: 이미지 부재 문구가 포함되어 있습니다.`);
@@ -1061,6 +1127,41 @@ export default function Home() {
     };
   }, [sourceImage, syncRenderImageSize]);
 
+  useEffect(() => {
+    const currentW = renderImageSize.width;
+    const currentH = renderImageSize.height;
+    if (currentW <= 0 || currentH <= 0) return;
+
+    setPendingDiagramBoxes((boxes) =>
+      boxes.map((box) => ({
+        ...box,
+        crop: ratioCropToPixelCrop(
+          box.cropRatio ?? pixelCropToRatioCrop(box.crop, currentW, currentH),
+          currentW,
+          currentH,
+        ),
+      })),
+    );
+    setPageDrafts((drafts) => {
+      const next: Record<number, PageDraft> = {};
+      for (const [pageNoText, draft] of Object.entries(drafts)) {
+        const pageNo = Number(pageNoText);
+        next[pageNo] = {
+          ...draft,
+          diagramBoxes: draft.diagramBoxes.map((box) => ({
+            ...box,
+            crop: ratioCropToPixelCrop(
+              box.cropRatio ?? pixelCropToRatioCrop(box.crop, currentW, currentH),
+              currentW,
+              currentH,
+            ),
+          })),
+        };
+      }
+      return next;
+    });
+  }, [renderImageSize.height, renderImageSize.width]);
+
   /** 참조가 아니라 내용이 바뀔 때만 문항 동기화(무한 렌더 #185 방지) */
   const questionCardHydrationKey = useMemo(() => {
     const d = questionNo ? questionCardDraftMap[questionNo] : undefined;
@@ -1739,7 +1840,13 @@ export default function Home() {
   const addDiagramBox = (activeCrop: PixelCrop) => {
     if (!imageRef.current) return;
     const mimeType = sourceFile?.type || "image/png";
-    const imageBase64 = cropImageToBase64(imageRef.current, activeCrop, mimeType);
+    const normalizedCrop = clampPixelCropToSize(activeCrop, imageRef.current.width, imageRef.current.height);
+    const cropRatio = pixelCropToRatioCrop(
+      normalizedCrop,
+      imageRef.current.width,
+      imageRef.current.height,
+    );
+    const imageBase64 = cropImageToBase64(imageRef.current, normalizedCrop, mimeType);
     const currentPageNo = isPdfSource ? pdfPageNo : 1;
     const currentPageLabels = pendingDiagramBoxes.map((item) => item.labelNo);
     let nextLabelNo = 1;
@@ -1761,7 +1868,8 @@ export default function Home() {
       {
         id: `diagram-${diagramIdRef.current++}`,
         labelNo: nextLabelNo,
-        crop: activeCrop,
+        crop: normalizedCrop,
+        cropRatio,
         imageBase64,
         mimeType,
       },
@@ -1796,6 +1904,15 @@ export default function Home() {
           const nextY = Math.max(0, Math.min(imageHeight - box.crop.height, diagramDragState.startY + dy));
           return {
             ...box,
+            cropRatio: pixelCropToRatioCrop(
+              {
+                ...box.crop,
+                x: nextX,
+                y: nextY,
+              },
+              imageWidth,
+              imageHeight,
+            ),
             crop: {
               ...box.crop,
               x: nextX,
@@ -1847,6 +1964,15 @@ export default function Home() {
           );
           return {
             ...box,
+            cropRatio: pixelCropToRatioCrop(
+              {
+                ...box.crop,
+                width: nextWidth,
+                height: nextHeight,
+              },
+              imageWidth,
+              imageHeight,
+            ),
             crop: {
               ...box.crop,
               width: nextWidth,
@@ -1884,6 +2010,7 @@ export default function Home() {
         diagramBoxes: pendingDiagramBoxes.map((item) => ({
           ...item,
           crop: { ...item.crop },
+          cropRatio: { ...item.cropRatio },
         })),
       },
     }));
@@ -1904,6 +2031,9 @@ export default function Home() {
       draft.diagramBoxes.map((item) => ({
         ...item,
         crop: { ...item.crop },
+        cropRatio: item.cropRatio
+          ? { ...item.cropRatio }
+          : pixelCropToRatioCrop(item.crop, Math.max(1, renderImageSize.width), Math.max(1, renderImageSize.height)),
       })),
     );
     recomputePendingFromMarkers(draft.dividerMarkers);
@@ -2286,19 +2416,36 @@ export default function Home() {
         return;
       }
 
-      const exportValidation = validateDocEntriesBeforeExport(docEntries);
+      let exportEntries = docEntries;
+      let exportValidation = validateDocEntriesBeforeExport(exportEntries);
       if (!exportValidation.ok) {
-        const preview = exportValidation.issues.slice(0, 8).join("\n- ");
-        const omitted =
-          exportValidation.issues.length > 8
-            ? `\n(외 ${exportValidation.issues.length - 8}건)`
-            : "";
-        setErrorMessage(
-          `DOCX 내보내기 전 규칙 검증에서 ${exportValidation.issues.length}건이 발견되었습니다.\n- ${preview}${omitted}\n수정 후 다시 내보내기해 주세요.`,
-        );
-        return;
+        const repairRes = await fetch("/api/repair-explanations", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ entries: exportEntries }),
+        });
+        if (!repairRes.ok) {
+          throw new Error("내보내기 전 자동 보정에 실패했습니다.");
+        }
+        const repairData = (await repairRes.json()) as {
+          entries?: ExportDocEntry[];
+        };
+        if (Array.isArray(repairData.entries) && repairData.entries.length > 0) {
+          const repairedMap = new Map(
+            repairData.entries.map((item) => [String(item.questionNo), item] as const),
+          );
+          exportEntries = exportEntries.map(
+            (item) => repairedMap.get(String(item.questionNo)) ?? item,
+          );
+        }
+        exportValidation = validateDocEntriesBeforeExport(exportEntries);
+        if (!exportValidation.ok) {
+          throw new Error("자동 보정 후에도 내보내기 규칙을 만족하지 못했습니다.");
+        }
+        setSuccessMessage("내보내기 전 자동 보정을 적용했습니다. DOCX를 생성합니다...");
+      } else {
+        setSuccessMessage("내보내기 전 규칙 검증을 통과했습니다. DOCX를 생성합니다...");
       }
-      setSuccessMessage("내보내기 전 규칙 검증을 통과했습니다. DOCX를 생성합니다...");
 
       const formData = new FormData();
       formData.append("examName", selectedExam || "직접업로드");
@@ -2309,7 +2456,7 @@ export default function Home() {
       formData.append("quickAnswer", "문항별 정답은 해설 본문의 [정답]을 확인하세요.");
       formData.append(
         "explanationBody",
-        docEntries
+        exportEntries
           .map(
             (entry) =>
               `[문항 ${entry.questionNo}]\n[정답] ${entry.quickAnswer}\n${entry.body}`,
@@ -3451,6 +3598,83 @@ export default function Home() {
 
                   {currentQuestionExplanationReady ? (
                     <>
+                      <div className="mb-4 rounded-md border border-slate-200 bg-slate-50 p-3">
+                        <p className="text-xs font-semibold text-slate-700">해설 선택 카드</p>
+                        {methodBlocks.methods.length > 0 ? (
+                          <div className="mt-2 space-y-2">
+                            {methodBlocks.methods.map((method, index) => (
+                              <div
+                                key={`right-method-card-${index}`}
+                                className="flex items-start justify-between gap-2 rounded border border-slate-200 bg-white px-2 py-2"
+                              >
+                                <label className="flex flex-1 items-start gap-2 text-[12px] text-slate-700">
+                                  <input
+                                    type="checkbox"
+                                    disabled={explanationGenerationBusy}
+                                    checked={
+                                      methodSelectionPolicy === "all"
+                                        ? true
+                                        : selectedMethodIndexes.includes(index)
+                                    }
+                                    onChange={(event) => {
+                                      if (methodSelectionPolicy === "all") {
+                                        if (!event.target.checked) {
+                                          setMethodSelectionPolicy("selected");
+                                          setSelectedMethodIndexes(
+                                            methodBlocks.methods
+                                              .map((_, idx) => idx)
+                                              .filter((idx) => idx !== index),
+                                          );
+                                        }
+                                        return;
+                                      }
+                                      if (event.target.checked) {
+                                        setSelectedMethodIndexes((prev) =>
+                                          [...new Set([...prev, index])].sort((a, b) => a - b),
+                                        );
+                                      } else {
+                                        setSelectedMethodIndexes((prev) =>
+                                          prev.filter((item) => item !== index),
+                                        );
+                                        if (representativeMethodIndex === index) {
+                                          setRepresentativeMethodIndex(null);
+                                        }
+                                      }
+                                    }}
+                                  />
+                                  <span className="line-clamp-2">{method.split("\n")[0]}</span>
+                                </label>
+                                <button
+                                  type="button"
+                                  disabled={explanationGenerationBusy}
+                                  onClick={() => {
+                                    if (methodSelectionPolicy === "selected") {
+                                      if (!selectedMethodIndexes.includes(index)) {
+                                        setSelectedMethodIndexes((prev) =>
+                                          [...new Set([...prev, index])].sort((a, b) => a - b),
+                                        );
+                                      }
+                                    }
+                                    setRepresentativeMethodIndex(index);
+                                  }}
+                                  className={`shrink-0 rounded px-2 py-0.5 text-[11px] ${
+                                    representativeMethodIndex === index
+                                      ? "bg-amber-100 text-amber-800"
+                                      : "border border-slate-300 bg-white text-slate-600"
+                                  }`}
+                                >
+                                  {representativeMethodIndex === index ? "★ 메인해설" : "☆ 메인으로"}
+                                </button>
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <div className="mt-2 rounded border border-slate-200 bg-white px-3 py-2 text-xs text-slate-600">
+                            단일 해설 문항입니다. 이 해설이 자동으로 메인해설로 사용됩니다.
+                          </div>
+                        )}
+                      </div>
+
                       <div className="mb-6 rounded-md border-2 border-blue-400 bg-blue-50 p-4">
                         <p className="text-sm font-semibold text-blue-900">[빠른 정답 체크]</p>
                         <p className="mt-2 text-2xl font-bold tracking-wide text-blue-950">
