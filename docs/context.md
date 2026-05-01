@@ -1,12 +1,32 @@
 # 하이로드 수학 해설 제작기 컨텍스트 노트
 
-- 문서 기준일: 2026-04-30
+- 문서 기준일: 2026-05-01
 
 ## 제품/운영 컨텍스트
 - 대상 사용자: 중고등 수학 학원 원장/강사
 - 핵심 목표: 문제 추출 후 학생 눈높이 해설을 빠르게 생성하고 DOCX 결과물을 배포 가능한 환경(Vercel)에서 안정적으로 저장
 - 현재 배포 환경: Vercel + GitHub `jjyown/exam-solution-builder`
 - 현재 생성형 모델: Gemini (`GEMINI_API_KEY`)
+
+## Cursor MCP (로컬 개발)
+- 프로젝트 전용 stdio 서버: `mcp/gemini-gpt-server.mjs` — 도구 `gemini_generate`, `gpt_chat` 등 (각각 `GEMINI_API_KEY`, `OPENAI_API_KEY` 필요).
+- 설정: 워크스페이스가 상위 폴더(`시험지 해설 제작`)이면 루트 `.cursor/mcp.json`, `highroad-math-solution`만 열면 `highroad-math-solution/.cursor/mcp.json` 사용. 비밀은 `highroad-math-solution/.env.local`에 두고 커밋하지 않음.
+- 수동 실행(디버그): `npm run mcp:gemini-gpt`
+
+### MCP 모델 선택 기준 (고정)
+- 모델명을 모르면 기본값 사용:
+  - Gemini 도구(`gemini_generate`, `gemini_chat`): `gemini-2.5-flash`
+  - GPT 도구(`gpt_generate`, `gpt_chat`): `gpt-4o-mini`
+- 역할 분담 권장:
+  - Gemini: 문제 인식/구조화/요약 초안
+  - GPT: 해설 문장화/양식 준수/최종 표현 다듬기
+- 상향/하향 기준:
+  - 정확도 부족 시 상향(`gemini-2.5-pro`, 상위 GPT 모델)
+  - 비용/지연 부담 시 기본 유지 또는 `gemini-2.5-flash-lite` 검토
+- 기본 워크플로우:
+  1) Gemini로 문항 구조화(JSON)
+  2) GPT로 해설 생성(개념 -> 풀이 -> 정답)
+  3) Gemini 또는 Cursor로 누락/표현 최종 검수
 
 ## 현재 아키텍처 요약
 - 프론트: Next.js App Router (`src/app/page.tsx`)
@@ -18,6 +38,13 @@
 ## 최근 의사결정 로그
 | 날짜 | 결정 | 이유 | 영향 범위 |
 |---|---|---|---|
+| 2026-05-01 | 버전 엔트리에 `sourceType(single/batch/manual)`와 `runId`를 추가하고, 저장(DOCX) 시 현재 문항의 `selectedVersion`을 우선 반영하도록 고정 | 문항 재생성/전체재구성 출처를 추적 가능하게 하고, 편집 화면과 저장 결과의 버전 불일치를 방지하기 위함 | `src/app/page.tsx` |
+| 2026-05-01 | 해설 제작 단계에 문항별 버전 관리(v1/v2/...)를 추가: 생성 결과를 문항별 `versions[]`로 누적하고 `selectedVersionId`로 채택 버전을 전환할 수 있게 구현 | 문항별 재생성/비교/채택 흐름을 지원해 버전 꼬임 없이 운영자가 원하는 해설을 선택 반영하기 위함 | `src/app/page.tsx` |
+| 2026-05-01 | 해설 생성 응답의 `diagramAidRecommendation`을 프론트에 노출(권장/점수/근거 + 선택 적용 안내 버튼) | 도형 보조 이미지가 필요한 문항을 운영자가 즉시 구분해 선택 적용할 수 있도록 가시성을 높이기 위함 | `src/app/page.tsx`, `src/app/api/generate-explanation/route.ts` |
+| 2026-05-01 | 도형 보조 이미지(바나나) 자동 판정 규칙을 도입하고, 해설 생성 API 응답에 `diagramAidRecommendation`(권장 여부/점수/사유)을 포함 | 텍스트 해설 중심을 유지하면서, 도형 이해 보강이 필요한 문항만 선택적으로 이미지 생성을 적용하기 위함 | `src/app/api/generate-explanation/route.ts`, `README.md` |
+| 2026-05-01 | HML 원본 붙이기 동선을 중단하고, 시험지 작업을 이미지 영역 지정 기반(PDF/이미지)으로 단일화 | 운영자가 원하는 제작 방식(문제 영역 직접 지정)에 집중하고, 원본 HML 처리 복잡도로 인한 동선 혼란을 줄이기 위함 | `src/app/page.tsx` |
+| 2026-05-01 | MCP 사용 가이드를 문서에 고정: 모델명을 모를 때 기본값(`gemini-2.5-flash`, `gpt-4o-mini`)으로 시작하고, 역할 분담(구조화=Gemini, 해설 문장화=GPT)으로 작업하도록 명시 | 운영자가 모델명을 매번 찾지 않아도 안정적인 작업 동선을 유지하기 위함 | `README.md`, `docs/context.md`, `docs/plan.md`, `docs/checklist.md` |
+| 2026-05-01 | Cursor MCP용 `gemini_generate` / `gpt_chat` stdio 브리지 서버를 추가하고, 워크스페이스 루트 또는 `highroad-math-solution` 기준 `.cursor/mcp.json`으로 연결 | 에이전트가 동일 저장소에서 Gemini·OpenAI API를 도구 호출로 쓸 수 있게 하기 위함 | `mcp/gemini-gpt-server.mjs`, `.cursor/mcp.json`, `package.json` |
 | 2026-05-01 | PDF에서 빠른정답/해설참고로 지정된 제외 페이지에서는 `문제 저장` 및 `해설 생성`을 차단하고, 문제 페이지로 이동하라는 명확한 안내 메시지를 추가 | 참고 전용 페이지에서 생성을 시도할 때 비전 사전검증 실패(0점)로 오해가 발생해, 원인/조치 경로를 즉시 이해할 수 있도록 UX를 보정 | `src/app/page.tsx` |
 | 2026-05-01 | 객관식 정답 보정에서 `선택지 첫 값` 강제 대입 로직을 제거하고, 정답 미검출 시 `-`로 유지하도록 변경. 동시에 해설 본문 앞의 문제번호 재출력(예: `17.`) 금지 규칙 추가 | 잘못된 빠른정답(특히 1번으로 쏠림)과 문항 번호 오인 표시를 줄여 문항 지정과 결과 정합성을 높이기 위함 | `src/app/page.tsx`, `src/app/api/generate-explanation/route.ts`, `src/app/api/hml/append-solution/route.ts` |
 | 2026-05-01 | 학생용 가독성 기준으로 수식 표기 정책을 `LaTeX 금지 + 조합 nCk 고정`으로 강화하고, 저장 단계에서 `\\binom`, `\\frac` 등 LaTeX 잔여 표기를 일반식으로 치환 | 결과 문서에 `\\binom{}` 같은 코드형 수식이 노출되어 학생이 읽기 어려운 문제를 해소하고 교육과정 표기 일관성을 확보하기 위함 | `src/app/api/generate-explanation/route.ts`, `src/app/api/hml/append-solution/route.ts`, `src/app/api/save-result/route.ts` |

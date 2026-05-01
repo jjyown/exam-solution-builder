@@ -177,6 +177,39 @@ function buildRetryInstruction(
   return lines.join("\n");
 }
 
+function inferDiagramAidNeed(questionText: string) {
+  const text = questionText.trim();
+  if (!text) {
+    return {
+      recommended: false,
+      score: 0,
+      reasons: ["문제 텍스트가 없어 자동 판정을 건너뜀"],
+    };
+  }
+
+  const rules: Array<{ label: string; regex: RegExp; score: number }> = [
+    { label: "도형/기하 키워드", regex: /(도형|기하|삼각형|사각형|원|부채꼴|현|접선|닮음|합동)/, score: 3 },
+    { label: "좌표/그래프 키워드", regex: /(좌표평면|그래프|함수의 그래프|포물선|직선의 기울기|절편)/, score: 2 },
+    { label: "작도/보조선 지시", regex: /(그림을 그려|도형을 그려|작도|보조선|연장선|수선의 발)/, score: 3 },
+    { label: "각/길이 표기", regex: /(∠|각\s*[A-Z가-힣]|길이|넓이|둘레|반지름|지름)/, score: 2 },
+    { label: "시각 자료 언급", regex: /(그림|도표|도식|다음 도형|아래 그림)/, score: 2 },
+  ];
+
+  let score = 0;
+  const reasons: string[] = [];
+  for (const rule of rules) {
+    if (rule.regex.test(text)) {
+      score += rule.score;
+      reasons.push(rule.label);
+    }
+  }
+  return {
+    recommended: score >= 4,
+    score,
+    reasons: reasons.length ? reasons : ["도형 보조 이미지 필요 신호 낮음"],
+  };
+}
+
 export async function POST(request: Request) {
   try {
     const apiKey = process.env.GEMINI_API_KEY;
@@ -206,6 +239,7 @@ export async function POST(request: Request) {
     const generationMode = body.generationMode === "test" ? "test" : "final";
     const modelCandidates =
       generationMode === "test" ? TEST_MODEL_CANDIDATES : FINAL_MODEL_CANDIDATES;
+    const diagramAid = inferDiagramAidNeed(questionText);
 
     if (!imageBase64) {
       return NextResponse.json(
@@ -324,7 +358,12 @@ export async function POST(request: Request) {
           !isLikelyTruncatedResult(generatedText)
         ) {
           return NextResponse.json(
-            { result: generatedText, model: modelName, qualityWarnings: [] },
+            {
+              result: generatedText,
+              model: modelName,
+              qualityWarnings: [],
+              diagramAidRecommendation: diagramAid,
+            },
             { status: 200 },
           );
         }
@@ -376,6 +415,7 @@ export async function POST(request: Request) {
             model: modelName,
             retriedForFormat: true,
             qualityWarnings,
+            diagramAidRecommendation: diagramAid,
           },
           { status: 200 },
         );

@@ -47,6 +47,32 @@ type VisionPrecheckResponse = {
   error?: string;
 };
 
+type DiagramAidRecommendation = {
+  recommended: boolean;
+  score: number;
+  reasons: string[];
+};
+
+type QuestionVersionEntry = {
+  id: string;
+  label: string;
+  modelLabel: string;
+  sourceType: "single" | "batch" | "manual";
+  runId: string;
+  createdAt: number;
+  rawResponse: string;
+  quickAnswer: string;
+  explanationBody: string;
+  selectedMethodIndexes: number[];
+  representativeMethodIndex: number | null;
+  workflowStep: ExplanationWorkflowStep;
+};
+
+type QuestionVersionState = {
+  selectedVersionId: string;
+  versions: QuestionVersionEntry[];
+};
+
 type ExamSourceKind = "image" | "pdf" | "hml" | "hwp" | "unknown";
 
 const HIGH_VISIBILITY_CROSSHAIR_CURSOR =
@@ -473,6 +499,11 @@ export default function Home() {
   const [explanationBody, setExplanationBody] = useState(DEFAULT_BODY);
   const [rawResponse, setRawResponse] = useState("");
   const [qualityWarnings, setQualityWarnings] = useState<string[]>([]);
+  const [diagramAidRecommendation, setDiagramAidRecommendation] =
+    useState<DiagramAidRecommendation | null>(null);
+  const [questionVersionMap, setQuestionVersionMap] = useState<
+    Record<string, QuestionVersionState>
+  >({});
   const [hmlFile, setHmlFile] = useState<File | null>(null);
   const [hmlManualQuestionSelection, setHmlManualQuestionSelection] = useState("1-30");
   const [hmlExecutionMode, setHmlExecutionMode] = useState<"manual" | "auto_assist">("manual");
@@ -509,6 +540,15 @@ export default function Home() {
 
   const hasImage = Boolean(sourceImage && sourceFile);
   const selectedExamKind = selectedExam ? getExamSourceKind(selectedExam) : "unknown";
+  const questionNoOptions = useMemo(
+    () => [...new Set(queuedProblems.map((item) => item.questionNo))].sort((a, b) => Number(a) - Number(b)),
+    [queuedProblems],
+  );
+  const currentQuestionVersionState = questionVersionMap[questionNo] || null;
+  const selectedQuestionVersion =
+    currentQuestionVersionState?.versions.find(
+      (item) => item.id === currentQuestionVersionState.selectedVersionId,
+    ) || null;
   const hasGeneratedResult = rawResponse.trim().length > 0;
   const canGenerate = hasImage && !isGenerating && !isLoadingExams;
   const sortedVerticalGuides = useMemo(
@@ -586,6 +626,88 @@ export default function Home() {
       selectedMethodIndexes,
       representativeMethodIndex,
     ],
+  );
+
+  const applyVersionToEditor = useCallback((version: QuestionVersionEntry) => {
+    setRawResponse(version.rawResponse);
+    setQuickAnswer(version.quickAnswer);
+    setExplanationBody(version.explanationBody);
+    setSelectedMethodIndexes(
+      version.selectedMethodIndexes.length > 0 ? version.selectedMethodIndexes : [0],
+    );
+    setRepresentativeMethodIndex(version.representativeMethodIndex);
+    setWorkflowStep(version.workflowStep);
+  }, []);
+
+  const pushQuestionVersion = useCallback(
+    (
+      targetQuestionNo: string,
+      payload: {
+        rawResponse: string;
+        quickAnswer: string;
+        explanationBody: string;
+        selectedMethodIndexes: number[];
+        representativeMethodIndex: number | null;
+        workflowStep: ExplanationWorkflowStep;
+        modelLabel: string;
+        sourceType: "single" | "batch" | "manual";
+        runId: string;
+      },
+      activate = true,
+    ) => {
+      setQuestionVersionMap((prev) => {
+        const prevState = prev[targetQuestionNo];
+        const nextIndex = (prevState?.versions.length || 0) + 1;
+        const version: QuestionVersionEntry = {
+          id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          label: `v${nextIndex}`,
+          modelLabel: payload.modelLabel,
+          sourceType: payload.sourceType,
+          runId: payload.runId,
+          createdAt: Date.now(),
+          rawResponse: payload.rawResponse,
+          quickAnswer: payload.quickAnswer,
+          explanationBody: payload.explanationBody,
+          selectedMethodIndexes: payload.selectedMethodIndexes,
+          representativeMethodIndex: payload.representativeMethodIndex,
+          workflowStep: payload.workflowStep,
+        };
+        const versions = [...(prevState?.versions || []), version];
+        return {
+          ...prev,
+          [targetQuestionNo]: {
+            selectedVersionId:
+              activate || !prevState?.selectedVersionId
+                ? version.id
+                : prevState.selectedVersionId,
+            versions,
+          },
+        };
+      });
+    },
+    [],
+  );
+
+  const selectQuestionVersion = useCallback(
+    (targetQuestionNo: string, versionId: string) => {
+      setQuestionVersionMap((prev) => {
+        const state = prev[targetQuestionNo];
+        if (!state) return prev;
+        return {
+          ...prev,
+          [targetQuestionNo]: {
+            ...state,
+            selectedVersionId: versionId,
+          },
+        };
+      });
+      const state = questionVersionMap[targetQuestionNo];
+      const version = state?.versions.find((item) => item.id === versionId);
+      if (version) {
+        applyVersionToEditor(version);
+      }
+    },
+    [applyVersionToEditor, questionVersionMap],
   );
 
   const syncRenderImageSize = useCallback(() => {
@@ -707,6 +829,7 @@ export default function Home() {
     clearPendingSelection();
     setErrorMessage("");
     setSuccessMessage("");
+    setDiagramAidRecommendation(null);
     setQueuedProblems([]);
     setSavedPageNumbers([]);
     setExcludedPageNumbers([]);
@@ -733,23 +856,6 @@ export default function Home() {
     setSourceImage(objectUrl);
     setSourceFile(file);
     setCurrentStep(2);
-  };
-
-  const prepareHmlWorkflow = (file: File, fromListName?: string) => {
-    setSelectedExam(fromListName || file.name);
-    setHmlFile(file);
-    setCurrentStep(1);
-    setSourceImage("");
-    setSourceFile(null);
-    setOriginalFile(null);
-    setIsPdfSource(false);
-    setPdfPageCount(0);
-    setPdfPageNo(1);
-    setDividerMarkers([]);
-    setVerticalGuides([]);
-    clearPendingSelection();
-    setWorkflowStep("solve");
-    setMethodSelectionPolicy("all");
   };
 
   const loadExamFiles = useCallback(async () => {
@@ -821,35 +927,24 @@ export default function Home() {
     };
   }, [sourceImage, syncRenderImageSize]);
 
+  useEffect(() => {
+    const state = questionVersionMap[questionNo];
+    if (!state) return;
+    const selected =
+      state.versions.find((item) => item.id === state.selectedVersionId) || state.versions[0];
+    if (!selected) return;
+    applyVersionToEditor(selected);
+  }, [applyVersionToEditor, questionNo, questionVersionMap]);
+
   const loadExamImage = async (fileName: string) => {
     try {
       setSelectedExam(fileName);
       const sourceKind = getExamSourceKind(fileName);
-      if (sourceKind === "hwp") {
+      if (sourceKind === "hwp" || sourceKind === "hml") {
         setErrorMessage(
-          "`.hwp/.hwpx`는 현재 직접 파싱을 지원하지 않습니다. 수학비서에서 `.hml`로 저장한 뒤 업로드해 주세요.",
+          "`.hml/.hwp/.hwpx`는 현재 이미지 편집 기반 처리에서 직접 열 수 없습니다. PDF 또는 이미지(png/jpg)로 변환한 뒤 진행해 주세요.",
         );
         setSuccessMessage("");
-        return;
-      }
-      if (sourceKind === "hml") {
-        setIsLoadingSelectedFile(true);
-        setErrorMessage("");
-        setSuccessMessage("");
-        const response = await fetch(
-          `/api/exams/file?name=${encodeURIComponent(fileName)}`,
-          { cache: "no-store" },
-        );
-        if (!response.ok) {
-          const data = (await response.json()) as { error?: string };
-          throw new Error(data.error || "HML 파일을 불러오지 못했습니다.");
-        }
-        const blob = await response.blob();
-        const file = new File([blob], fileName, {
-          type: blob.type || "text/xml",
-        });
-        prepareHmlWorkflow(file, fileName);
-        setSuccessMessage("HML 원본을 선택했습니다. 아래 버튼으로 원본 기반 해설 생성을 진행해 주세요.");
         return;
       }
       setIsLoadingSelectedFile(true);
@@ -1032,6 +1127,7 @@ export default function Home() {
     }
     try {
       setIsGenerating(true);
+      const singleRunId = `single-${Date.now()}`;
       setErrorMessage("");
       setSuccessMessage("");
       setQualityWarnings([]);
@@ -1119,10 +1215,16 @@ export default function Home() {
         throw new Error((data.error || "해설 생성에 실패했습니다.") + detailText);
       }
 
-      const data = (await response.json()) as { result: string; qualityWarnings?: string[] };
+      const data = (await response.json()) as {
+        result: string;
+        qualityWarnings?: string[];
+        diagramAidRecommendation?: DiagramAidRecommendation;
+        model?: string;
+      };
       const parsed = parseExplanation(data.result);
       setRawResponse(data.result);
       setQualityWarnings(data.qualityWarnings ?? []);
+      setDiagramAidRecommendation(data.diagramAidRecommendation ?? null);
       setQuickAnswer(parsed.quickAnswer);
       setExplanationBody(parsed.body);
       setSelectedMethodIndexes(
@@ -1137,12 +1239,31 @@ export default function Home() {
           ? "select_explanation"
           : "confirm_quick_answer",
       );
+      pushQuestionVersion(
+        questionNo || "1",
+        {
+          rawResponse: data.result,
+          quickAnswer: parsed.quickAnswer,
+          explanationBody: parsed.body,
+          selectedMethodIndexes: splitMethodBlocks(parsed.body).methods.map((_, index) => index),
+          representativeMethodIndex: splitMethodBlocks(parsed.body).methods.length > 0 ? 0 : null,
+          workflowStep:
+            splitMethodBlocks(parsed.body).methods.length > 1
+              ? "select_explanation"
+              : "confirm_quick_answer",
+          modelLabel: data.model || (generationMode === "final" ? "gemini-final" : "gemini-test"),
+          sourceType: "single",
+          runId: singleRunId,
+        },
+        true,
+      );
     } catch (error) {
       const message =
         error instanceof Error
           ? error.message
           : "알 수 없는 오류가 발생했습니다.";
       setErrorMessage(message);
+      setDiagramAidRecommendation(null);
     } finally {
       setIsGenerating(false);
     }
@@ -1666,6 +1787,7 @@ export default function Home() {
       setSuccessMessage("");
       setBatchResults([]);
       setQualityWarnings([]);
+      const batchRunId = `batch-${Date.now()}`;
 
       const results: BatchResult[] = [];
       const successfulExplanations: Array<{
@@ -1770,11 +1892,17 @@ export default function Home() {
           continue;
         }
 
-        const data = (await response.json()) as { result: string; qualityWarnings?: string[] };
+        const data = (await response.json()) as {
+          result: string;
+          qualityWarnings?: string[];
+          diagramAidRecommendation?: DiagramAidRecommendation;
+          model?: string;
+        };
         const rawResult = data.result;
         const parsed = parseExplanation(rawResult);
         setRawResponse(rawResult);
         setQualityWarnings(data.qualityWarnings ?? []);
+        setDiagramAidRecommendation(data.diagramAidRecommendation ?? null);
         setQuickAnswer(parsed.quickAnswer);
         setExplanationBody(parsed.body);
         setSelectedMethodIndexes(
@@ -1789,14 +1917,34 @@ export default function Home() {
             ? "select_explanation"
             : "confirm_quick_answer",
         );
+        pushQuestionVersion(
+          item.questionNo,
+          {
+            rawResponse: rawResult,
+            quickAnswer: parsed.quickAnswer,
+            explanationBody: parsed.body,
+            selectedMethodIndexes: splitMethodBlocks(parsed.body).methods.map((_, index) => index),
+            representativeMethodIndex: splitMethodBlocks(parsed.body).methods.length > 0 ? 0 : null,
+            workflowStep:
+              splitMethodBlocks(parsed.body).methods.length > 1
+                ? "select_explanation"
+                : "confirm_quick_answer",
+            modelLabel: data.model || (generationMode === "final" ? "gemini-final" : "gemini-test"),
+            sourceType: "batch",
+            runId: batchRunId,
+          },
+          true,
+        );
         results.push({
           questionNo: item.questionNo,
           quickAnswer: parsed.quickAnswer,
           status: "success",
           message:
-            data.qualityWarnings && data.qualityWarnings.length > 0
-              ? `생성 완료(경고 ${data.qualityWarnings.length}건)`
-              : "생성 완료",
+              `${data.qualityWarnings && data.qualityWarnings.length > 0 ? `생성 완료(경고 ${data.qualityWarnings.length}건)` : "생성 완료"}${
+                data.diagramAidRecommendation?.recommended
+                  ? ` / 도형보조 추천(score ${data.diagramAidRecommendation.score})`
+                  : ""
+              }`,
         });
         successfulExplanations.push({
           questionNo: item.questionNo,
@@ -1955,11 +2103,14 @@ export default function Home() {
     try {
       setErrorMessage("");
       setSuccessMessage("");
+      const activeVersion = selectedQuestionVersion;
+      const finalQuickAnswer = activeVersion?.quickAnswer || quickAnswer || "-";
+      const finalBody = activeVersion?.explanationBody || selectedExplanationBody;
       const formData = new FormData();
       formData.append("examName", selectedExam || "직접업로드");
       formData.append("questionNo", questionNo || "1");
-      formData.append("quickAnswer", quickAnswer || "-");
-      formData.append("explanationBody", `[정답] ${quickAnswer}\n${selectedExplanationBody}`);
+      formData.append("quickAnswer", finalQuickAnswer);
+      formData.append("explanationBody", `[정답] ${finalQuickAnswer}\n${finalBody}`);
       const saveRes = await fetch("/api/save-result", {
         method: "POST",
         body: formData,
@@ -2058,7 +2209,7 @@ export default function Home() {
               <div className="h-44 overflow-y-auto rounded-md border border-slate-200">
                 {examFiles.length === 0 ? (
                   <p className="p-3 text-sm text-slate-500">
-                    시험지 폴더에 파일이 없습니다. `시험지` 또는 `exams` 폴더에 png/jpg/pdf/hml 파일을 넣어주세요.
+                    시험지 폴더에 파일이 없습니다. `시험지` 또는 `exams` 폴더에 png/jpg/pdf 파일을 넣어주세요.
                   </p>
                 ) : (
                   <ul className="divide-y divide-slate-200">
@@ -2107,68 +2258,13 @@ export default function Home() {
 
             <div className="rounded-md border border-violet-200 bg-violet-50 p-3">
               <p className="text-sm font-semibold text-violet-900">
-                (수동 메인) 원본 HML 기반 해설 붙이기
+                이미지 영역 지정 기반 처리(고정)
               </p>
               <p className="mt-1 text-xs text-violet-800">
-                기본은 수동 문항 지정으로 처리합니다. 자동은 보조 모드에서만 실행하세요.
+                현재는 PDF/이미지에서 문제 영역을 지정해 해설을 생성합니다.
+                <br />
+                HML/HWP/HWPX는 직접 편집하지 않고, PDF 또는 이미지로 변환 후 진행해 주세요.
               </p>
-              <div className="mt-2 rounded border border-violet-300 bg-white p-2 text-xs text-violet-900">
-                <p className="font-semibold">실행 모드</p>
-                <label className="mt-1 flex items-center gap-2">
-                  <input
-                    type="radio"
-                    name="hmlExecutionMode"
-                    checked={hmlExecutionMode === "manual"}
-                    onChange={() => setHmlExecutionMode("manual")}
-                  />
-                  수동 메인(권장)
-                </label>
-                <label className="mt-1 flex items-center gap-2">
-                  <input
-                    type="radio"
-                    name="hmlExecutionMode"
-                    checked={hmlExecutionMode === "auto_assist"}
-                    onChange={() => setHmlExecutionMode("auto_assist")}
-                  />
-                  자동 보조(품질 경고 시 수동 전환)
-                </label>
-              </div>
-              {selectedExamKind === "hml" && hmlFile && (
-                <p className="mt-2 rounded border border-violet-300 bg-white px-2 py-1 text-xs text-violet-900">
-                  선택된 HML: {selectedExam}
-                </p>
-              )}
-              <input
-                type="file"
-                accept=".hml,text/xml,application/xml"
-                onChange={(event) => setHmlFile(event.target.files?.[0] || null)}
-                className="mt-2 block w-full rounded-md border border-violet-300 bg-white p-2 text-sm"
-              />
-              <label className="mt-2 block text-xs font-semibold text-violet-900">
-                문항 번호 직접 선택(쉼표/범위 지원)
-              </label>
-              <input
-                type="text"
-                value={hmlManualQuestionSelection}
-                onChange={(event) => setHmlManualQuestionSelection(event.target.value)}
-                placeholder="예: 1-30 또는 1,2,5-8"
-                className="mt-1 block w-full rounded-md border border-violet-300 bg-white p-2 text-sm"
-              />
-              <p className="mt-1 text-[11px] text-violet-800">
-                오토넘버는 보조로 사용하고, 입력한 번호만 해설 생성합니다.
-              </p>
-              <button
-                type="button"
-                onClick={handleHmlAppendSolution}
-                disabled={!hmlFile || isProcessingHml}
-                className="mt-2 w-full rounded-md bg-violet-600 px-3 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:bg-slate-300"
-              >
-                {isProcessingHml
-                  ? "원본 기반 해설 생성 중..."
-                  : hmlExecutionMode === "manual"
-                    ? "수동 메인으로 해설 추가 생성"
-                    : "자동 보조로 해설 추가 생성"}
-              </button>
             </div>
               </>
             )}
@@ -2591,6 +2687,22 @@ export default function Home() {
               <>
             <div className="rounded-md border border-slate-200 bg-slate-50 p-3">
               <p className="text-sm font-semibold text-slate-800">현재 문항: {questionNo || "-"}</p>
+              {questionNoOptions.length > 0 && (
+                <div className="mt-2">
+                  <label className="text-[11px] font-semibold text-slate-600">문항 선택</label>
+                  <select
+                    value={questionNo}
+                    onChange={(event) => setQuestionNo(event.target.value)}
+                    className="mt-1 w-full rounded border border-slate-300 bg-white px-2 py-1 text-xs"
+                  >
+                    {questionNoOptions.map((item) => (
+                      <option key={`q-opt-${item}`} value={item}>
+                        {item}번
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
               <p className="mt-1 text-xs text-slate-600">
                 단계: 영역지정 → 문제풀이 → 해설 선택 → 빠른정답 → 해설지 생성
               </p>
@@ -2726,6 +2838,65 @@ export default function Home() {
             >
               {isGenerating ? "해설 생성 중..." : "수동 지정 해설 생성 (한 문제)"}
             </button>
+
+            {hasGeneratedResult && (
+              <div className="rounded-md border border-indigo-200 bg-indigo-50 p-3">
+                <p className="text-xs font-semibold text-indigo-900">
+                  문항 버전 관리
+                  {selectedQuestionVersion
+                    ? ` (현재 ${selectedQuestionVersion.label}, ${selectedQuestionVersion.modelLabel})`
+                    : ""}
+                </p>
+                {currentQuestionVersionState?.versions?.length ? (
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    {currentQuestionVersionState.versions.map((version) => (
+                      <button
+                        key={version.id}
+                        type="button"
+                        onClick={() => selectQuestionVersion(questionNo || "1", version.id)}
+                        className={`rounded border px-2 py-1 text-[11px] ${
+                          currentQuestionVersionState.selectedVersionId === version.id
+                            ? "border-indigo-600 bg-indigo-600 text-white"
+                            : "border-indigo-300 bg-white text-indigo-900"
+                        }`}
+                        title={`${new Date(version.createdAt).toLocaleString()} / ${version.modelLabel} / ${version.sourceType}:${version.runId}`}
+                      >
+                        {version.label} · {version.sourceType === "manual" ? "수동" : version.sourceType}
+                      </button>
+                    ))}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (!rawResponse.trim()) return;
+                        pushQuestionVersion(
+                          questionNo || "1",
+                          {
+                            rawResponse,
+                            quickAnswer,
+                            explanationBody,
+                            selectedMethodIndexes,
+                            representativeMethodIndex,
+                            workflowStep,
+                            modelLabel: "manual",
+                            sourceType: "manual",
+                            runId: `manual-${Date.now()}`,
+                          },
+                          true,
+                        );
+                        setSuccessMessage("현재 편집 상태를 새 버전으로 저장했습니다.");
+                      }}
+                      className="rounded border border-emerald-300 bg-white px-2 py-1 text-[11px] text-emerald-800"
+                    >
+                      + 현재 상태를 새 버전으로 저장
+                    </button>
+                  </div>
+                ) : (
+                  <p className="mt-1 text-[11px] text-indigo-800">
+                    아직 버전이 없습니다. 해설 생성을 실행하면 v1부터 기록됩니다.
+                  </p>
+                )}
+              </div>
+            )}
 
             {hasGeneratedResult && (
               <div className="rounded-md border border-slate-200 p-3">
@@ -2879,6 +3050,39 @@ export default function Home() {
                     <li key={`quality-warning-${idx}`}>{item}</li>
                   ))}
                 </ul>
+              </div>
+            )}
+
+            {diagramAidRecommendation && (
+              <div
+                className={`rounded-md border p-3 text-xs ${
+                  diagramAidRecommendation.recommended
+                    ? "border-fuchsia-300 bg-fuchsia-50 text-fuchsia-900"
+                    : "border-slate-300 bg-slate-50 text-slate-700"
+                }`}
+              >
+                <p className="font-semibold">
+                  도형 보조 이미지 추천:{" "}
+                  {diagramAidRecommendation.recommended ? "권장" : "불필요(텍스트 우선)"}
+                  {"  "}
+                  <span className="font-normal">(score {diagramAidRecommendation.score})</span>
+                </p>
+                <p className="mt-1">
+                  근거: {diagramAidRecommendation.reasons.join(", ")}
+                </p>
+                {diagramAidRecommendation.recommended && (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setSuccessMessage(
+                        "도형 보조 이미지가 추천됩니다. 필요한 문항에만 바나나(이미지 생성)를 선택 적용하세요.",
+                      )
+                    }
+                    className="mt-2 rounded border border-fuchsia-400 bg-white px-2 py-1 text-[11px] font-semibold text-fuchsia-900"
+                  >
+                    바나나 선택 적용 안내 보기
+                  </button>
+                )}
               </div>
             )}
           </div>
