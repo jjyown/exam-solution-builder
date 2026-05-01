@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import ReactCrop, {
   type Crop,
   type PixelCrop,
@@ -590,6 +590,8 @@ export default function Home() {
   );
   const questionCardDraftMapRef = useRef<Record<string, QuestionCardDraft>>({});
   const questionVersionMapRef = useRef<Record<string, QuestionVersionState>>({});
+  questionCardDraftMapRef.current = questionCardDraftMap;
+  questionVersionMapRef.current = questionVersionMap;
   const [hmlFile, setHmlFile] = useState<File | null>(null);
   const [hmlManualQuestionSelection, setHmlManualQuestionSelection] = useState("1-30");
   const [hmlExecutionMode, setHmlExecutionMode] = useState<"manual" | "auto_assist">("manual");
@@ -787,27 +789,8 @@ export default function Home() {
   const openQuestionCard = useCallback(
     (targetQuestionNo: string) => {
       setQuestionNo(targetQuestionNo);
-      const draft = questionCardDraftMapRef.current[targetQuestionNo];
-      const selected = pickSelectedVersionForQuestion(
-        questionVersionMapRef.current[targetQuestionNo],
-      );
-      if (draft) {
-        setQuickAnswer(draft.quickAnswer);
-        setExplanationBody(draft.explanationBody);
-        setSelectedMethodIndexes(
-          draft.selectedMethodIndexes.length > 0 ? draft.selectedMethodIndexes : [0],
-        );
-        setRepresentativeMethodIndex(draft.representativeMethodIndex);
-        setMethodSelectionPolicy(draft.methodSelectionPolicy);
-        setWorkflowStep(draft.workflowStep);
-        setRawResponse(draft.rawResponse?.trim() ? draft.rawResponse : selected?.rawResponse ?? "");
-        return;
-      }
-      if (selected) {
-        applyVersionToEditor(selected);
-      }
     },
-    [applyVersionToEditor],
+    [],
   );
 
   const syncRenderImageSize = useCallback(() => {
@@ -980,11 +963,6 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    questionCardDraftMapRef.current = questionCardDraftMap;
-    questionVersionMapRef.current = questionVersionMap;
-  }, [questionCardDraftMap, questionVersionMap]);
-
-  useEffect(() => {
     if (currentStep !== 1) return;
     void loadExamFiles();
   }, [currentStep, loadExamFiles]);
@@ -1032,9 +1010,13 @@ export default function Home() {
     };
   }, [sourceImage, syncRenderImageSize]);
 
-  useEffect(() => {
-    const draft = questionCardDraftMapRef.current[questionNo];
-    const selected = pickSelectedVersionForQuestion(questionVersionMapRef.current[questionNo]);
+  const draftForActiveQuestion = questionNo ? questionCardDraftMap[questionNo] : undefined;
+  const versionStateForActiveQuestion = questionNo ? questionVersionMap[questionNo] : undefined;
+
+  useLayoutEffect(() => {
+    if (!questionNo) return;
+    const draft = draftForActiveQuestion;
+    const selected = pickSelectedVersionForQuestion(versionStateForActiveQuestion);
     if (draft) {
       setQuickAnswer(draft.quickAnswer);
       setExplanationBody(draft.explanationBody);
@@ -1049,10 +1031,19 @@ export default function Home() {
     }
     if (!selected) return;
     applyVersionToEditor(selected);
-  }, [applyVersionToEditor, questionNo, questionVersionMap]);
+  }, [
+    applyVersionToEditor,
+    questionNo,
+    draftForActiveQuestion,
+    versionStateForActiveQuestion,
+  ]);
 
   useEffect(() => {
     if (!questionNo || !hasGeneratedResult) return;
+    const hasStoredForQuestion =
+      Boolean(questionCardDraftMap[questionNo]) ||
+      Boolean(pickSelectedVersionForQuestion(questionVersionMap[questionNo]));
+    if (!hasStoredForQuestion) return;
     setQuestionCardDraftMap((prev) => {
       const nextDraft: QuestionCardDraft = {
         quickAnswer,
@@ -1086,6 +1077,8 @@ export default function Home() {
     hasGeneratedResult,
     methodSelectionPolicy,
     questionNo,
+    questionCardDraftMap,
+    questionVersionMap,
     quickAnswer,
     rawResponse,
     representativeMethodIndex,
@@ -2023,7 +2016,6 @@ export default function Home() {
           continue;
         }
 
-        setQuestionNo(item.questionNo);
         const itemSolverProfile =
           questionSolverProfileOverrides[item.questionNo] ?? solverModelProfile;
         const response = await fetch("/api/generate-explanation", {
@@ -2076,41 +2068,39 @@ export default function Home() {
         };
         const rawResult = data.result;
         const parsed = parseExplanation(rawResult);
-        setRawResponse(rawResult);
-        setQualityWarnings(data.qualityWarnings ?? []);
-        setDiagramAidRecommendation(data.diagramAidRecommendation ?? null);
-        setQuickAnswer(parsed.quickAnswer);
-        setExplanationBody(parsed.body);
-        setSelectedMethodIndexes(
-          splitMethodBlocks(parsed.body).methods.map((_, index) => index),
-        );
-        setRepresentativeMethodIndex(
-          splitMethodBlocks(parsed.body).methods.length > 0 ? 0 : null,
-        );
-        setMethodSelectionPolicy("all");
-        setWorkflowStep(
-          splitMethodBlocks(parsed.body).methods.length > 1
+        const parsedMethodBlocks = splitMethodBlocks(parsed.body);
+        const selectedIndexes = parsedMethodBlocks.methods.map((_, index) => index);
+        const nextWorkflowStep: ExplanationWorkflowStep =
+          parsedMethodBlocks.methods.length > 1
             ? "select_explanation"
-            : "confirm_quick_answer",
-        );
+            : "confirm_quick_answer";
         pushQuestionVersion(
           item.questionNo,
           {
             rawResponse: rawResult,
             quickAnswer: parsed.quickAnswer,
             explanationBody: parsed.body,
-            selectedMethodIndexes: splitMethodBlocks(parsed.body).methods.map((_, index) => index),
-            representativeMethodIndex: splitMethodBlocks(parsed.body).methods.length > 0 ? 0 : null,
-            workflowStep:
-              splitMethodBlocks(parsed.body).methods.length > 1
-                ? "select_explanation"
-                : "confirm_quick_answer",
+            selectedMethodIndexes: selectedIndexes,
+            representativeMethodIndex: parsedMethodBlocks.methods.length > 0 ? 0 : null,
+            workflowStep: nextWorkflowStep,
             modelLabel: data.model || `gemini-${itemSolverProfile}`,
             sourceType: "batch",
             runId: batchRunId,
           },
           true,
         );
+        setQuestionCardDraftMap((prev) => ({
+          ...prev,
+          [item.questionNo]: {
+            quickAnswer: parsed.quickAnswer,
+            explanationBody: parsed.body,
+            rawResponse: rawResult,
+            selectedMethodIndexes: selectedIndexes,
+            representativeMethodIndex: parsedMethodBlocks.methods.length > 0 ? 0 : null,
+            methodSelectionPolicy: "all",
+            workflowStep: nextWorkflowStep,
+          },
+        }));
         results.push({
           questionNo: item.questionNo,
           quickAnswer: parsed.quickAnswer,
