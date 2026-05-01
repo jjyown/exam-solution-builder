@@ -751,6 +751,9 @@ export default function Home() {
   const [ruleAnalyzeInput, setRuleAnalyzeInput] = useState("");
   const [ruleTargetStyleInput, setRuleTargetStyleInput] = useState("");
   const [ruleAdminTokenInput, setRuleAdminTokenInput] = useState("");
+  const [ruleAnalyzeImageBase64, setRuleAnalyzeImageBase64] = useState("");
+  const [ruleAnalyzeImageMimeType, setRuleAnalyzeImageMimeType] = useState("image/png");
+  const [ruleAnalyzeImageName, setRuleAnalyzeImageName] = useState("");
   const [isApplyingRuleFeedback, setIsApplyingRuleFeedback] = useState(false);
   const [ruleVersions, setRuleVersions] = useState<PromptRuleVersion[]>([]);
   const [isLoadingRuleVersions, setIsLoadingRuleVersions] = useState(false);
@@ -2454,8 +2457,8 @@ export default function Home() {
 
   const handleAnalyzeAndApplyRules = async () => {
     const weakText = ruleAnalyzeInput.trim();
-    if (!weakText) {
-      setErrorMessage("분석할 해설 내용을 먼저 입력해 주세요.");
+    if (!weakText && !ruleAnalyzeImageBase64) {
+      setErrorMessage("분석할 해설 텍스트 또는 이미지를 먼저 입력해 주세요.");
       return;
     }
     try {
@@ -2474,6 +2477,8 @@ export default function Home() {
           weakExplanation: weakText,
           targetStyleHint: ruleTargetStyleInput.trim(),
           profile: solverModelProfile,
+          referenceImageBase64: ruleAnalyzeImageBase64 || undefined,
+          referenceImageMimeType: ruleAnalyzeImageMimeType || undefined,
         }),
       });
       if (!response.ok) {
@@ -2502,6 +2507,26 @@ export default function Home() {
       setErrorMessage(message);
     } finally {
       setIsApplyingRuleFeedback(false);
+    }
+  };
+
+  const handleRuleAnalyzeImageChange = async (
+    event: React.ChangeEvent<HTMLInputElement>,
+  ) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    try {
+      setErrorMessage("");
+      const base64 = await toBase64(file);
+      setRuleAnalyzeImageBase64(base64);
+      setRuleAnalyzeImageMimeType(file.type || "image/png");
+      setRuleAnalyzeImageName(file.name);
+      if (!ruleAnalyzeInput.trim()) {
+        setSuccessMessage("이미지를 업로드했습니다. 텍스트 입력 없이도 OCR 분석이 가능합니다.");
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "이미지 업로드 처리 중 오류";
+      setErrorMessage(message);
     }
   };
 
@@ -3751,6 +3776,33 @@ export default function Home() {
               <p className="mt-1 text-[11px] text-indigo-700">
                 해설 입력 길이: {ruleAnalyzeInput.length}/4000
               </p>
+              <label className="mt-2 block text-[11px] font-semibold text-indigo-800">
+                해설 이미지 업로드(OCR 자동 추출)
+              </label>
+              <input
+                type="file"
+                accept="image/*"
+                onChange={(event) => {
+                  void handleRuleAnalyzeImageChange(event);
+                }}
+                className="mt-1 w-full rounded-md border border-indigo-200 bg-white px-2 py-1 text-xs text-slate-700 file:mr-2 file:rounded file:border-0 file:bg-indigo-100 file:px-2 file:py-1 file:text-indigo-800"
+              />
+              {ruleAnalyzeImageName && (
+                <div className="mt-1 flex items-center justify-between gap-2 text-[11px] text-indigo-700">
+                  <span className="truncate">업로드됨: {ruleAnalyzeImageName}</span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setRuleAnalyzeImageBase64("");
+                      setRuleAnalyzeImageMimeType("image/png");
+                      setRuleAnalyzeImageName("");
+                    }}
+                    className="shrink-0 rounded border border-indigo-300 bg-white px-2 py-0.5 text-[11px] font-semibold text-indigo-700"
+                  >
+                    이미지 제거
+                  </button>
+                </div>
+              )}
               <textarea
                 value={ruleTargetStyleInput}
                 onChange={(event) => setRuleTargetStyleInput(event.target.value)}

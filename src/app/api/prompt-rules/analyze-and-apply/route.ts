@@ -11,6 +11,8 @@ type AnalyzeAndApplyBody = {
   weakExplanation?: string;
   targetStyleHint?: string;
   profile?: "easy" | "balanced" | "killer";
+  referenceImageBase64?: string;
+  referenceImageMimeType?: string;
 };
 
 type RulesPayload = {
@@ -61,6 +63,36 @@ async function analyzeWithGemini(prompt: string, apiKey: string) {
   return Promise.race([run, timeout]);
 }
 
+async function extractTextFromImageWithGemini(params: {
+  apiKey: string;
+  imageBase64: string;
+  imageMimeType: string;
+}) {
+  const client = new GoogleGenerativeAI(params.apiKey);
+  const model = client.getGenerativeModel({ model: "gemini-2.0-flash" });
+  const run = model
+    .generateContent([
+      {
+        text: [
+          "이미지 속 수학 해설 텍스트를 최대한 정확히 OCR로 추출해.",
+          "설명/요약 없이 추출 텍스트만 출력해.",
+          "수식은 일반 텍스트로 유지해.",
+        ].join("\n"),
+      },
+      {
+        inlineData: {
+          data: params.imageBase64,
+          mimeType: params.imageMimeType || "image/png",
+        },
+      },
+    ])
+    .then((result) => result.response.text()?.trim() || "");
+  const timeout = new Promise<string>((_, reject) =>
+    setTimeout(() => reject(new Error("Gemini OCR 타임아웃")), 20000),
+  );
+  return Promise.race([run, timeout]);
+}
+
 async function analyzeWithOpenAi(prompt: string, apiKey: string) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 20000);
@@ -107,18 +139,7 @@ export async function POST(request: Request) {
     }
 
     const body = (await request.json()) as AnalyzeAndApplyBody;
-    const weakExplanation = body.weakExplanation?.trim() || "";
-    if (!weakExplanation) {
-      return NextResponse.json({ error: "분석할 해설 텍스트가 비어 있습니다." }, { status: 400 });
-    }
-    if (weakExplanation.length > MAX_WEAK_EXPLANATION_LEN) {
-      return NextResponse.json(
-        {
-          error: `분석 텍스트가 너무 깁니다. ${MAX_WEAK_EXPLANATION_LEN}자 이하로 입력해 주세요.`,
-        },
-        { status: 400 },
-      );
-    }
+    let weakExplanation = body.weakExplanation?.trim() || "";
     const profile =
       body.profile === "easy" || body.profile === "killer" || body.profile === "balanced"
         ? body.profile
@@ -162,8 +183,46 @@ export async function POST(request: Request) {
       process.env.GEMINI_API_KEY?.trim() || process.env.GOOGLE_API_KEY?.trim() || "";
     const openAiApiKey =
       process.env.OPENAI_API_KEY?.trim() || process.env.OPENAI_KEY?.trim() || "";
+    const referenceImageBase64 = body.referenceImageBase64?.trim() || "";
+    const referenceImageMimeType = body.referenceImageMimeType?.trim() || "image/png";
 
     const failures: string[] = [];
+    if (!weakExplanation && !referenceImageBase64) {
+      return NextResponse.json(
+        { error: "분석할 해설 텍스트 또는 이미지가 필요합니다." },
+        { status: 400 },
+      );
+    }
+    if (!weakExplanation && referenceImageBase64) {
+      if (!geminiApiKey) {
+        return NextResponse.json(
+          { error: "이미지 OCR에는 GEMINI_API_KEY(또는 GOOGLE_API_KEY)가 필요합니다." },
+          { status: 500 },
+        );
+      }
+      try {
+        const extracted = await extractTextFromImageWithGemini({
+          apiKey: geminiApiKey,
+          imageBase64: referenceImageBase64,
+          imageMimeType: referenceImageMimeType,
+        });
+        weakExplanation = extracted.trim();
+        if (!weakExplanation) {
+          return NextResponse.json({ error: "이미지에서 해설 텍스트를 추출하지 못했습니다." }, { status: 400 });
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Gemini OCR 오류";
+        return NextResponse.json(
+          { error: `이미지 OCR 처리에 실패했습니다: ${message}` },
+          { status: 502 },
+        );
+      }
+    }
+    if (weakExplanation.length > MAX_WEAK_EXPLANATION_LEN) {
+      weakExplanation = weakExplanation.slice(0, MAX_WEAK_EXPLANATION_LEN);
+      failures.push(`입력 텍스트가 길어 ${MAX_WEAK_EXPLANATION_LEN}자로 잘라 분석했습니다.`);
+    }
+
     let parsedPayload: RulesPayload | null = null;
 
     const tryParseRules = (rawText: string) => {
