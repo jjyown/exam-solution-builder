@@ -1,6 +1,7 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { NextResponse } from "next/server";
 import { buildSystemInstruction } from "./prompts";
+import { getRuntimePromptRules } from "@/lib/supabasePromptRules";
 
 type GenerateRequestBody = {
   questionText?: string;
@@ -166,9 +167,12 @@ function validateCurriculumScope(text: string) {
 
 function validatePedagogicalPolicy(text: string) {
   const issues: string[] = [];
+  const answer = text.match(/\[정답\]\s*([^\n\r]*)/i)?.[1]?.trim() ?? "";
   const explanation = text.match(/\[해설\]\s*([\s\S]+)/i)?.[1]?.trim() ?? "";
-  const estimationPattern = /추정|근사|어림|대략|감으로|찍어서|적당히|approx|approximately|≈/i;
-  if (estimationPattern.test(explanation)) {
+  const combined = `${answer}\n${explanation}`.trim();
+  const estimationPattern =
+    /근삿?값|추정|근사|어림|대략|감으로|찍어서|적당히|approx(?:imately)?|≈|≒|약\s*\d/i;
+  if (estimationPattern.test(combined)) {
     issues.push("근삿값/추정 중심 풀이 표현이 감지되었습니다.");
   }
   const sentenceCount =
@@ -183,16 +187,30 @@ function validatePedagogicalPolicy(text: string) {
   return { ok: issues.length === 0, issues };
 }
 
+function hasCriticalPedagogyIssue(issues: string[]) {
+  return issues.some((issue) => /근삿값|추정/.test(issue));
+}
+
 function buildRetryInstruction(
   formatMissing: string[],
   consistencyIssues: string[],
   scopeIssues: string[],
   pedagogyIssues: string[],
+  retryHistory: string[] = [],
+  retryAttempt = 1,
 ) {
   const lines: string[] = [
     "[재요청]",
     "직전 응답은 형식/정합 기준을 만족하지 못했습니다.",
   ];
+  if (retryHistory.length > 0) {
+    lines.push("[이전 시도 위반 요약]");
+    retryHistory.forEach((item) => lines.push(`- ${item}`));
+  }
+  if (retryAttempt >= 2) {
+    lines.push("[강조]");
+    lines.push("이전 위반이 반복되었습니다. 같은 실수를 절대 반복하지 마세요.");
+  }
   if (formatMissing.length > 0) {
     lines.push(`형식 누락 항목: ${formatMissing.join(", ")}`);
     lines.push("반드시 [정답] 한 줄 + [해설] 본문 구조를 유지하세요.");
@@ -214,6 +232,7 @@ function buildRetryInstruction(
   lines.push("[정답] (한 줄)");
   lines.push("[해설]");
   lines.push("(해설 본문)");
+  lines.push("특히 근사값(약, ≈, 1.414 등)을 사용하지 말고, 식 전개로 결론을 도출하세요.");
   lines.push("해설은 중간에 끊기지 않게 마지막 문장까지 완결하세요.");
   lines.push("다른 제목/머리말/설명문을 추가하지 마세요.");
   return lines.join("\n");
@@ -341,7 +360,8 @@ export async function POST(request: Request) {
       body.solverModelProfile === "killer"
         ? body.solverModelProfile
         : "balanced";
-    const systemInstruction = buildSystemInstruction(solverModelProfile);
+    const runtimeRules = await getRuntimePromptRules();
+    const systemInstruction = buildSystemInstruction(solverModelProfile, runtimeRules);
     const modelCandidates = pickModelCandidates({
       generationMode,
       solverModelProfile,
@@ -451,6 +471,7 @@ export async function POST(request: Request) {
     });
 
     const failures: string[] = [];
+    const recursiveIssueHistory: string[] = [];
 
     for (const modelName of modelCandidates) {
       try {
@@ -496,6 +517,9 @@ export async function POST(request: Request) {
           ...scopeCheck.issues,
           ...pedagogyCheck.issues,
         ];
+        recursiveIssueHistory.push(
+          ...qualityWarnings.filter(Boolean).map((item) => `1차 시도 위반: ${item}`),
+        );
         const retryContents: Array<
           { text: string } | { inlineData: { data: string; mimeType: string } }
         > = [
@@ -506,6 +530,8 @@ export async function POST(request: Request) {
               consistencyCheck.issues,
               scopeCheck.issues,
               pedagogyCheck.issues,
+              recursiveIssueHistory.slice(-6),
+              1,
             ),
           },
         ];
@@ -574,7 +600,13 @@ export async function POST(request: Request) {
           const pedagogyCheck = validatePedagogicalPolicy(openAiText);
           const truncated = isLikelyTruncatedResult(openAiText);
 
-          if (formatCheck.ok && consistencyCheck.ok && scopeCheck.ok && !truncated) {
+          if (
+            formatCheck.ok &&
+            consistencyCheck.ok &&
+            scopeCheck.ok &&
+            !truncated &&
+            !hasCriticalPedagogyIssue(pedagogyCheck.issues)
+          ) {
             return NextResponse.json(
               {
                 result: openAiText,
@@ -591,6 +623,11 @@ export async function POST(request: Request) {
             consistencyCheck.issues,
             scopeCheck.issues,
             pedagogyCheck.issues,
+          [
+            ...recursiveIssueHistory.slice(-6),
+            ...pedagogyCheck.issues.map((item) => `OpenAI 1차 위반: ${item}`),
+          ],
+          2,
           );
           const retryText = await generateWithOpenAiFallback({
             apiKey: openAiApiKey,
@@ -616,7 +653,8 @@ export async function POST(request: Request) {
               retryFormatCheck.ok &&
               retryConsistencyCheck.ok &&
               retryScopeCheck.ok &&
-              !retryTruncated
+              !retryTruncated &&
+              !hasCriticalPedagogyIssue(retryPedagogyCheck.issues)
             ) {
               return NextResponse.json(
                 {
