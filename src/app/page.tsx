@@ -237,6 +237,7 @@ const DEFAULT_BODY = `해설 생성 버튼을 누르면 이 영역에 결과가 
 
 [해설]
 문제의 핵심 개념과 단계별 풀이를 학생 눈높이에 맞게 작성합니다.`;
+const RULE_ADMIN_TOKEN_STORAGE_KEY = "promptRulesAdminToken";
 
 function hasCompletedExplanationBody(body: string) {
   const t = body.trim();
@@ -1146,6 +1147,22 @@ export default function Home() {
       setIsLoadingExams(false);
     }
   }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const saved = window.localStorage.getItem(RULE_ADMIN_TOKEN_STORAGE_KEY) || "";
+    if (saved) setRuleAdminTokenInput(saved);
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const token = ruleAdminTokenInput.trim();
+    if (!token) {
+      window.localStorage.removeItem(RULE_ADMIN_TOKEN_STORAGE_KEY);
+      return;
+    }
+    window.localStorage.setItem(RULE_ADMIN_TOKEN_STORAGE_KEY, token);
+  }, [ruleAdminTokenInput]);
 
   useEffect(() => {
     if (currentStep !== 1) return;
@@ -3751,6 +3768,9 @@ export default function Home() {
                 placeholder="선택: 운영자 토큰(PROMPT_RULES_ADMIN_TOKEN)"
                 className="mt-2 w-full rounded-md border border-indigo-200 bg-white px-2 py-2 text-xs text-slate-700"
               />
+              <p className="mt-1 text-[11px] text-indigo-700">
+                입력한 토큰은 현재 브라우저에 자동 저장되며, 비우면 저장값이 삭제됩니다.
+              </p>
               <button
                 type="button"
                 onClick={handleAnalyzeAndApplyRules}
