@@ -32,18 +32,26 @@ function parseModelCandidatesFromEnv(envKey: string, fallback: string[]) {
 }
 
 const FINAL_MODEL_CANDIDATES = parseModelCandidatesFromEnv("GEMINI_MODELS_GENERATE_FINAL", [
+  "gemini-1.5-pro",
+  "gemini-1.5-flash",
   "gemini-2.0-flash",
 ]);
 const TEST_MODEL_CANDIDATES = parseModelCandidatesFromEnv("GEMINI_MODELS_GENERATE_TEST", [
+  "gemini-1.5-flash",
   "gemini-2.0-flash",
 ]);
 const EASY_MODEL_CANDIDATES = parseModelCandidatesFromEnv("GEMINI_MODELS_GENERATE_EASY", [
+  "gemini-1.5-flash",
   "gemini-2.0-flash",
 ]);
 const BALANCED_MODEL_CANDIDATES = parseModelCandidatesFromEnv("GEMINI_MODELS_GENERATE_BALANCED", [
+  "gemini-1.5-pro",
+  "gemini-1.5-flash",
   "gemini-2.0-flash",
 ]);
 const KILLER_MODEL_CANDIDATES = parseModelCandidatesFromEnv("GEMINI_MODELS_GENERATE_KILLER", [
+  "gemini-1.5-pro",
+  "gemini-1.5-flash",
   "gemini-2.0-flash",
 ]);
 

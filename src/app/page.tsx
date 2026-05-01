@@ -2267,7 +2267,7 @@ export default function Home() {
 
       const results: BatchResult[] = [];
       const successfulQuestionNos: string[] = [];
-      const perQuestionDelayMs = 2200;
+      const perQuestionDelayMs = 4000;
 
       for (let itemIndex = 0; itemIndex < queuedProblems.length; itemIndex += 1) {
         const item = queuedProblems[itemIndex];
