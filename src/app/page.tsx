@@ -76,11 +76,24 @@ type QuestionVersionState = {
 type QuestionCardDraft = {
   quickAnswer: string;
   explanationBody: string;
+  /** 문항 전환 시 미리보기·상태 일치용(구버전 초안에는 없을 수 있음) */
+  rawResponse?: string;
   selectedMethodIndexes: number[];
   representativeMethodIndex: number | null;
   methodSelectionPolicy: "all" | "selected";
   workflowStep: ExplanationWorkflowStep;
 };
+
+function pickSelectedVersionForQuestion(
+  state: QuestionVersionState | undefined,
+): QuestionVersionEntry | null {
+  if (!state?.versions?.length) return null;
+  return (
+    state.versions.find((item) => item.id === state.selectedVersionId) ||
+    state.versions[0] ||
+    null
+  );
+}
 
 type SolverModelProfile = "easy" | "balanced" | "killer";
 
@@ -576,6 +589,7 @@ export default function Home() {
     {},
   );
   const questionCardDraftMapRef = useRef<Record<string, QuestionCardDraft>>({});
+  const questionVersionMapRef = useRef<Record<string, QuestionVersionState>>({});
   const [hmlFile, setHmlFile] = useState<File | null>(null);
   const [hmlManualQuestionSelection, setHmlManualQuestionSelection] = useState("1-30");
   const [hmlExecutionMode, setHmlExecutionMode] = useState<"manual" | "auto_assist">("manual");
@@ -626,11 +640,6 @@ export default function Home() {
     () => questionSolverProfileOverrides[questionNo] ?? solverModelProfile,
     [questionSolverProfileOverrides, questionNo, solverModelProfile],
   );
-  const currentQuestionVersionState = questionVersionMap[questionNo] || null;
-  const selectedQuestionVersion =
-    currentQuestionVersionState?.versions.find(
-      (item) => item.id === currentQuestionVersionState.selectedVersionId,
-    ) || null;
   const hasGeneratedResult = rawResponse.trim().length > 0;
   const canGenerate = hasImage && !isGenerating && !isLoadingExams;
   const sortedVerticalGuides = useMemo(
@@ -722,15 +731,7 @@ export default function Home() {
   }, []);
 
   const getSelectedVersionForQuestion = useCallback(
-    (targetQuestionNo: string) => {
-      const state = questionVersionMap[targetQuestionNo];
-      if (!state) return null;
-      return (
-        state.versions.find((item) => item.id === state.selectedVersionId) ||
-        state.versions[0] ||
-        null
-      );
-    },
+    (targetQuestionNo: string) => pickSelectedVersionForQuestion(questionVersionMap[targetQuestionNo]),
     [questionVersionMap],
   );
 
@@ -783,47 +784,30 @@ export default function Home() {
     [],
   );
 
-  const selectQuestionVersion = useCallback(
-    (targetQuestionNo: string, versionId: string) => {
-      setQuestionVersionMap((prev) => {
-        const state = prev[targetQuestionNo];
-        if (!state) return prev;
-        return {
-          ...prev,
-          [targetQuestionNo]: {
-            ...state,
-            selectedVersionId: versionId,
-          },
-        };
-      });
-      const state = questionVersionMap[targetQuestionNo];
-      const version = state?.versions.find((item) => item.id === versionId);
-      if (version) {
-        applyVersionToEditor(version);
-      }
-    },
-    [applyVersionToEditor, questionVersionMap],
-  );
-
   const openQuestionCard = useCallback(
     (targetQuestionNo: string) => {
       setQuestionNo(targetQuestionNo);
-      const draft = questionCardDraftMap[targetQuestionNo];
+      const draft = questionCardDraftMapRef.current[targetQuestionNo];
+      const selected = pickSelectedVersionForQuestion(
+        questionVersionMapRef.current[targetQuestionNo],
+      );
       if (draft) {
         setQuickAnswer(draft.quickAnswer);
         setExplanationBody(draft.explanationBody);
-        setSelectedMethodIndexes(draft.selectedMethodIndexes);
+        setSelectedMethodIndexes(
+          draft.selectedMethodIndexes.length > 0 ? draft.selectedMethodIndexes : [0],
+        );
         setRepresentativeMethodIndex(draft.representativeMethodIndex);
         setMethodSelectionPolicy(draft.methodSelectionPolicy);
         setWorkflowStep(draft.workflowStep);
+        setRawResponse(draft.rawResponse?.trim() ? draft.rawResponse : selected?.rawResponse ?? "");
         return;
       }
-      const selected = getSelectedVersionForQuestion(targetQuestionNo);
       if (selected) {
         applyVersionToEditor(selected);
       }
     },
-    [applyVersionToEditor, getSelectedVersionForQuestion, questionCardDraftMap],
+    [applyVersionToEditor],
   );
 
   const syncRenderImageSize = useCallback(() => {
@@ -997,7 +981,8 @@ export default function Home() {
 
   useEffect(() => {
     questionCardDraftMapRef.current = questionCardDraftMap;
-  }, [questionCardDraftMap]);
+    questionVersionMapRef.current = questionVersionMap;
+  }, [questionCardDraftMap, questionVersionMap]);
 
   useEffect(() => {
     if (currentStep !== 1) return;
@@ -1049,19 +1034,22 @@ export default function Home() {
 
   useEffect(() => {
     const draft = questionCardDraftMapRef.current[questionNo];
+    const selected = pickSelectedVersionForQuestion(questionVersionMapRef.current[questionNo]);
     if (draft) {
       setQuickAnswer(draft.quickAnswer);
       setExplanationBody(draft.explanationBody);
-      setSelectedMethodIndexes(draft.selectedMethodIndexes);
+      setSelectedMethodIndexes(
+        draft.selectedMethodIndexes.length > 0 ? draft.selectedMethodIndexes : [0],
+      );
       setRepresentativeMethodIndex(draft.representativeMethodIndex);
       setMethodSelectionPolicy(draft.methodSelectionPolicy);
       setWorkflowStep(draft.workflowStep);
+      setRawResponse(draft.rawResponse?.trim() ? draft.rawResponse : selected?.rawResponse ?? "");
       return;
     }
-    const selected = getSelectedVersionForQuestion(questionNo);
     if (!selected) return;
     applyVersionToEditor(selected);
-  }, [applyVersionToEditor, getSelectedVersionForQuestion, questionNo, questionVersionMap]);
+  }, [applyVersionToEditor, questionNo, questionVersionMap]);
 
   useEffect(() => {
     if (!questionNo || !hasGeneratedResult) return;
@@ -1069,6 +1057,7 @@ export default function Home() {
       const nextDraft: QuestionCardDraft = {
         quickAnswer,
         explanationBody,
+        rawResponse,
         selectedMethodIndexes,
         representativeMethodIndex,
         methodSelectionPolicy,
@@ -1079,6 +1068,7 @@ export default function Home() {
         current &&
         current.quickAnswer === nextDraft.quickAnswer &&
         current.explanationBody === nextDraft.explanationBody &&
+        current.rawResponse === nextDraft.rawResponse &&
         current.representativeMethodIndex === nextDraft.representativeMethodIndex &&
         current.methodSelectionPolicy === nextDraft.methodSelectionPolicy &&
         current.workflowStep === nextDraft.workflowStep &&
@@ -1097,6 +1087,7 @@ export default function Home() {
     methodSelectionPolicy,
     questionNo,
     quickAnswer,
+    rawResponse,
     representativeMethodIndex,
     selectedMethodIndexes,
     workflowStep,
@@ -3111,65 +3102,6 @@ export default function Home() {
             </button>
 
             {hasGeneratedResult && (
-              <div className="rounded-md border border-indigo-200 bg-indigo-50 p-3">
-                <p className="text-xs font-semibold text-indigo-900">
-                  문항 버전 관리
-                  {selectedQuestionVersion
-                    ? ` (현재 ${selectedQuestionVersion.label}, ${selectedQuestionVersion.modelLabel})`
-                    : ""}
-                </p>
-                {currentQuestionVersionState?.versions?.length ? (
-                  <div className="mt-2 flex flex-wrap gap-2">
-                    {currentQuestionVersionState.versions.map((version) => (
-                      <button
-                        key={version.id}
-                        type="button"
-                        onClick={() => selectQuestionVersion(questionNo || "1", version.id)}
-                        className={`rounded border px-2 py-1 text-[11px] ${
-                          currentQuestionVersionState.selectedVersionId === version.id
-                            ? "border-indigo-600 bg-indigo-600 text-white"
-                            : "border-indigo-300 bg-white text-indigo-900"
-                        }`}
-                        title={`${new Date(version.createdAt).toLocaleString()} / ${version.modelLabel} / ${version.sourceType}:${version.runId}`}
-                      >
-                        {version.label} · {version.sourceType === "manual" ? "수동" : version.sourceType}
-                      </button>
-                    ))}
-                    <button
-                      type="button"
-                      onClick={() => {
-                        if (!rawResponse.trim()) return;
-                        pushQuestionVersion(
-                          questionNo || "1",
-                          {
-                            rawResponse,
-                            quickAnswer,
-                            explanationBody,
-                            selectedMethodIndexes,
-                            representativeMethodIndex,
-                            workflowStep,
-                            modelLabel: "manual",
-                            sourceType: "manual",
-                            runId: `manual-${Date.now()}`,
-                          },
-                          true,
-                        );
-                        setSuccessMessage("현재 편집 상태를 새 버전으로 저장했습니다.");
-                      }}
-                      className="rounded border border-emerald-300 bg-white px-2 py-1 text-[11px] text-emerald-800"
-                    >
-                      + 현재 상태를 새 버전으로 저장
-                    </button>
-                  </div>
-                ) : (
-                  <p className="mt-1 text-[11px] text-indigo-800">
-                    아직 버전이 없습니다. 해설 생성을 실행하면 v1부터 기록됩니다.
-                  </p>
-                )}
-              </div>
-            )}
-
-            {hasGeneratedResult && (
               <div className="rounded-md border border-slate-200 p-3">
                 <p className="text-xs font-semibold text-slate-700">빠른정답 확정</p>
                 <div className="mt-2 flex items-center gap-2">
@@ -3403,7 +3335,10 @@ export default function Home() {
                     </p>
                   </div>
 
-                  <article className="newspaper-columns text-[15px] leading-7 text-slate-800">
+                  <article
+                    key={`explanation-preview-${questionNo}`}
+                    className="newspaper-columns text-[15px] leading-7 text-slate-800"
+                  >
                     {renderMethodBlocks(selectedExplanationBody)}
                   </article>
                 </div>

@@ -117,8 +117,13 @@ function buildExplanationParagraphs(blocks: ExplanationBlock[]) {
 
   blocks.forEach((block, idx) => {
     const answerKind = classifyQuickAnswerKind(block.answer, block.explanationLines);
+    const objective = normalizeObjectiveAnswer(block.answer);
     const quickAnswerText =
-      answerKind === "essay" ? "해설참고" : block.answer || "-";
+      answerKind === "essay"
+        ? "해설참고"
+        : objective
+          ? toCircledObjectiveAnswer(objective)
+          : block.answer || "-";
     paragraphs.push(
       new Paragraph({
         tabStops: [{ type: TabStopType.LEFT, position: 1800 }],
@@ -159,15 +164,36 @@ function buildExplanationParagraphs(blocks: ExplanationBlock[]) {
 }
 
 function normalizeObjectiveAnswer(answer: string) {
-  const normalized = answer
-    .trim()
-    .replace("①", "1")
-    .replace("②", "2")
-    .replace("③", "3")
-    .replace("④", "4")
-    .replace("⑤", "5");
-  const matched = normalized.match(/^[1-5]$/);
-  return matched?.[0] ?? null;
+  const t = answer.trim();
+  if (!t) return null;
+  const circledMap: Record<string, string> = {
+    "①": "1",
+    "②": "2",
+    "③": "3",
+    "④": "4",
+    "⑤": "5",
+  };
+  if (/^[①②③④⑤]$/.test(t)) return circledMap[t] ?? null;
+  if (/^[1-5]$/.test(t)) return t;
+  const parenOnly = t.match(/^\(([1-5])\)$/);
+  if (parenOnly) return parenOnly[1];
+  const bracketOnly = t.match(/^\[([1-5])\]$/);
+  if (bracketOnly) return bracketOnly[1];
+  const combo = t.match(/^([①②③④⑤])\s*\(([1-5])\)$/);
+  if (combo) {
+    const fromCircled = circledMap[combo[1]];
+    if (fromCircled === combo[2]) return fromCircled;
+  }
+  return null;
+}
+
+function toCircledObjectiveAnswer(answer: string) {
+  if (answer === "1") return "①";
+  if (answer === "2") return "②";
+  if (answer === "3") return "③";
+  if (answer === "4") return "④";
+  if (answer === "5") return "⑤";
+  return answer;
 }
 
 function classifyQuickAnswerKind(answer: string, explanationLines: string[]): QuickAnswerKind {
@@ -191,7 +217,7 @@ function buildQuickAnswerRows(blocks: ExplanationBlock[]) {
       answerKind === "essay"
         ? "해설참고"
         : objective
-          ? objective
+          ? toCircledObjectiveAnswer(objective)
           : block.answer || "-";
     return `${block.questionLabel}) ${displayAnswer}`;
   });
@@ -270,7 +296,7 @@ export async function POST(request: Request) {
         },
         {
           properties: {
-            type: SectionType.CONTINUOUS,
+            type: SectionType.NEXT_PAGE,
             column: {
               count: 2,
               space: 708,
