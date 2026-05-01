@@ -6,8 +6,6 @@ import ReactCrop, {
   type PixelCrop,
 } from "react-image-crop";
 import { InlineMath, BlockMath } from "react-katex";
-import html2canvas from "html2canvas";
-import jsPDF from "jspdf";
 import "react-image-crop/dist/ReactCrop.css";
 import "katex/dist/katex.min.css";
 
@@ -75,6 +73,15 @@ type QuestionVersionState = {
   versions: QuestionVersionEntry[];
 };
 
+type QuestionCardDraft = {
+  quickAnswer: string;
+  explanationBody: string;
+  selectedMethodIndexes: number[];
+  representativeMethodIndex: number | null;
+  methodSelectionPolicy: "all" | "selected";
+  workflowStep: ExplanationWorkflowStep;
+};
+
 type ExamSourceKind = "image" | "pdf" | "hml" | "hwp" | "unknown";
 
 const HIGH_VISIBILITY_CROSSHAIR_CURSOR =
@@ -107,6 +114,18 @@ function parsePageSelection(value: string, maxPage: number) {
     if (Number.isFinite(no) && no >= 1 && no <= Math.max(1, maxPage)) out.add(no);
   }
   return [...out].sort((a, b) => a - b);
+}
+
+function normalizeQuickAnswerForDisplay(raw: string) {
+  const value = String(raw ?? "").trim();
+  const normalized = value.replace(/[①-⑤]/g, (ch) => {
+    const map: Record<string, string> = { "①": "1", "②": "2", "③": "3", "④": "4", "⑤": "5" };
+    return map[ch] ?? ch;
+  });
+  const match = normalized.match(/^[1-5]$/);
+  if (!match) return value || "-";
+  const circled = ["①", "②", "③", "④", "⑤"][Number(match[0]) - 1];
+  return `${circled} (${match[0]})`;
 }
 
 type ExtractionPrecheck = {
@@ -536,6 +555,9 @@ export default function Home() {
   const [questionVersionMap, setQuestionVersionMap] = useState<
     Record<string, QuestionVersionState>
   >({});
+  const [questionCardDraftMap, setQuestionCardDraftMap] = useState<Record<string, QuestionCardDraft>>(
+    {},
+  );
   const [hmlFile, setHmlFile] = useState<File | null>(null);
   const [hmlManualQuestionSelection, setHmlManualQuestionSelection] = useState("1-30");
   const [hmlExecutionMode, setHmlExecutionMode] = useState<"manual" | "auto_assist">("manual");
@@ -546,7 +568,6 @@ export default function Home() {
   const [isProcessingHml, setIsProcessingHml] = useState(false);
   const [isLoadingExams, setIsLoadingExams] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
-  const [isSavingPdf, setIsSavingPdf] = useState(false);
   const [queuedProblems, setQueuedProblems] = useState<QueuedProblem[]>([]);
   const [savedPageNumbers, setSavedPageNumbers] = useState<number[]>([]);
   const [excludedPageNumbers, setExcludedPageNumbers] = useState<number[]>([]);
@@ -575,6 +596,13 @@ export default function Home() {
   const questionNoOptions = useMemo(
     () => [...new Set(queuedProblems.map((item) => item.questionNo))].sort((a, b) => Number(a) - Number(b)),
     [queuedProblems],
+  );
+  const cardQuestionNos = useMemo(
+    () =>
+      [...new Set([...Object.keys(questionVersionMap), ...questionNoOptions])]
+        .filter(Boolean)
+        .sort((a, b) => Number(a) - Number(b)),
+    [questionNoOptions, questionVersionMap],
   );
   const currentQuestionVersionState = questionVersionMap[questionNo] || null;
   const selectedQuestionVersion =
@@ -671,6 +699,19 @@ export default function Home() {
     setWorkflowStep(version.workflowStep);
   }, []);
 
+  const getSelectedVersionForQuestion = useCallback(
+    (targetQuestionNo: string) => {
+      const state = questionVersionMap[targetQuestionNo];
+      if (!state) return null;
+      return (
+        state.versions.find((item) => item.id === state.selectedVersionId) ||
+        state.versions[0] ||
+        null
+      );
+    },
+    [questionVersionMap],
+  );
+
   const pushQuestionVersion = useCallback(
     (
       targetQuestionNo: string,
@@ -740,6 +781,27 @@ export default function Home() {
       }
     },
     [applyVersionToEditor, questionVersionMap],
+  );
+
+  const openQuestionCard = useCallback(
+    (targetQuestionNo: string) => {
+      setQuestionNo(targetQuestionNo);
+      const draft = questionCardDraftMap[targetQuestionNo];
+      if (draft) {
+        setQuickAnswer(draft.quickAnswer);
+        setExplanationBody(draft.explanationBody);
+        setSelectedMethodIndexes(draft.selectedMethodIndexes);
+        setRepresentativeMethodIndex(draft.representativeMethodIndex);
+        setMethodSelectionPolicy(draft.methodSelectionPolicy);
+        setWorkflowStep(draft.workflowStep);
+        return;
+      }
+      const selected = getSelectedVersionForQuestion(targetQuestionNo);
+      if (selected) {
+        applyVersionToEditor(selected);
+      }
+    },
+    [applyVersionToEditor, getSelectedVersionForQuestion, questionCardDraftMap],
   );
 
   const syncRenderImageSize = useCallback(() => {
@@ -960,13 +1022,44 @@ export default function Home() {
   }, [sourceImage, syncRenderImageSize]);
 
   useEffect(() => {
-    const state = questionVersionMap[questionNo];
-    if (!state) return;
-    const selected =
-      state.versions.find((item) => item.id === state.selectedVersionId) || state.versions[0];
+    const draft = questionCardDraftMap[questionNo];
+    if (draft) {
+      setQuickAnswer(draft.quickAnswer);
+      setExplanationBody(draft.explanationBody);
+      setSelectedMethodIndexes(draft.selectedMethodIndexes);
+      setRepresentativeMethodIndex(draft.representativeMethodIndex);
+      setMethodSelectionPolicy(draft.methodSelectionPolicy);
+      setWorkflowStep(draft.workflowStep);
+      return;
+    }
+    const selected = getSelectedVersionForQuestion(questionNo);
     if (!selected) return;
     applyVersionToEditor(selected);
-  }, [applyVersionToEditor, questionNo, questionVersionMap]);
+  }, [applyVersionToEditor, getSelectedVersionForQuestion, questionCardDraftMap, questionNo]);
+
+  useEffect(() => {
+    if (!questionNo || !hasGeneratedResult) return;
+    setQuestionCardDraftMap((prev) => ({
+      ...prev,
+      [questionNo]: {
+        quickAnswer,
+        explanationBody,
+        selectedMethodIndexes,
+        representativeMethodIndex,
+        methodSelectionPolicy,
+        workflowStep,
+      },
+    }));
+  }, [
+    explanationBody,
+    hasGeneratedResult,
+    methodSelectionPolicy,
+    questionNo,
+    quickAnswer,
+    representativeMethodIndex,
+    selectedMethodIndexes,
+    workflowStep,
+  ]);
 
   const loadExamImage = async (fileName: string) => {
     try {
@@ -1835,11 +1928,7 @@ export default function Home() {
       const batchRunId = `batch-${Date.now()}`;
 
       const results: BatchResult[] = [];
-      const successfulExplanations: Array<{
-        questionNo: string;
-        quickAnswer: string;
-        body: string;
-      }> = [];
+      const successfulQuestionNos: string[] = [];
 
       for (const item of queuedProblems) {
         const precheck = runExtractionPrecheckForDisplayedCrop(item.crop, imageRef.current);
@@ -1997,60 +2086,19 @@ export default function Home() {
                   : ""
               }`,
         });
-        successfulExplanations.push({
-          questionNo: item.questionNo,
-          quickAnswer: parsed.quickAnswer,
-          body: parsed.body,
-        });
-      }
-
-      if (successfulExplanations.length > 0) {
-        try {
-          const combinedBody = successfulExplanations
-            .map(
-              (entry) =>
-                `[문항 ${entry.questionNo}]\n[정답] ${entry.quickAnswer}\n${entry.body}`,
-            )
-            .join("\n\n");
-          const formData = new FormData();
-          formData.append("examName", selectedExam || "직접업로드");
-          formData.append(
-            "questionNo",
-            `통합_${successfulExplanations[0]?.questionNo || "1"}-${
-              successfulExplanations[successfulExplanations.length - 1]?.questionNo || "1"
-            }`,
-          );
-          formData.append("quickAnswer", "문항별 정답은 해설 본문의 [정답]을 확인하세요.");
-          formData.append("explanationBody", combinedBody);
-          formData.append(
-            "rawResponse",
-            successfulExplanations
-              .map((entry) => `[문항 ${entry.questionNo}]\n${entry.body}`)
-              .join("\n\n"),
-          );
-          const saveRes = await fetch("/api/save-result", {
-            method: "POST",
-            body: formData,
-          });
-          if (!saveRes.ok) {
-            const data = (await saveRes.json()) as { error?: string };
-            throw new Error(data.error || "통합 DOCX 저장 실패");
-          }
-          const savedMessage = (await saveRes.json()) as { message?: string };
-          setSuccessMessage(savedMessage.message || "통합 DOCX 저장을 완료했습니다.");
-          setWorkflowStep("generate_sheet");
-        } catch (e) {
-          const message =
-            e instanceof Error
-              ? e.message
-              : "자동 생성은 성공했지만 통합 DOCX 저장에 실패했습니다.";
-          setErrorMessage(message);
-        }
+        successfulQuestionNos.push(item.questionNo);
       }
 
       setBatchResults(results);
-      if (successfulExplanations.length === 0) {
-        setSuccessMessage("문제 박스 순차 자동 해설 생성을 완료했습니다.");
+      if (successfulQuestionNos.length > 0) {
+        const firstQuestionNo = successfulQuestionNos[0];
+        openQuestionCard(firstQuestionNo);
+        setWorkflowStep("generate_sheet");
+        setSuccessMessage(
+          `문제 박스 순차 자동 해설 생성을 완료했습니다. (${successfulQuestionNos.length}문항 성공) 카드에서 검토 후 해설 제작(DOCX)을 눌러주세요.`,
+        );
+      } else {
+        setSuccessMessage("문제 박스 순차 자동 해설 생성을 완료했습니다. (성공 문항 없음)");
       }
     } catch (error) {
       const message =
@@ -2080,88 +2128,59 @@ export default function Home() {
     }
   };
 
-  const buildPdfBlob = async () => {
-    if (!resultRef.current) {
-      throw new Error("PDF로 저장할 해설 영역을 찾지 못했습니다.");
-    }
-
-    const renderAtScale = async (scale: number) =>
-      html2canvas(resultRef.current as HTMLDivElement, {
-        scale,
-        useCORS: true,
-        backgroundColor: "#ffffff",
-      });
-
-    let canvas: HTMLCanvasElement;
-    try {
-      canvas = await renderAtScale(1.6);
-    } catch {
-      // 고해상도에서 실패하면 메모리 부담을 줄여 재시도
-      canvas = await renderAtScale(1.0);
-    }
-
-    const imgData = canvas.toDataURL("image/png");
-    const pdf = new jsPDF("p", "mm", "a4");
-    const pageWidth = 210;
-    const pageHeight = 297;
-    const imgWidth = pageWidth;
-    const imgHeight = (canvas.height * imgWidth) / canvas.width;
-
-    let heightLeft = imgHeight;
-    let position = 0;
-
-    pdf.addImage(imgData, "PNG", 0, position, imgWidth, imgHeight);
-    heightLeft -= pageHeight;
-
-    while (heightLeft > 0) {
-      position = heightLeft - imgHeight;
-      pdf.addPage();
-      pdf.addImage(imgData, "PNG", 0, position, imgWidth, imgHeight);
-      heightLeft -= pageHeight;
-    }
-
-    return pdf.output("blob");
-  };
-
-  const handleSavePdf = async () => {
-    try {
-      setIsSavingPdf(true);
-      setErrorMessage("");
-      setSuccessMessage("");
-      const blob = await buildPdfBlob();
-      if (!blob) return;
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement("a");
-      link.href = url;
-      link.download = `${selectedExam || "highroad_math"}_문항${questionNo}.pdf`;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      URL.revokeObjectURL(url);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "알 수 없는 PDF 저장 오류";
-      setErrorMessage(`PDF 저장 중 오류가 발생했습니다: ${message}`);
-    } finally {
-      setIsSavingPdf(false);
-    }
-  };
-
   const handleSaveCurrentDocx = async () => {
-    if (!hasGeneratedResult) {
-      setErrorMessage("먼저 문제 풀이/해설 생성을 완료해 주세요.");
+    if (cardQuestionNos.length === 0) {
+      setErrorMessage("먼저 자동 순차 실행으로 문항 카드를 생성해 주세요.");
       return;
     }
     try {
       setErrorMessage("");
       setSuccessMessage("");
-      const activeVersion = selectedQuestionVersion;
-      const finalQuickAnswer = activeVersion?.quickAnswer || quickAnswer || "-";
-      const finalBody = activeVersion?.explanationBody || selectedExplanationBody;
+      const docEntries = cardQuestionNos
+        .map((no) => {
+          const draft = questionCardDraftMap[no];
+          const selectedVersion = getSelectedVersionForQuestion(no);
+          if (!draft && !selectedVersion) return null;
+          const quick = (draft?.quickAnswer || selectedVersion?.quickAnswer || "-").trim() || "-";
+          const baseBody = draft?.explanationBody || selectedVersion?.explanationBody || "";
+          const selectedIndexes =
+            draft?.methodSelectionPolicy === "selected"
+              ? draft.selectedMethodIndexes
+              : splitMethodBlocks(baseBody).methods.map((_, index) => index);
+          const body = buildSelectedExplanationBody(
+            baseBody,
+            selectedIndexes,
+            draft?.representativeMethodIndex ?? selectedVersion?.representativeMethodIndex ?? null,
+          );
+          return {
+            questionNo: no,
+            quickAnswer: quick,
+            body: body.trim() || baseBody.trim() || "(해설 본문 없음)",
+          };
+        })
+        .filter(Boolean) as Array<{ questionNo: string; quickAnswer: string; body: string }>;
+
+      if (docEntries.length === 0) {
+        setErrorMessage("DOCX에 넣을 문항 카드가 없습니다. 카드 생성/선택 상태를 확인해 주세요.");
+        return;
+      }
+
       const formData = new FormData();
       formData.append("examName", selectedExam || "직접업로드");
-      formData.append("questionNo", questionNo || "1");
-      formData.append("quickAnswer", finalQuickAnswer);
-      formData.append("explanationBody", `[정답] ${finalQuickAnswer}\n${finalBody}`);
+      formData.append(
+        "questionNo",
+        `통합_${docEntries[0]?.questionNo || "1"}-${docEntries[docEntries.length - 1]?.questionNo || "1"}`,
+      );
+      formData.append("quickAnswer", "문항별 정답은 해설 본문의 [정답]을 확인하세요.");
+      formData.append(
+        "explanationBody",
+        docEntries
+          .map(
+            (entry) =>
+              `[문항 ${entry.questionNo}]\n[정답] ${entry.quickAnswer}\n${entry.body}`,
+          )
+          .join("\n\n"),
+      );
       const saveRes = await fetch("/api/save-result", {
         method: "POST",
         body: formData,
@@ -2171,7 +2190,7 @@ export default function Home() {
         throw new Error(data.error || "DOCX 저장 실패");
       }
       const savedMessage = (await saveRes.json()) as { message?: string };
-      setSuccessMessage(savedMessage.message || "해설지 DOCX 생성이 완료되었습니다.");
+      setSuccessMessage(savedMessage.message || "문항 카드 편집 결과로 해설지 DOCX 생성이 완료되었습니다.");
       setWorkflowStep("generate_sheet");
     } catch (error) {
       const message = error instanceof Error ? error.message : "DOCX 저장 중 오류가 발생했습니다.";
@@ -2736,6 +2755,80 @@ export default function Home() {
 
             {currentStep >= 3 && (
               <>
+            <div className="rounded-md border border-violet-200 bg-violet-50 p-3">
+              <p className="text-sm font-semibold text-violet-900">
+                자동 보조 해설 대기열 ({queuedProblems.length})
+              </p>
+              {queuedProblems.length === 0 ? (
+                <p className="mt-2 text-xs text-violet-700">
+                  문제 박스를 저장하면 순차 자동 실행 대기열 카드가 생성됩니다.
+                </p>
+              ) : (
+                <ul className="mt-2 space-y-1 text-xs text-violet-900">
+                  {queuedProblems.map((item, index) => (
+                    <li key={item.id} className="flex items-center justify-between rounded bg-white px-2 py-1">
+                      <span>
+                        {index + 1}. {item.questionNo}번 ({item.pageLabel})
+                      </span>
+                      <button
+                        onClick={() => removeQueuedProblem(item.id)}
+                        className="rounded border border-violet-300 px-2 py-0.5 text-[11px]"
+                      >
+                        삭제
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              <button
+                onClick={runBatchGeneration}
+                disabled={queuedProblems.length === 0 || isBatchGenerating}
+                className="mt-3 w-full rounded-md bg-violet-600 px-4 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:bg-slate-300"
+              >
+                {isBatchGenerating ? "순차 자동 해설 생성 중..." : "문제 박스 순서대로 자동 보조 실행"}
+              </button>
+            </div>
+
+            {cardQuestionNos.length > 0 && (
+              <div className="rounded-md border border-sky-200 bg-sky-50 p-3">
+                <p className="text-sm font-semibold text-sky-900">문항 카드 편집</p>
+                <p className="mt-1 text-xs text-sky-800">
+                  자동 생성 후 카드를 눌러 빠른정답/해설 채택/메인 풀이 순서를 편집하세요.
+                </p>
+                <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
+                  {cardQuestionNos.map((no) => {
+                    const draft = questionCardDraftMap[no];
+                    const selected = getSelectedVersionForQuestion(no);
+                    const baseBody = draft?.explanationBody || selected?.explanationBody || "";
+                    const methodCount = splitMethodBlocks(baseBody).methods.length;
+                    const answerDisplay = normalizeQuickAnswerForDisplay(
+                      draft?.quickAnswer || selected?.quickAnswer || "-",
+                    );
+                    const isActive = questionNo === no;
+                    return (
+                      <button
+                        key={`card-q-${no}`}
+                        type="button"
+                        onClick={() => openQuestionCard(no)}
+                        className={`rounded border p-2 text-left text-xs ${
+                          isActive
+                            ? "border-sky-600 bg-sky-600 text-white"
+                            : "border-sky-300 bg-white text-slate-800"
+                        }`}
+                      >
+                        <p className="font-semibold">{no}번 문항</p>
+                        <p className="mt-1">빠른정답: {answerDisplay}</p>
+                        <p className="mt-1">
+                          해설: {methodCount <= 1 ? "단일" : `복수(${methodCount}개)`} /{" "}
+                          {draft?.methodSelectionPolicy === "selected" ? "하나 선택" : "모두 반영"}
+                        </p>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
             <div className="rounded-md border border-slate-200 bg-slate-50 p-3">
               <p className="text-sm font-semibold text-slate-800">현재 문항: {questionNo || "-"}</p>
               {questionNoOptions.length > 0 && (
@@ -2743,7 +2836,7 @@ export default function Home() {
                   <label className="text-[11px] font-semibold text-slate-600">문항 선택</label>
                   <select
                     value={questionNo}
-                    onChange={(event) => setQuestionNo(event.target.value)}
+                    onChange={(event) => openQuestionCard(event.target.value)}
                     className="mt-1 w-full rounded border border-slate-300 bg-white px-2 py-1 text-xs"
                   >
                     {questionNoOptions.map((item) => (
@@ -2790,7 +2883,7 @@ export default function Home() {
             {methodBlocks.methods.length > 0 && (
               <div className="rounded-md border border-slate-200 p-3 text-sm">
                 <p className="font-semibold text-slate-800">
-                  풀이 방법 채택 (PDF 반영)
+                  풀이 방법 채택 (DOCX 반영)
                 </p>
                 <div className="mt-2 rounded-md border border-slate-200 bg-white p-2 text-xs">
                   <p className="font-semibold text-slate-700">해설 반영 방식</p>
@@ -2810,14 +2903,14 @@ export default function Home() {
                       checked={methodSelectionPolicy === "selected"}
                       onChange={() => setMethodSelectionPolicy("selected")}
                     />
-                    선택한 해설만 넣기
+                    해설 하나만 넣기(카드에서 1개 선택)
                   </label>
                 </div>
                 <p className="mt-1 text-xs text-slate-500">
-                  채택한 방법만 우측 미리보기와 PDF/작업완료 저장에 반영됩니다.
+                  채택한 방법만 우측 미리보기와 DOCX 저장에 반영됩니다.
                 </p>
                 <p className="mt-1 text-xs text-slate-500">
-                  대표풀이(별표)로 지정한 방법은 항상 가장 위에 배치됩니다.
+                  메인해설(별표)로 지정한 방법이 항상 가장 위(1번째)에 배치됩니다.
                 </p>
                 <div className="mt-2 space-y-1">
                   {methodBlocks.methods.map((method, index) => (
@@ -2831,9 +2924,13 @@ export default function Home() {
                           checked={selectedMethodIndexes.includes(index)}
                           onChange={(event) => {
                             if (event.target.checked) {
-                              setSelectedMethodIndexes((prev) =>
-                                [...prev, index].sort((a, b) => a - b),
-                              );
+                              if (methodSelectionPolicy === "selected") {
+                                setSelectedMethodIndexes([index]);
+                              } else {
+                                setSelectedMethodIndexes((prev) =>
+                                  [...prev, index].sort((a, b) => a - b),
+                                );
+                              }
                               if (representativeMethodIndex === null) {
                                 setRepresentativeMethodIndex(index);
                               }
@@ -2852,7 +2949,9 @@ export default function Home() {
                       <button
                         type="button"
                         onClick={() => {
-                          if (!selectedMethodIndexes.includes(index)) {
+                          if (methodSelectionPolicy === "selected") {
+                            setSelectedMethodIndexes([index]);
+                          } else if (!selectedMethodIndexes.includes(index)) {
                             setSelectedMethodIndexes((prev) =>
                               [...prev, index].sort((a, b) => a - b),
                             );
@@ -2865,7 +2964,7 @@ export default function Home() {
                             : "border border-slate-300 bg-white text-slate-600"
                         }`}
                       >
-                        {representativeMethodIndex === index ? "★ 대표풀이" : "☆ 대표로"}
+                        {representativeMethodIndex === index ? "★ 메인해설" : "☆ 메인으로"}
                       </button>
                     </div>
                   ))}
@@ -2887,7 +2986,7 @@ export default function Home() {
               disabled={!canGenerate}
               className="w-full rounded-md bg-blue-600 px-4 py-3 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:bg-slate-300"
             >
-              {isGenerating ? "해설 생성 중..." : "수동 지정 해설 생성 (한 문제)"}
+              {isGenerating ? "선택 문항 재생성 중..." : "선택 문항 수동 재생성 (한 문제)"}
             </button>
 
             {hasGeneratedResult && (
@@ -2972,7 +3071,7 @@ export default function Home() {
 
             <details className="rounded-md border border-slate-200 p-3">
               <summary className="cursor-pointer text-sm font-semibold text-slate-800">
-                보조 실행 설정 (자동생성/텍스트 입력/상세 옵션)
+                보조 실행 설정 (텍스트 입력/상세 옵션)
               </summary>
               <div className="mt-3 space-y-3">
                 <div className="rounded-md border border-slate-200 p-3">
@@ -3027,41 +3126,6 @@ export default function Home() {
                   </label>
                 </div>
 
-                <div className="rounded-md border border-slate-200 p-3">
-                  <p className="text-sm font-semibold text-slate-800">
-                    자동 보조 해설 대기열 ({queuedProblems.length})
-                  </p>
-                  {queuedProblems.length === 0 ? (
-                    <p className="mt-2 text-xs text-slate-500">
-                      문제 박스를 저장하면 자동 생성에 추가됩니다.
-                    </p>
-                  ) : (
-                    <ul className="mt-2 space-y-1 text-xs text-slate-700">
-                      {queuedProblems.map((item, index) => (
-                        <li key={item.id} className="flex items-center justify-between rounded bg-slate-50 px-2 py-1">
-                          <span>
-                            {index + 1}. {item.questionNo}번 ({item.pageLabel})
-                          </span>
-                          <button
-                            onClick={() => removeQueuedProblem(item.id)}
-                            className="rounded border border-slate-300 px-2 py-0.5 text-[11px]"
-                          >
-                            삭제
-                          </button>
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                  <button
-                    onClick={runBatchGeneration}
-                    disabled={queuedProblems.length === 0 || isBatchGenerating}
-                    className="mt-3 w-full rounded-md bg-violet-600 px-4 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:bg-slate-300"
-                  >
-                    {isBatchGenerating
-                      ? "보조 자동 해설 생성 중..."
-                      : "문제 박스 순서대로 자동 보조 실행"}
-                  </button>
-                </div>
               </div>
             </details>
               </>
@@ -3084,9 +3148,15 @@ export default function Home() {
                 <p className="font-semibold text-slate-800">자동 보조 실행 결과</p>
                 <ul className="mt-2 space-y-1">
                   {batchResults.map((result, index) => (
-                    <li key={`${result.questionNo}-${index}`} className="rounded bg-slate-50 px-2 py-1">
-                      {result.questionNo}번 - {result.status === "success" ? "성공" : "실패"} / 빠른정답:{" "}
-                      {result.quickAnswer} / {result.message}
+                    <li key={`${result.questionNo}-${index}`}>
+                      <button
+                        type="button"
+                        onClick={() => openQuestionCard(result.questionNo)}
+                        className="w-full rounded bg-slate-50 px-2 py-1 text-left hover:bg-slate-100"
+                      >
+                        {result.questionNo}번 - {result.status === "success" ? "성공" : "실패"} / 빠른정답:{" "}
+                        {normalizeQuickAnswerForDisplay(result.quickAnswer)} / {result.message}
+                      </button>
                     </li>
                   ))}
                 </ul>
@@ -3153,7 +3223,7 @@ export default function Home() {
                 <div className="rounded-md border border-amber-300 bg-amber-50 p-5 text-center text-amber-900">
                   <p className="text-sm font-semibold">아직 해설이 생성되지 않았습니다.</p>
                   <p className="mt-1 text-xs">
-                    좌측에서 `수동 지정 해설 생성 (한 문제)`을 먼저 실행하고, 필요 시 자동 보조 실행을 사용해 주세요.
+                    좌측에서 `문제 박스 순서대로 자동 보조 실행`을 먼저 실행해 문항 카드를 생성해 주세요.
                   </p>
                 </div>
               )}
@@ -3188,17 +3258,10 @@ export default function Home() {
             <div className="mt-4 grid grid-cols-1 gap-3">
               <button
                 onClick={handleSaveCurrentDocx}
-                disabled={workflowStep !== "generate_sheet"}
+                disabled={cardQuestionNos.length === 0}
                 className="w-full rounded-md bg-indigo-600 px-4 py-3 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:bg-slate-300"
               >
-                해설지 생성 (DOCX)
-              </button>
-              <button
-                onClick={handleSavePdf}
-                disabled={isSavingPdf || workflowStep !== "generate_sheet"}
-                className="w-full rounded-md bg-emerald-600 px-4 py-3 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:bg-slate-300"
-              >
-                {isSavingPdf ? "PDF 생성 중..." : "PDF로 저장하기"}
+                해설 제작 (DOCX)
               </button>
             </div>
           )}
