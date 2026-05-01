@@ -7,7 +7,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "smoke:hml": "node scripts/hml-smoke.mjs"
+    "smoke:hml": "node scripts/hml-smoke.mjs",
+    "mcp:gemini-gpt": "node mcp/gemini-gpt-server.mjs"
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
@@ -24,6 +25,7 @@
     "react-katex": "^3.1.0"
   },
   "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
     "@types/react": "^19",

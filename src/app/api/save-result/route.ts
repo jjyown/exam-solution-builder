@@ -195,23 +195,13 @@ function buildQuickAnswerRows(blocks: ExplanationBlock[]) {
           : block.answer || "-";
     return `${block.questionLabel}) ${displayAnswer}`;
   });
-  const paragraphs: Paragraph[] = [];
-  for (let i = 0; i < entries.length; i += 2) {
-    const left = entries[i] ?? "";
-    const right = entries[i + 1] ?? "";
-    paragraphs.push(
+  return entries.map(
+    (entry) =>
       new Paragraph({
-        tabStops: [{ type: TabStopType.LEFT, position: 5200 }],
-        children: [
-          new TextRun({ text: left, bold: true }),
-          new TextRun({ text: "\t" }),
-          new TextRun({ text: right, bold: true }),
-        ],
+        children: [new TextRun({ text: entry, bold: true })],
         spacing: { after: 110 },
       }),
-    );
-  }
-  return paragraphs;
+  );
 }
 
 export async function POST(request: Request) {
@@ -284,6 +274,7 @@ export async function POST(request: Request) {
             column: {
               count: 2,
               space: 708,
+              separate: true,
             },
           },
           children: [

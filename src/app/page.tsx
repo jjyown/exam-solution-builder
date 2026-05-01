@@ -82,6 +82,14 @@ type QuestionCardDraft = {
   workflowStep: ExplanationWorkflowStep;
 };
 
+type SolverModelProfile = "easy" | "balanced" | "killer";
+
+function solverProfileLabel(p: SolverModelProfile) {
+  if (p === "easy") return "쉬운 특화";
+  if (p === "killer") return "킬러 특화";
+  return "균형형";
+}
+
 type ExamSourceKind = "image" | "pdf" | "hml" | "hwp" | "unknown";
 
 const HIGH_VISIBILITY_CROSSHAIR_CURSOR =
@@ -126,6 +134,11 @@ function normalizeQuickAnswerForDisplay(raw: string) {
   if (!match) return value || "-";
   const circled = ["①", "②", "③", "④", "⑤"][Number(match[0]) - 1];
   return `${circled} (${match[0]})`;
+}
+
+function isSameNumberArray(a: number[], b: number[]) {
+  if (a.length !== b.length) return false;
+  return a.every((value, index) => value === b[index]);
 }
 
 type ExtractionPrecheck = {
@@ -540,6 +553,10 @@ export default function Home() {
   const [useTextInput, setUseTextInput] = useState(false);
   const [includeDiagramExplanation, setIncludeDiagramExplanation] = useState(true);
   const [generationMode, setGenerationMode] = useState<"test" | "final">("test");
+  const [solverModelProfile, setSolverModelProfile] =
+    useState<SolverModelProfile>("balanced");
+  const [questionSolverProfileOverrides, setQuestionSolverProfileOverrides] =
+    useState<Partial<Record<string, SolverModelProfile>>>({});
   const [explanationSelectionMode, setExplanationSelectionMode] = useState<
     "all" | "core"
   >("all");
@@ -558,6 +575,7 @@ export default function Home() {
   const [questionCardDraftMap, setQuestionCardDraftMap] = useState<Record<string, QuestionCardDraft>>(
     {},
   );
+  const questionCardDraftMapRef = useRef<Record<string, QuestionCardDraft>>({});
   const [hmlFile, setHmlFile] = useState<File | null>(null);
   const [hmlManualQuestionSelection, setHmlManualQuestionSelection] = useState("1-30");
   const [hmlExecutionMode, setHmlExecutionMode] = useState<"manual" | "auto_assist">("manual");
@@ -603,6 +621,10 @@ export default function Home() {
         .filter(Boolean)
         .sort((a, b) => Number(a) - Number(b)),
     [questionNoOptions, questionVersionMap],
+  );
+  const effectiveSolverProfileForCurrentQuestion = useMemo(
+    () => questionSolverProfileOverrides[questionNo] ?? solverModelProfile,
+    [questionSolverProfileOverrides, questionNo, solverModelProfile],
   );
   const currentQuestionVersionState = questionVersionMap[questionNo] || null;
   const selectedQuestionVersion =
@@ -974,6 +996,10 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
+    questionCardDraftMapRef.current = questionCardDraftMap;
+  }, [questionCardDraftMap]);
+
+  useEffect(() => {
     if (currentStep !== 1) return;
     void loadExamFiles();
   }, [currentStep, loadExamFiles]);
@@ -1022,7 +1048,7 @@ export default function Home() {
   }, [sourceImage, syncRenderImageSize]);
 
   useEffect(() => {
-    const draft = questionCardDraftMap[questionNo];
+    const draft = questionCardDraftMapRef.current[questionNo];
     if (draft) {
       setQuickAnswer(draft.quickAnswer);
       setExplanationBody(draft.explanationBody);
@@ -1035,21 +1061,36 @@ export default function Home() {
     const selected = getSelectedVersionForQuestion(questionNo);
     if (!selected) return;
     applyVersionToEditor(selected);
-  }, [applyVersionToEditor, getSelectedVersionForQuestion, questionCardDraftMap, questionNo]);
+  }, [applyVersionToEditor, getSelectedVersionForQuestion, questionNo, questionVersionMap]);
 
   useEffect(() => {
     if (!questionNo || !hasGeneratedResult) return;
-    setQuestionCardDraftMap((prev) => ({
-      ...prev,
-      [questionNo]: {
+    setQuestionCardDraftMap((prev) => {
+      const nextDraft: QuestionCardDraft = {
         quickAnswer,
         explanationBody,
         selectedMethodIndexes,
         representativeMethodIndex,
         methodSelectionPolicy,
         workflowStep,
-      },
-    }));
+      };
+      const current = prev[questionNo];
+      if (
+        current &&
+        current.quickAnswer === nextDraft.quickAnswer &&
+        current.explanationBody === nextDraft.explanationBody &&
+        current.representativeMethodIndex === nextDraft.representativeMethodIndex &&
+        current.methodSelectionPolicy === nextDraft.methodSelectionPolicy &&
+        current.workflowStep === nextDraft.workflowStep &&
+        isSameNumberArray(current.selectedMethodIndexes, nextDraft.selectedMethodIndexes)
+      ) {
+        return prev;
+      }
+      return {
+        ...prev,
+        [questionNo]: nextDraft,
+      };
+    });
   }, [
     explanationBody,
     hasGeneratedResult,
@@ -1333,6 +1374,7 @@ export default function Home() {
               ? `해설 참고 페이지: ${explanationRefPages.join(", ")}`
               : "",
           generationMode,
+          solverModelProfile: effectiveSolverProfileForCurrentQuestion,
           includeDiagramExplanation,
           explanationSelectionMode,
           showAllMethods,
@@ -1385,7 +1427,7 @@ export default function Home() {
             splitMethodBlocks(parsed.body).methods.length > 1
               ? "select_explanation"
               : "confirm_quick_answer",
-          modelLabel: data.model || (generationMode === "final" ? "gemini-final" : "gemini-test"),
+          modelLabel: data.model || `gemini-${effectiveSolverProfileForCurrentQuestion}`,
           sourceType: "single",
           runId: singleRunId,
         },
@@ -1991,6 +2033,8 @@ export default function Home() {
         }
 
         setQuestionNo(item.questionNo);
+        const itemSolverProfile =
+          questionSolverProfileOverrides[item.questionNo] ?? solverModelProfile;
         const response = await fetch("/api/generate-explanation", {
           method: "POST",
           headers: {
@@ -2002,6 +2046,7 @@ export default function Home() {
             imageMimeType: item.imageMimeType,
             diagramImages: item.diagramImages,
             generationMode,
+            solverModelProfile: itemSolverProfile,
             includeDiagramExplanation,
             explanationSelectionMode,
             showAllMethods,
@@ -2069,7 +2114,7 @@ export default function Home() {
               splitMethodBlocks(parsed.body).methods.length > 1
                 ? "select_explanation"
                 : "confirm_quick_answer",
-            modelLabel: data.model || (generationMode === "final" ? "gemini-final" : "gemini-test"),
+            modelLabel: data.model || `gemini-${itemSolverProfile}`,
             sourceType: "batch",
             runId: batchRunId,
           },
@@ -2805,24 +2850,69 @@ export default function Home() {
                       draft?.quickAnswer || selected?.quickAnswer || "-",
                     );
                     const isActive = questionNo === no;
+                    const cardProfileOverride = questionSolverProfileOverrides[no];
                     return (
-                      <button
+                      <div
                         key={`card-q-${no}`}
-                        type="button"
-                        onClick={() => openQuestionCard(no)}
-                        className={`rounded border p-2 text-left text-xs ${
+                        className={`rounded border p-2 text-xs ${
                           isActive
                             ? "border-sky-600 bg-sky-600 text-white"
                             : "border-sky-300 bg-white text-slate-800"
                         }`}
                       >
-                        <p className="font-semibold">{no}번 문항</p>
-                        <p className="mt-1">빠른정답: {answerDisplay}</p>
-                        <p className="mt-1">
-                          해설: {methodCount <= 1 ? "단일" : `복수(${methodCount}개)`} /{" "}
-                          {draft?.methodSelectionPolicy === "selected" ? "하나 선택" : "모두 반영"}
-                        </p>
-                      </button>
+                        <button
+                          type="button"
+                          onClick={() => openQuestionCard(no)}
+                          className="w-full text-left"
+                        >
+                          <p className="font-semibold">{no}번 문항</p>
+                          <p className="mt-1">빠른정답: {answerDisplay}</p>
+                          <p className="mt-1">
+                            해설: {methodCount <= 1 ? "단일" : `복수(${methodCount}개)`} /{" "}
+                            {draft?.methodSelectionPolicy === "selected" ? "하나 선택" : "모두 반영"}
+                          </p>
+                          {cardProfileOverride && (
+                            <p className="mt-1 text-[10px] opacity-90">
+                              모델: {solverProfileLabel(cardProfileOverride)} (전역 덮어쓰기)
+                            </p>
+                          )}
+                        </button>
+                        <div
+                          className={`mt-1 flex items-center gap-1 ${
+                            isActive ? "text-white" : "text-slate-700"
+                          }`}
+                          onMouseDown={(event) => event.stopPropagation()}
+                          onClick={(event) => event.stopPropagation()}
+                        >
+                          <label className="shrink-0 text-[10px] font-semibold opacity-80">
+                            모델
+                          </label>
+                          <select
+                            value={cardProfileOverride ?? ""}
+                            onChange={(event) => {
+                              const v = event.target.value as SolverModelProfile | "";
+                              setQuestionSolverProfileOverrides((prev) => {
+                                const next = { ...prev };
+                                if (!v) delete next[no];
+                                else next[no] = v;
+                                return next;
+                              });
+                            }}
+                            className={`min-w-0 flex-1 rounded border px-1 py-0.5 text-[10px] ${
+                              isActive
+                                ? "border-sky-400 bg-white text-slate-900"
+                                : "border-slate-300 bg-white"
+                            }`}
+                            onMouseDown={(event) => event.stopPropagation()}
+                            onClick={(event) => event.stopPropagation()}
+                          >
+                            <option value="">전역</option>
+                            <option value="easy">쉬운</option>
+                            <option value="balanced">균형</option>
+                            <option value="killer">킬러</option>
+                          </select>
+                        </div>
+                      </div>
                     );
                   })}
                 </div>
@@ -2845,6 +2935,37 @@ export default function Home() {
                       </option>
                     ))}
                   </select>
+                </div>
+              )}
+              {questionNo && (
+                <div className="mt-2 rounded border border-slate-200 bg-white p-2">
+                  <label className="text-[11px] font-semibold text-slate-600">
+                    이 문항만 모델 프로필 (전역 덮어쓰기)
+                  </label>
+                  <select
+                    value={questionSolverProfileOverrides[questionNo] ?? ""}
+                    onChange={(event) => {
+                      const v = event.target.value as SolverModelProfile | "";
+                      setQuestionSolverProfileOverrides((prev) => {
+                        const next = { ...prev };
+                        if (!v) delete next[questionNo];
+                        else next[questionNo] = v;
+                        return next;
+                      });
+                    }}
+                    className="mt-1 w-full rounded border border-slate-300 bg-white px-2 py-1 text-xs"
+                  >
+                    <option value="">
+                      전역과 동일 ({solverProfileLabel(solverModelProfile)})
+                    </option>
+                    <option value="easy">{solverProfileLabel("easy")}</option>
+                    <option value="balanced">{solverProfileLabel("balanced")}</option>
+                    <option value="killer">{solverProfileLabel("killer")}</option>
+                  </select>
+                  <p className="mt-1 text-[10px] text-slate-500">
+                    적용: {solverProfileLabel(effectiveSolverProfileForCurrentQuestion)}
+                    {questionSolverProfileOverrides[questionNo] ? " · 이 문항 전용" : " · 전역"}
+                  </p>
                 </div>
               )}
               <p className="mt-1 text-xs text-slate-600">
@@ -3115,6 +3236,42 @@ export default function Home() {
                       />
                       최종 모드(품질 우선)
                     </label>
+                  </div>
+                  <div className="mt-2 rounded-md border border-indigo-200 bg-indigo-50 p-2">
+                    <p className="text-xs font-semibold text-indigo-900">문제풀이 모델 프로필</p>
+                    <p className="mt-1 text-[11px] text-indigo-800">
+                      학년 고정 대신 문제 난이도 성향에 맞춰 모델 우선순위를 선택합니다.
+                    </p>
+                    <label className="mt-2 flex items-center gap-2 text-xs text-indigo-900">
+                      <input
+                        type="radio"
+                        name="solverModelProfile"
+                        checked={solverModelProfile === "easy"}
+                        onChange={() => setSolverModelProfile("easy")}
+                      />
+                      쉬운 문제 특화 (속도/안정)
+                    </label>
+                    <label className="mt-1 flex items-center gap-2 text-xs text-indigo-900">
+                      <input
+                        type="radio"
+                        name="solverModelProfile"
+                        checked={solverModelProfile === "balanced"}
+                        onChange={() => setSolverModelProfile("balanced")}
+                      />
+                      균형형 (기본 권장)
+                    </label>
+                    <label className="mt-1 flex items-center gap-2 text-xs text-indigo-900">
+                      <input
+                        type="radio"
+                        name="solverModelProfile"
+                        checked={solverModelProfile === "killer"}
+                        onChange={() => setSolverModelProfile("killer")}
+                      />
+                      킬러 문제 특화 (고난도 정밀)
+                    </label>
+                    <p className="mt-2 text-[11px] text-indigo-800">
+                      문항별로만 다르게 쓰려면 아래 「현재 문항」또는 문항 카드의 「모델」에서 덮어쓰기를 지정하세요.
+                    </p>
                   </div>
                   <label className="mt-2 flex items-center gap-2">
                     <input

@@ -5,7 +5,9 @@ import { GoogleGenerativeAI } from "@google/generative-ai";
 import {
   AlignmentType,
   Document,
+  Header,
   HeadingLevel,
+  PageNumber,
   Packer,
   Paragraph,
   SectionType,
@@ -896,6 +898,39 @@ function buildDocx(
   originalTitle: string,
   items: GeneratedItem[],
 ) {
+  // [TEST] TEST 2 샘플에 맞춰 빠른정답/해설 영역의 시각 규칙을 통일한다.
+  const BASE_FONT = "맑은 고딕";
+  const TITLE_SIZE = 32; // 16pt
+  const SECTION_TITLE_SIZE = 24; // 12pt
+  const BODY_SIZE = 20; // 10pt
+  const BLOCK_GAP = 110;
+  const makeRun = (text: string, bold = false) =>
+    new TextRun({
+      text,
+      bold,
+      font: BASE_FONT,
+      size: BODY_SIZE,
+    });
+  const pageHeader = new Header({
+    children: [
+      new Paragraph({
+        alignment: AlignmentType.RIGHT,
+        children: [
+          new TextRun({
+            text: "페이지 ",
+            font: BASE_FONT,
+            size: BODY_SIZE,
+          }),
+          new TextRun({
+            children: [PageNumber.CURRENT],
+            font: BASE_FONT,
+            size: BODY_SIZE,
+          }),
+        ],
+      }),
+    ],
+  });
+
   const normalizeObjective = (value: string) =>
     value
       .trim()
@@ -927,28 +962,36 @@ function buildDocx(
         : objective
           ? objective
           : (item.generatedAnswer || item.expectedAnswer || "?");
-    return `${item.no}) ${display}`;
+    return `${item.no}. ${display}`;
   });
   const quickRows: Paragraph[] = [];
   for (let i = 0; i < quickEntries.length; i += 2) {
     quickRows.push(
       new Paragraph({
-        tabStops: [{ type: TabStopType.LEFT, position: 5200 }],
+        tabStops: [{ type: TabStopType.CENTER, position: 5100 }],
+        alignment: AlignmentType.CENTER,
         children: [
-          new TextRun({ text: quickEntries[i] ?? "", bold: true }),
+          makeRun(quickEntries[i] ?? "", true),
           new TextRun({ text: "\t" }),
-          new TextRun({ text: quickEntries[i + 1] ?? "", bold: true }),
+          makeRun(quickEntries[i + 1] ?? "", true),
         ],
-        spacing: { after: 110 },
+        spacing: { after: BLOCK_GAP },
       }),
     );
   }
 
   const explanationChildren: Paragraph[] = [
     new Paragraph({
-      heading: HeadingLevel.HEADING_2,
-      children: [new TextRun({ text: "[해설]", bold: true })],
-      spacing: { after: 180 },
+      alignment: AlignmentType.CENTER,
+      children: [
+        new TextRun({
+          text: "[해설]",
+          bold: true,
+          font: BASE_FONT,
+          size: SECTION_TITLE_SIZE,
+        }),
+      ],
+      spacing: { after: 180, before: 80 },
     }),
   ];
 
@@ -967,51 +1010,86 @@ function buildDocx(
       .filter(Boolean);
     explanationChildren.push(
       new Paragraph({
-        heading: HeadingLevel.HEADING_3,
-        children: [
-          new TextRun({
-            text: `${item.no}) (${item.status === "verified" ? "검증완료" : item.status === "filled" ? "정답보완" : "불일치검토필요"})`,
-            bold: true,
-          }),
-        ],
-        spacing: { before: 160, after: 80 },
+        alignment: AlignmentType.CENTER,
+        children: [makeRun(`${item.no}.`, true)],
+        spacing: { before: 160, after: 90 },
       }),
     );
     explanationChildren.push(
       new Paragraph({
-        children: [new TextRun({ text: `[빠른정답] ${quickAnswerText}`, bold: true })],
+        alignment: AlignmentType.CENTER,
+        children: [makeRun(`[정답] ${quickAnswerText}`, true)],
+        spacing: { after: BLOCK_GAP },
+      }),
+    );
+    explanationChildren.push(
+      new Paragraph({
+        alignment: AlignmentType.CENTER,
+        children: [makeRun("[해설]", true)],
         spacing: { after: 90 },
       }),
     );
     lines.forEach((line) => {
       const isKey = /^\[정답\]|\[해설\]/.test(line);
+      if (/^\[정답\]|\[해설\]/.test(line)) return;
       explanationChildren.push(
         new Paragraph({
-          children: [new TextRun({ text: line, bold: isKey })],
-          spacing: { after: 100 },
+          alignment: AlignmentType.BOTH,
+          children: [makeRun(line, isKey)],
+          spacing: { after: 100, line: 280 },
         }),
       );
     });
+    explanationChildren.push(
+      new Paragraph({
+        alignment: AlignmentType.CENTER,
+        children: [makeRun("────────────────────────", false)],
+        spacing: { before: 80, after: 80 },
+      }),
+    );
   });
 
   return new Document({
     sections: [
       {
         properties: {},
+        headers: {
+          default: pageHeader,
+        },
         children: [
           new Paragraph({
             alignment: AlignmentType.CENTER,
             heading: HeadingLevel.HEADING_1,
-            children: [new TextRun({ text: `${originalTitle}(해설)`, bold: true })],
+            children: [
+              new TextRun({
+                text: `${originalTitle}(해설)`,
+                bold: true,
+                font: BASE_FONT,
+                size: TITLE_SIZE,
+              }),
+            ],
             spacing: { after: 220 },
           }),
           new Paragraph({
-            children: [new TextRun({ text: "[빠른 정답]", bold: true })],
-            spacing: { after: 100 },
+            alignment: AlignmentType.CENTER,
+            children: [
+              new TextRun({
+                text: "[빠른 정답]",
+                bold: true,
+                font: BASE_FONT,
+                size: SECTION_TITLE_SIZE,
+              }),
+            ],
+            spacing: { after: 120 },
           }),
           ...(quickRows.length > 0
             ? quickRows
-            : [new Paragraph({ children: [new TextRun({ text: "추출/생성된 정답 없음" })] })]),
+            : [
+                new Paragraph({
+                  alignment: AlignmentType.CENTER,
+                  children: [makeRun("추출/생성된 정답 없음", true)],
+                }),
+              ]),
         ],
       },
       {
@@ -1020,7 +1098,11 @@ function buildDocx(
           column: {
             count: 2,
             space: 708,
+            separate: true,
           },
+        },
+        headers: {
+          default: pageHeader,
         },
         children: explanationChildren,
       },

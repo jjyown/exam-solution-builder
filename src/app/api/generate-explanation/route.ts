@@ -39,6 +39,7 @@ type GenerateRequestBody = {
   explanationSelectionMode?: "all" | "core";
   showAllMethods?: boolean;
   generationMode?: "test" | "final";
+  solverModelProfile?: "easy" | "balanced" | "killer";
   mimeType?: string;
   crop?: unknown;
   quickAnswerPageHint?: string;
@@ -47,6 +48,25 @@ type GenerateRequestBody = {
 
 const FINAL_MODEL_CANDIDATES = ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"] as const;
 const TEST_MODEL_CANDIDATES = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.5-pro"] as const;
+const EASY_MODEL_CANDIDATES = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.5-pro"] as const;
+const BALANCED_MODEL_CANDIDATES = ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"] as const;
+const KILLER_MODEL_CANDIDATES = ["gemini-2.5-pro", "gemini-2.0-flash", "gemini-2.5-flash"] as const;
+
+function pickModelCandidates(params: {
+  generationMode: "test" | "final";
+  solverModelProfile: "easy" | "balanced" | "killer";
+}) {
+  if (params.solverModelProfile === "easy") {
+    return [...EASY_MODEL_CANDIDATES];
+  }
+  if (params.solverModelProfile === "killer") {
+    return [...KILLER_MODEL_CANDIDATES];
+  }
+  if (params.solverModelProfile === "balanced") {
+    return [...BALANCED_MODEL_CANDIDATES];
+  }
+  return params.generationMode === "test" ? [...TEST_MODEL_CANDIDATES] : [...FINAL_MODEL_CANDIDATES];
+}
 
 function validateExplanationFormat(text: string) {
   const normalized = text.trim();
@@ -238,8 +258,16 @@ export async function POST(request: Request) {
     const explanationSelectionMode = body.explanationSelectionMode || "all";
     const showAllMethods = body.showAllMethods !== false;
     const generationMode = body.generationMode === "test" ? "test" : "final";
-    const modelCandidates =
-      generationMode === "test" ? TEST_MODEL_CANDIDATES : FINAL_MODEL_CANDIDATES;
+    const solverModelProfile =
+      body.solverModelProfile === "easy" ||
+      body.solverModelProfile === "balanced" ||
+      body.solverModelProfile === "killer"
+        ? body.solverModelProfile
+        : "balanced";
+    const modelCandidates = pickModelCandidates({
+      generationMode,
+      solverModelProfile,
+    });
     const diagramAid = inferDiagramAidNeed(questionText);
 
     if (!imageBase64) {
@@ -282,6 +310,11 @@ export async function POST(request: Request) {
       showAllMethods
         ? "- 풀이 방법이 여러 개면 [단계별 풀이]에서 [방법 1], [방법 2], [방법 3] 형식으로 모두 제시해."
         : "- 풀이 방법은 대표 1가지만 제시해.",
+      solverModelProfile === "easy"
+        ? "- 모델 프로필: 쉬운 문제 우선(속도/안정성 중심)으로 풀이 정확도를 확보해."
+        : solverModelProfile === "killer"
+          ? "- 모델 프로필: 킬러 문제 우선(고난도 정밀 추론 중심)으로 풀이를 진행해."
+          : "- 모델 프로필: 균형형(일반~고난도 모두 안정적)으로 풀이해.",
       body.quickAnswerPageHint
         ? `- ${body.quickAnswerPageHint}가 제공된 경우 해당 정답 기준과 모순되지 않게 검증해.`
         : "",
