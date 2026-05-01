@@ -823,7 +823,8 @@ async function generateSolutionWithOpenAiFallback(
   expectedAnswer?: string,
   profile: GenerationProfile = "normal",
 ) {
-  const apiKey = process.env.OPENAI_API_KEY;
+  const apiKey =
+    process.env.OPENAI_API_KEY?.trim() || process.env.OPENAI_KEY?.trim() || "";
   if (!apiKey) {
     throw new Error("OPENAI_API_KEY가 없어 GPT 백업 경로를 사용할 수 없습니다.");
   }
@@ -1064,9 +1065,13 @@ function evaluateParsingQuality(params: {
 
 export async function POST(request: Request) {
   try {
-    const apiKey = process.env.GEMINI_API_KEY;
+    const apiKey =
+      process.env.GEMINI_API_KEY?.trim() || process.env.GOOGLE_API_KEY?.trim() || "";
     if (!apiKey) {
-      return NextResponse.json({ error: "GEMINI_API_KEY가 설정되지 않았습니다." }, { status: 500 });
+      return NextResponse.json(
+        { error: "GEMINI_API_KEY(또는 GOOGLE_API_KEY)가 설정되지 않았습니다." },
+        { status: 500 },
+      );
     }
 
     const formData = await request.formData();

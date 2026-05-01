@@ -45,6 +45,8 @@ type VisionPrecheckResponse = {
   missing?: string[];
   reasons?: string[];
   error?: string;
+  details?: string[];
+  model?: string;
 };
 
 type DiagramAidRecommendation = {
@@ -1191,11 +1193,21 @@ export default function Home() {
       });
       const visionPrecheckData = (await visionPrecheckRes.json()) as VisionPrecheckResponse;
       if (!visionPrecheckRes.ok) {
-        throw new Error(
-          visionPrecheckData.error || "문제 이미지 비전 사전검증 호출에 실패했습니다.",
-        );
+        if (visionPrecheckRes.status >= 500) {
+          const details = visionPrecheckData.details?.join(" | ");
+          setQualityWarnings((prev) => [
+            ...prev,
+            `비전 사전검증 서버 오류(${visionPrecheckRes.status})로 검증을 건너뛰고 생성을 계속합니다.${
+              details ? ` 상세: ${details}` : ""
+            }`,
+          ]);
+        } else {
+          throw new Error(
+            visionPrecheckData.error || "문제 이미지 비전 사전검증 호출에 실패했습니다.",
+          );
+        }
       }
-      if (!visionPrecheckData.pass) {
+      if (visionPrecheckRes.ok && !visionPrecheckData.pass) {
         const reasons = [...(visionPrecheckData.reasons || []), ...(visionPrecheckData.missing || [])]
           .filter(Boolean)
           .join(" / ");
@@ -1852,16 +1864,26 @@ export default function Home() {
         });
         const visionPrecheckData = (await visionPrecheckRes.json()) as VisionPrecheckResponse;
         if (!visionPrecheckRes.ok) {
-          results.push({
-            questionNo: item.questionNo,
-            quickAnswer: "-",
-            status: "error",
-            message:
-              visionPrecheckData.error || "생성 중단(비전 사전검증 API 호출 실패)",
-          });
-          continue;
+          if (visionPrecheckRes.status >= 500) {
+            const detailText = visionPrecheckData.details?.join(" | ");
+            setQualityWarnings((prev) => [
+              ...prev,
+              `${item.questionNo}번: 비전 사전검증 서버 오류(${visionPrecheckRes.status})로 검증을 건너뛰고 생성을 계속합니다.${
+                detailText ? ` 상세: ${detailText}` : ""
+              }`,
+            ]);
+          } else {
+            results.push({
+              questionNo: item.questionNo,
+              quickAnswer: "-",
+              status: "error",
+              message:
+                visionPrecheckData.error || "생성 중단(비전 사전검증 API 호출 실패)",
+            });
+            continue;
+          }
         }
-        if (!visionPrecheckData.pass) {
+        if (visionPrecheckRes.ok && !visionPrecheckData.pass) {
           const reasons = [
             ...(visionPrecheckData.reasons || []),
             ...(visionPrecheckData.missing || []),

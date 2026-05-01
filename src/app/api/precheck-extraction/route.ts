@@ -50,10 +50,11 @@ function normalizePrecheck(payload: unknown): VisionPrecheckResult {
 
 export async function POST(request: Request) {
   try {
-    const apiKey = process.env.GEMINI_API_KEY;
+    const apiKey =
+      process.env.GEMINI_API_KEY?.trim() || process.env.GOOGLE_API_KEY?.trim() || "";
     if (!apiKey) {
       return NextResponse.json(
-        { error: "GEMINI_API_KEY가 설정되지 않았습니다." },
+        { error: "GEMINI_API_KEY(또는 GOOGLE_API_KEY)가 설정되지 않았습니다." },
         { status: 500 },
       );
     }
