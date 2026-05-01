@@ -1624,18 +1624,18 @@ export default function Home() {
           visionPrecheckData.error,
         );
         if (precheckRateLimited) {
-          throw new Error(
-            "비전 사전검증이 429 혼잡으로 실패하여 생성을 중단했습니다. 잠시 후 다시 시도해 주세요.",
+          appendQualityWarningUnique(
+            "비전 사전검증이 429 혼잡으로 실패해 검증을 건너뛰고 생성을 계속합니다. 결과를 한 번 더 확인해 주세요.",
           );
-        }
-        if (visionPrecheckRes.status >= 500) {
+        } else if (visionPrecheckRes.status >= 500) {
           const details = visionPrecheckData.details?.join(" | ");
           appendQualityWarningUnique(
             `비전 사전검증 서버 오류(${visionPrecheckRes.status})로 검증을 건너뛰고 생성을 계속합니다.${
               details ? ` 상세: ${details}` : ""
             }`,
           );
-        } else {
+        }
+        if (!precheckRateLimited && visionPrecheckRes.status < 500) {
           throw new Error(
             visionPrecheckData.error || "문제 이미지 비전 사전검증 호출에 실패했습니다.",
           );
@@ -2370,16 +2370,10 @@ export default function Home() {
               visionPrecheckData.error,
             );
             if (precheckRateLimited) {
-              results.push({
-                questionNo: item.questionNo,
-                quickAnswer: "-",
-                status: "error",
-                message:
-                  "생성 중단(비전 사전검증 429 혼잡): 잠시 후 다시 시도해 주세요.",
-              });
-              continue;
-            }
-            if (visionPrecheckRes.status >= 500) {
+              appendQualityWarningUnique(
+                `${item.questionNo}번: 비전 사전검증 429 혼잡으로 검증을 건너뛰고 생성을 계속합니다. 결과를 한 번 더 확인해 주세요.`,
+              );
+            } else if (visionPrecheckRes.status >= 500) {
               const detailText = visionPrecheckData.details?.join(" | ");
               appendQualityWarningUnique(
                 `${item.questionNo}번: 비전 사전검증 서버 오류(${visionPrecheckRes.status})로 검증을 건너뛰고 생성을 계속합니다.${
