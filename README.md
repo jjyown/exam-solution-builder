@@ -68,6 +68,24 @@ npm run dev
 - Node가 설치된 PC: `해설지_실행.bat`
 - Node가 없는 PC: `도커로_실행.bat` (Docker Desktop 필요)
 
+## Railway 배포(운영 권장)
+
+1) GitHub에 현재 프로젝트를 push  
+2) Railway에서 **New Project -> Deploy from GitHub Repo** 선택  
+3) Root Directory를 `highroad-math-solution`로 지정  
+4) Railway Variables에 `.env.local.example` 항목을 기준으로 키 등록  
+5) Deploy 후 생성된 Railway URL로 접속
+
+권장 환경변수:
+- 필수: `GEMINI_API_KEY`, `OPENAI_API_KEY`
+- 선택: `OPENAI_MODEL_GENERATE_FALLBACK`, `OPENAI_MODEL_REPAIR_FALLBACK`
+- 선택: `GEMINI_MODELS_*` (모델 후보를 환경변수로 관리)
+
+운영 체크:
+- 5문항 배치 생성 테스트(순차 + 딜레이 + 백오프 적용 상태)
+- DOCX 생성 및 자동 보정 경로 확인
+- 실패 시 UI의 `상세` 로그로 어떤 모델 경로에서 실패했는지 점검
+
 ## 구현 위치
 
 - 화면/UI: `src/app/page.tsx`
@@ -81,24 +99,13 @@ npm run dev
 
 - Gemini 응답 형식을 안정화하기 위해 시스템 프롬프트를 API 라우트에 고정했습니다.
 - PDF는 A4 기준으로 저장되며, 내용이 길면 자동으로 다음 페이지를 추가합니다.
+- 현재 파이프라인 모델 목록은 `docs/models.md`를 참고하세요.
 
-## MCP 모델 선택 가이드 (고정)
+## 모델 운영 가이드
 
-모델명을 잘 모를 때는 아래 기본값으로 시작합니다. 이 기준을 프로젝트 권장값으로 고정합니다.
-
-- 기본 모델(모델 미지정 시 자동 적용)
-  - `gemini_generate`, `gemini_chat`: `gemini-2.5-flash`
-  - `gpt_generate`, `gpt_chat`: `gpt-4o-mini`
-- 역할 분담 권장
-  - 문제 구조화/분석/요약 초안: Gemini(`gemini_generate`/`gemini_chat`)
-  - 해설 문장 품질 보정/형식 준수: GPT(`gpt_generate`/`gpt_chat`)
-- 모델을 바꾸는 기준(필요할 때만)
-  - 품질이 부족하면: `gemini-2.5-pro` 또는 상위 GPT 모델로 상향
-  - 속도/비용이 부담이면: 기본값 유지 또는 Gemini는 `gemini-2.5-flash-lite` 검토
-- 추천 기본 워크플로우
-  1) Gemini로 문제를 JSON/문항 단위로 구조화
-  2) GPT로 학원 양식(`개념 -> 풀이 -> 정답`) 해설 생성
-  3) 다시 Gemini 또는 Cursor로 최종 검수(누락/표현 점검)
+- Gemini 경로: `docs/models.md` 기준으로 환경변수에서 후보를 관리합니다.
+- 생성/보정 API는 Gemini 실패 시 OpenAI 폴백을 사용합니다.
+- 모델명은 코드 하드코딩보다 `.env.local`/배포 환경변수에서 운영하는 것을 권장합니다.
 
 ## 도형 보조 이미지(바나나) 자동 판정 가이드 (고정)
 

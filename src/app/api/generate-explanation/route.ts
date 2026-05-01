@@ -57,29 +57,19 @@ function parseModelCandidatesFromEnv(envKey: string, fallback: string[]) {
 }
 
 const FINAL_MODEL_CANDIDATES = parseModelCandidatesFromEnv("GEMINI_MODELS_GENERATE_FINAL", [
-  "gemini-1.5-pro",
   "gemini-2.0-flash",
-  "gemini-1.5-flash",
 ]);
 const TEST_MODEL_CANDIDATES = parseModelCandidatesFromEnv("GEMINI_MODELS_GENERATE_TEST", [
   "gemini-2.0-flash",
-  "gemini-1.5-flash",
-  "gemini-1.5-pro",
 ]);
 const EASY_MODEL_CANDIDATES = parseModelCandidatesFromEnv("GEMINI_MODELS_GENERATE_EASY", [
   "gemini-2.0-flash",
-  "gemini-1.5-flash",
-  "gemini-1.5-pro",
 ]);
 const BALANCED_MODEL_CANDIDATES = parseModelCandidatesFromEnv("GEMINI_MODELS_GENERATE_BALANCED", [
-  "gemini-1.5-pro",
   "gemini-2.0-flash",
-  "gemini-1.5-flash",
 ]);
 const KILLER_MODEL_CANDIDATES = parseModelCandidatesFromEnv("GEMINI_MODELS_GENERATE_KILLER", [
-  "gemini-1.5-pro",
   "gemini-2.0-flash",
-  "gemini-1.5-flash",
 ]);
 
 function pickModelCandidates(params: {
@@ -288,6 +278,61 @@ function inferDiagramAidNeed(questionText: string) {
   };
 }
 
+async function generateWithOpenAiFallback(params: {
+  apiKey: string;
+  model: string;
+  prompt: string;
+  imageBase64: string;
+  mimeType: string;
+  diagramImageBase64?: string;
+  diagramMimeType?: string;
+  diagramImages: Array<{ imageBase64: string; mimeType: string }>;
+}) {
+  const content: Array<
+    | { type: "text"; text: string }
+    | { type: "image_url"; image_url: { url: string } }
+  > = [{ type: "text", text: params.prompt }];
+  content.push({
+    type: "image_url",
+    image_url: { url: `data:${params.mimeType};base64,${params.imageBase64}` },
+  });
+  if (params.diagramImageBase64) {
+    content.push({
+      type: "image_url",
+      image_url: {
+        url: `data:${params.diagramMimeType || "image/png"};base64,${params.diagramImageBase64}`,
+      },
+    });
+  }
+  params.diagramImages.forEach((item) => {
+    content.push({
+      type: "image_url",
+      image_url: { url: `data:${item.mimeType};base64,${item.imageBase64}` },
+    });
+  });
+
+  const response = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${params.apiKey}`,
+    },
+    body: JSON.stringify({
+      model: params.model,
+      messages: [{ role: "user", content }],
+      temperature: 0.2,
+    }),
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`OpenAI 폴백 호출 실패: ${response.status} ${text}`);
+  }
+  const data = (await response.json()) as {
+    choices?: Array<{ message?: { content?: string } }>;
+  };
+  return data.choices?.[0]?.message?.content?.trim() ?? "";
+}
+
 export async function POST(request: Request) {
   try {
     const apiKey =
@@ -327,6 +372,10 @@ export async function POST(request: Request) {
       solverModelProfile,
     });
     const diagramAid = inferDiagramAidNeed(questionText);
+    const openAiApiKey =
+      process.env.OPENAI_API_KEY?.trim() || process.env.OPENAI_KEY?.trim() || "";
+    const openAiModel =
+      process.env.OPENAI_MODEL_GENERATE_FALLBACK?.trim() || "gpt-4o-mini";
 
     if (!imageBase64) {
       return NextResponse.json(
@@ -528,9 +577,58 @@ export async function POST(request: Request) {
       }
     }
 
+    if (openAiApiKey) {
+      try {
+        const openAiText = await generateWithOpenAiFallback({
+          apiKey: openAiApiKey,
+          model: openAiModel,
+          prompt,
+          imageBase64,
+          mimeType,
+          diagramImageBase64,
+          diagramMimeType,
+          diagramImages: diagramImages.map((item) => ({
+            imageBase64: item.imageBase64,
+            mimeType: item.mimeType,
+          })),
+        });
+        if (openAiText) {
+          const formatCheck = validateExplanationFormat(openAiText);
+          const consistencyCheck = validateExplanationConsistency(openAiText);
+          const scopeCheck = validateCurriculumScope(openAiText);
+          const pedagogyCheck = validatePedagogicalPolicy(openAiText);
+          if (
+            formatCheck.ok &&
+            consistencyCheck.ok &&
+            scopeCheck.ok &&
+            pedagogyCheck.ok &&
+            !isLikelyTruncatedResult(openAiText)
+          ) {
+            return NextResponse.json(
+              {
+                result: openAiText,
+                model: `${openAiModel} (openai-fallback)`,
+                qualityWarnings: [],
+                diagramAidRecommendation: diagramAid,
+              },
+              { status: 200 },
+            );
+          }
+          failures.push(
+            `openai:${openAiModel}: 형식/정합 검증 실패 - 누락: ${formatCheck.missing.join(", ")} / 정합: ${consistencyCheck.issues.join(" | ")} / 범위: ${scopeCheck.issues.join(" | ")} / 수업기준: ${pedagogyCheck.issues.join(" | ")}`,
+          );
+        } else {
+          failures.push(`openai:${openAiModel}: 응답 비어 있음`);
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "알 수 없는 OpenAI 오류";
+        failures.push(`openai:${openAiModel}: ${message}`);
+      }
+    }
+
     return NextResponse.json(
       {
-        error: "해설 생성 실패: 사용 가능한 Gemini 모델 호출에 모두 실패했습니다.",
+        error: "해설 생성 실패: 사용 가능한 Gemini/OpenAI 모델 호출에 모두 실패했습니다.",
         details: failures,
       },
       { status: 502 },

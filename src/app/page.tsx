@@ -343,6 +343,47 @@ async function parseApiErrorMessage(response: Response, fallback: string) {
   }
 }
 
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isRetryableStatus(status: number) {
+  return status === 429 || status === 408 || status === 502 || status === 503 || status === 504;
+}
+
+async function fetchWithBackoff(
+  input: RequestInfo | URL,
+  init: RequestInit,
+  options?: { retries?: number; baseDelayMs?: number },
+) {
+  const retries = options?.retries ?? 2;
+  const baseDelayMs = options?.baseDelayMs ?? 2000;
+  let lastResponse: Response | null = null;
+  let lastError: unknown = null;
+
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    try {
+      const response = await fetch(input, init);
+      if (!isRetryableStatus(response.status) || attempt === retries) {
+        return response;
+      }
+      lastResponse = response;
+      const waitMs = baseDelayMs * 2 ** attempt;
+      await sleep(waitMs);
+    } catch (error) {
+      lastError = error;
+      if (attempt === retries) break;
+      const waitMs = baseDelayMs * 2 ** attempt;
+      await sleep(waitMs);
+    }
+  }
+
+  if (lastResponse) return lastResponse;
+  throw lastError instanceof Error
+    ? lastError
+    : new Error("네트워크 요청 재시도 중 알 수 없는 오류가 발생했습니다.");
+}
+
 function extractSection(text: string, header: string, nextHeaders: string[]) {
   const escapedHeader = header.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const escapedNext = nextHeaders.map((item) => item.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
@@ -2192,164 +2233,172 @@ export default function Home() {
 
       const results: BatchResult[] = [];
       const successfulQuestionNos: string[] = [];
+      const perQuestionDelayMs = 2200;
 
-      for (const item of queuedProblems) {
-        const precheck = runExtractionPrecheckForDisplayedCrop(item.crop, imageRef.current);
-        if (!precheck.ok) {
-          results.push({
-            questionNo: item.questionNo,
-            quickAnswer: "-",
-            status: "error",
-            message: `생성 중단(사전검증 실패): ${precheck.messages.join(" / ")}`,
-          });
-          continue;
-        }
-
-        const visionPrecheckRes = await fetch("/api/precheck-extraction", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            imageBase64: item.imageBase64,
-            imageMimeType: item.imageMimeType,
-            crop: item.crop,
-          }),
-        });
-        const visionPrecheckData = (await visionPrecheckRes.json()) as VisionPrecheckResponse;
-        if (!visionPrecheckRes.ok) {
-          if (visionPrecheckRes.status >= 500) {
-            const detailText = visionPrecheckData.details?.join(" | ");
-            setQualityWarnings((prev) => [
-              ...prev,
-              `${item.questionNo}번: 비전 사전검증 서버 오류(${visionPrecheckRes.status})로 검증을 건너뛰고 생성을 계속합니다.${
-                detailText ? ` 상세: ${detailText}` : ""
-              }`,
-            ]);
-          } else {
+      for (let itemIndex = 0; itemIndex < queuedProblems.length; itemIndex += 1) {
+        const item = queuedProblems[itemIndex];
+        try {
+          const precheck = runExtractionPrecheckForDisplayedCrop(item.crop, imageRef.current);
+          if (!precheck.ok) {
             results.push({
               questionNo: item.questionNo,
               quickAnswer: "-",
               status: "error",
-              message:
-                visionPrecheckData.error || "생성 중단(비전 사전검증 API 호출 실패)",
+              message: `생성 중단(사전검증 실패): ${precheck.messages.join(" / ")}`,
             });
             continue;
           }
-        }
-        if (visionPrecheckRes.ok && !visionPrecheckData.pass) {
-          const reasons = [
-            ...(visionPrecheckData.reasons || []),
-            ...(visionPrecheckData.missing || []),
-          ]
-            .filter(Boolean)
-            .join(" / ");
-          results.push({
-            questionNo: item.questionNo,
-            quickAnswer: "-",
-            status: "error",
-            message: `생성 중단(비전 사전검증 ${visionPrecheckData.score}점): ${
-              reasons || "핵심 정보 누락 가능성"
-            }`,
+
+          const visionPrecheckRes = await fetchWithBackoff("/api/precheck-extraction", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              imageBase64: item.imageBase64,
+              imageMimeType: item.imageMimeType,
+              crop: item.crop,
+            }),
           });
-          continue;
-        }
-
-        const itemSolverProfile =
-          questionSolverProfileOverrides[item.questionNo] ?? solverModelProfile;
-        const response = await fetch("/api/generate-explanation", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            questionText: useTextInput ? questionText : "",
-            imageBase64: item.imageBase64,
-            imageMimeType: item.imageMimeType,
-            diagramImages: item.diagramImages,
-            generationMode,
-            solverModelProfile: itemSolverProfile,
-            includeDiagramExplanation,
-            explanationSelectionMode,
-            showAllMethods,
-            quickAnswerPageHint:
-              quickAnswerPages.length > 0
-                ? `빠른정답 참고 페이지: ${quickAnswerPages.join(", ")}`
-                : "",
-            explanationReferenceHint:
-              explanationRefPages.length > 0
-                ? `해설 참고 페이지: ${explanationRefPages.join(", ")}`
-                : "",
-            crop: item.crop,
-          }),
-        });
-
-        if (!response.ok) {
-          const data = (await response.json()) as { error?: string; details?: string[] };
-          const detailText =
-            data.details && data.details.length > 0
-              ? ` / 상세: ${data.details.join(" | ")}`
-              : "";
-          results.push({
-            questionNo: item.questionNo,
-            quickAnswer: "-",
-            status: "error",
-            message: (data.error || "해설 생성 실패") + detailText,
-          });
-          continue;
-        }
-
-        const data = (await response.json()) as {
-          result: string;
-          qualityWarnings?: string[];
-          diagramAidRecommendation?: DiagramAidRecommendation;
-          model?: string;
-        };
-        const rawResult = data.result;
-        const parsed = parseExplanation(rawResult);
-        const parsedMethodBlocks = splitMethodBlocks(parsed.body);
-        const selectedIndexes = parsedMethodBlocks.methods.map((_, index) => index);
-        const nextWorkflowStep: ExplanationWorkflowStep =
-          parsedMethodBlocks.methods.length > 1
-            ? "select_explanation"
-            : "confirm_quick_answer";
-        pushQuestionVersion(
-          item.questionNo,
-          {
-            rawResponse: rawResult,
-            quickAnswer: parsed.quickAnswer,
-            explanationBody: parsed.body,
-            selectedMethodIndexes: selectedIndexes,
-            representativeMethodIndex: parsedMethodBlocks.methods.length > 0 ? 0 : null,
-            workflowStep: nextWorkflowStep,
-            modelLabel: data.model || `gemini-${itemSolverProfile}`,
-            sourceType: "batch",
-            runId: batchRunId,
-          },
-          true,
-        );
-        setQuestionCardDraftMap((prev) => ({
-          ...prev,
-          [item.questionNo]: {
-            quickAnswer: parsed.quickAnswer,
-            explanationBody: parsed.body,
-            rawResponse: rawResult,
-            selectedMethodIndexes: selectedIndexes,
-            representativeMethodIndex: parsedMethodBlocks.methods.length > 0 ? 0 : null,
-            methodSelectionPolicy: "all",
-            workflowStep: nextWorkflowStep,
-          },
-        }));
-        results.push({
-          questionNo: item.questionNo,
-          quickAnswer: parsed.quickAnswer,
-          status: "success",
-          message:
-              `${data.qualityWarnings && data.qualityWarnings.length > 0 ? `생성 완료(경고 ${data.qualityWarnings.length}건)` : "생성 완료"}${
-                data.diagramAidRecommendation?.recommended
-                  ? ` / 도형보조 추천(score ${data.diagramAidRecommendation.score})`
-                  : ""
+          const visionPrecheckData = (await visionPrecheckRes.json()) as VisionPrecheckResponse;
+          if (!visionPrecheckRes.ok) {
+            if (visionPrecheckRes.status >= 500) {
+              const detailText = visionPrecheckData.details?.join(" | ");
+              setQualityWarnings((prev) => [
+                ...prev,
+                `${item.questionNo}번: 비전 사전검증 서버 오류(${visionPrecheckRes.status})로 검증을 건너뛰고 생성을 계속합니다.${
+                  detailText ? ` 상세: ${detailText}` : ""
+                }`,
+              ]);
+            } else {
+              results.push({
+                questionNo: item.questionNo,
+                quickAnswer: "-",
+                status: "error",
+                message:
+                  visionPrecheckData.error || "생성 중단(비전 사전검증 API 호출 실패)",
+              });
+              continue;
+            }
+          }
+          if (visionPrecheckRes.ok && !visionPrecheckData.pass) {
+            const reasons = [
+              ...(visionPrecheckData.reasons || []),
+              ...(visionPrecheckData.missing || []),
+            ]
+              .filter(Boolean)
+              .join(" / ");
+            results.push({
+              questionNo: item.questionNo,
+              quickAnswer: "-",
+              status: "error",
+              message: `생성 중단(비전 사전검증 ${visionPrecheckData.score}점): ${
+                reasons || "핵심 정보 누락 가능성"
               }`,
-        });
-        successfulQuestionNos.push(item.questionNo);
+            });
+            continue;
+          }
+
+          const itemSolverProfile =
+            questionSolverProfileOverrides[item.questionNo] ?? solverModelProfile;
+          const response = await fetchWithBackoff("/api/generate-explanation", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              questionText: useTextInput ? questionText : "",
+              imageBase64: item.imageBase64,
+              imageMimeType: item.imageMimeType,
+              diagramImages: item.diagramImages,
+              generationMode,
+              solverModelProfile: itemSolverProfile,
+              includeDiagramExplanation,
+              explanationSelectionMode,
+              showAllMethods,
+              quickAnswerPageHint:
+                quickAnswerPages.length > 0
+                  ? `빠른정답 참고 페이지: ${quickAnswerPages.join(", ")}`
+                  : "",
+              explanationReferenceHint:
+                explanationRefPages.length > 0
+                  ? `해설 참고 페이지: ${explanationRefPages.join(", ")}`
+                  : "",
+              crop: item.crop,
+            }),
+          });
+
+          if (!response.ok) {
+            const data = (await response.json()) as { error?: string; details?: string[] };
+            const detailText =
+              data.details && data.details.length > 0
+                ? ` / 상세: ${data.details.join(" | ")}`
+                : "";
+            results.push({
+              questionNo: item.questionNo,
+              quickAnswer: "-",
+              status: "error",
+              message: (data.error || "해설 생성 실패") + detailText,
+            });
+            continue;
+          }
+
+          const data = (await response.json()) as {
+            result: string;
+            qualityWarnings?: string[];
+            diagramAidRecommendation?: DiagramAidRecommendation;
+            model?: string;
+          };
+          const rawResult = data.result;
+          const parsed = parseExplanation(rawResult);
+          const parsedMethodBlocks = splitMethodBlocks(parsed.body);
+          const selectedIndexes = parsedMethodBlocks.methods.map((_, index) => index);
+          const nextWorkflowStep: ExplanationWorkflowStep =
+            parsedMethodBlocks.methods.length > 1
+              ? "select_explanation"
+              : "confirm_quick_answer";
+          pushQuestionVersion(
+            item.questionNo,
+            {
+              rawResponse: rawResult,
+              quickAnswer: parsed.quickAnswer,
+              explanationBody: parsed.body,
+              selectedMethodIndexes: selectedIndexes,
+              representativeMethodIndex: parsedMethodBlocks.methods.length > 0 ? 0 : null,
+              workflowStep: nextWorkflowStep,
+              modelLabel: data.model || `gemini-${itemSolverProfile}`,
+              sourceType: "batch",
+              runId: batchRunId,
+            },
+            true,
+          );
+          setQuestionCardDraftMap((prev) => ({
+            ...prev,
+            [item.questionNo]: {
+              quickAnswer: parsed.quickAnswer,
+              explanationBody: parsed.body,
+              rawResponse: rawResult,
+              selectedMethodIndexes: selectedIndexes,
+              representativeMethodIndex: parsedMethodBlocks.methods.length > 0 ? 0 : null,
+              methodSelectionPolicy: "all",
+              workflowStep: nextWorkflowStep,
+            },
+          }));
+          results.push({
+            questionNo: item.questionNo,
+            quickAnswer: parsed.quickAnswer,
+            status: "success",
+            message:
+                `${data.qualityWarnings && data.qualityWarnings.length > 0 ? `생성 완료(경고 ${data.qualityWarnings.length}건)` : "생성 완료"}${
+                  data.diagramAidRecommendation?.recommended
+                    ? ` / 도형보조 추천(score ${data.diagramAidRecommendation.score})`
+                    : ""
+                }`,
+          });
+          successfulQuestionNos.push(item.questionNo);
+        } finally {
+          if (itemIndex < queuedProblems.length - 1) {
+            await sleep(perQuestionDelayMs);
+          }
+        }
       }
 
       setBatchResults(results);

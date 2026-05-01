@@ -22,9 +22,7 @@ function parseModelCandidatesFromEnv(envKey: string, fallback: string[]) {
 }
 
 const REPAIR_MODEL_CANDIDATES = parseModelCandidatesFromEnv("GEMINI_MODELS_REPAIR", [
-  "gemini-1.5-pro",
   "gemini-2.0-flash",
-  "gemini-1.5-flash",
 ]);
 
 function extractJsonObject(raw: string) {
@@ -68,6 +66,33 @@ function validateRepairedEntry(entry: ExportDocEntry) {
   return { ok: issues.length === 0, issues };
 }
 
+async function repairWithOpenAi(params: {
+  apiKey: string;
+  model: string;
+  prompt: string;
+}) {
+  const response = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${params.apiKey}`,
+    },
+    body: JSON.stringify({
+      model: params.model,
+      messages: [{ role: "user", content: params.prompt }],
+      temperature: 0.1,
+    }),
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`OpenAI 폴백 호출 실패: ${response.status} ${text}`);
+  }
+  const data = (await response.json()) as {
+    choices?: Array<{ message?: { content?: string } }>;
+  };
+  return data.choices?.[0]?.message?.content?.trim() ?? "";
+}
+
 export async function POST(request: Request) {
   try {
     const apiKey =
@@ -90,6 +115,9 @@ export async function POST(request: Request) {
     }
 
     const client = new GoogleGenerativeAI(apiKey);
+    const openAiApiKey =
+      process.env.OPENAI_API_KEY?.trim() || process.env.OPENAI_KEY?.trim() || "";
+    const openAiModel = process.env.OPENAI_MODEL_REPAIR_FALLBACK?.trim() || "gpt-4o-mini";
     const prompt = [
       "다음 문항 해설들을 DOCX 내보내기용으로 정제해.",
       "반드시 JSON 하나만 반환하고, JSON 외 문장은 절대 출력하지 마.",
@@ -149,6 +177,47 @@ export async function POST(request: Request) {
       } catch (error) {
         const message = error instanceof Error ? error.message : "알 수 없는 오류";
         failures.push(`${modelName}: ${message}`);
+      }
+    }
+
+    if (openAiApiKey) {
+      try {
+        const text = await repairWithOpenAi({
+          apiKey: openAiApiKey,
+          model: openAiModel,
+          prompt,
+        });
+        const json = extractJsonObject(text);
+        if (!json) {
+          failures.push(`openai:${openAiModel}: JSON 추출 실패`);
+        } else {
+          const parsed = JSON.parse(json) as { entries?: ExportDocEntry[] };
+          const repaired = (parsed.entries || [])
+            .map((item) => ({
+              questionNo: String(item.questionNo || "").trim(),
+              quickAnswer: sanitizeText(String(item.quickAnswer || "").trim()) || "-",
+              body: sanitizeText(String(item.body || "").trim()) || "(해설 본문 없음)",
+            }))
+            .filter((item) => item.questionNo);
+          const invalids = repaired
+            .map((entry) => ({ entry, check: validateRepairedEntry(entry) }))
+            .filter((item) => !item.check.ok);
+          if (repaired.length > 0 && invalids.length === 0) {
+            return NextResponse.json({ entries: repaired, model: `${openAiModel} (openai-fallback)` });
+          }
+          if (repaired.length === 0) {
+            failures.push(`openai:${openAiModel}: 보정 결과 비어 있음`);
+          } else {
+            failures.push(
+              `openai:${openAiModel}: 보정 후 규칙 미통과 - ${invalids
+                .map((item) => `${item.entry.questionNo}번(${item.check.issues.join(", ")})`)
+                .join(" / ")}`,
+            );
+          }
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "알 수 없는 OpenAI 오류";
+        failures.push(`openai:${openAiModel}: ${message}`);
       }
     }
 

@@ -26,7 +26,6 @@ function parseModelCandidatesFromEnv(envKey: string, fallback: string[]) {
 
 const PRECHECK_MODEL_CANDIDATES = parseModelCandidatesFromEnv("GEMINI_MODELS_PRECHECK", [
   "gemini-2.0-flash",
-  "gemini-1.5-flash",
 ]);
 
 function extractJsonObject(raw: string) {
