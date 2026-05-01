@@ -8,6 +8,7 @@
     "start": "next start",
     "lint": "eslint",
     "smoke:hml": "node scripts/hml-smoke.mjs",
+    "extract:hml-style": "node scripts/extract-hml-style-samples.mjs",
     "mcp:gemini-gpt": "node mcp/gemini-gpt-server.mjs"
   },
   "dependencies": {

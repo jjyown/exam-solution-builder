@@ -1,32 +1,6 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { NextResponse } from "next/server";
-
-const SYSTEM_PROMPT = `당신은 중고등학생 대상 수학 전문 학원의 교재 및 해설 제작 마스터입니다.
-사용자가 구분선(예: '---' 또는 '===')으로 구분하여 여러 개의 수학 문제를 한 번에 입력할 것입니다.
-당신의 유일한 임무는 입력된 모든 문제를 순서대로 풀이한 뒤, 개별로 분리하지 말고 반드시 '단 하나의 통합된 텍스트 문서'로 출력하는 것입니다.
-
-[출력 필수 양식]
-반드시 아래의 '빠른 정답 및 해설' 양식을 엄격하게 지켜서 하나의 결과물로 출력하세요.
-
-[정답] (여기에 정답 번호 또는 값)
-[해설]
-(여기에 상세한 문제 풀이 과정)
-
-[정답] (여기에 정답 번호 또는 값)
-[해설]
-(여기에 상세한 문제 풀이 과정)
-
-... (입력된 모든 문제에 대해 동일한 양식으로 끝까지 작성할 것)
-
-[절대 주의사항]
-
-단일 문서 출력: 문제마다 답변을 끊어서 여러 번 나누어 출력하지 마세요. 반드시 모든 문제의 해설을 모아서 한 번에 응답해야 합니다.
-
-학생 눈높이 맞춤 (매우 중요): 대상은 중고등학생입니다. 반드시 중고등학교 수학 교육과정 내에서 다루는 기호와 용어, 개념만 사용하여 풀이를 작성하세요. 대학교 수준의 수학 기호나 풀이 방식(예: 로피탈의 정리, 편미분, 선형대수학 기호 등)은 절대 사용해서는 안 됩니다.
-
-불필요한 텍스트 생략: "네, 알겠습니다", "해설을 제작해 드립니다" 같은 인사말이나 부연 설명은 절대 포함하지 마세요. 오직 해설지 내용만 출력하세요.
-
-디자인 및 표기: 수식은 가독성 있게 작성하고, 불필요한 한자(漢字)는 절대 사용하지 마세요. 깔끔하고 직관적인 구성을 유지하십시오.`;
+import { buildSystemInstruction } from "./prompts";
 
 type GenerateRequestBody = {
   questionText?: string;
@@ -367,6 +341,7 @@ export async function POST(request: Request) {
       body.solverModelProfile === "killer"
         ? body.solverModelProfile
         : "balanced";
+    const systemInstruction = buildSystemInstruction(solverModelProfile);
     const modelCandidates = pickModelCandidates({
       generationMode,
       solverModelProfile,
@@ -485,7 +460,7 @@ export async function POST(request: Request) {
             temperature: 0.2,
             maxOutputTokens: 3000,
           },
-          systemInstruction: SYSTEM_PROMPT,
+          systemInstruction,
         });
         const result = await model.generateContent(contents);
         const generatedText = result.response.text()?.trim();
