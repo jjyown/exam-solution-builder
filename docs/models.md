@@ -1,6 +1,7 @@
 # 현재 사용 모델 목록 (Gemini / GPT)
 
 이 문서는 최신 코드 기준으로, 해설 제작 파이프라인에서 사용하는 모델과 환경변수 키를 정리합니다.  
+**운영자 단계별 세팅(처음부터 끝까지)**은 [setup-operator-steps.md](./setup-operator-steps.md)를 보세요.  
 전체 동선(영역 지정→게이트→내보내기)은 [workflow-image-to-docx.md](./workflow-image-to-docx.md)를 함께 보세요.
 
 ## 1) Gemini 모델

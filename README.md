@@ -14,6 +14,12 @@
 - 작업 완료 저장: `작업 완료` 폴더에 PDF + TXT 자동 저장
 - 백엔드 API: Gemini/OpenAI 기반 해설 생성
 
+## 문서
+
+- **운영·세팅 단계별 가이드(API 키, 해설 옵션과 env 매핑, 비용·교차검증):** [docs/setup-operator-steps.md](docs/setup-operator-steps.md)
+- 모델·환경변수 상세: [docs/models.md](docs/models.md)
+- 영역 지정→DOCX 동선·품질: [docs/workflow-image-to-docx.md](docs/workflow-image-to-docx.md)
+
 ## 실행 방법
 
 ### 방법 A) 더블클릭 실행 (권장)

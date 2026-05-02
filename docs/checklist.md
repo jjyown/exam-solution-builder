@@ -1,8 +1,12 @@
 # 하이로드 수학 해설 제작기 체크리스트
 
-- 문서 기준일: 2026-05-01
+- 문서 기준일: 2026-05-02
 
 ## 이번 작업 사이클 체크
+- [x] 운영자 단계별 가이드 `docs/setup-operator-steps.md` 추가(UI–env 매핑·비용·교차검증·동선)
+- [x] `docs/models.md`, `workflow-image-to-docx.md`, `context.md`에서 상기 문서로 링크
+
+## 작업 이력 (누적)
 - [x] 버전 엔트리에 `sourceType`/`runId` 추가(단건/배치/수동 출처 추적)
 - [x] 단건 DOCX 저장 시 현재 문항의 `selectedVersion` 우선 반영
 - [x] 문항별 버전 탭(v1/v2/...) 및 채택 전환(`selectedVersion`) UI 추가

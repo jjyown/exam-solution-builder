@@ -1,6 +1,6 @@
 # 하이로드 수학 해설 제작기 컨텍스트 노트
 
-- 문서 기준일: 2026-05-01
+- 문서 기준일: 2026-05-02
 
 ## 제품/운영 컨텍스트
 - 대상 사용자: 중고등 수학 학원 원장/강사
@@ -38,6 +38,7 @@
 ## 최근 의사결정 로그
 | 날짜 | 결정 | 이유 | 영향 범위 |
 |---|---|---|---|
+| 2026-05-02 | 운영자용 단계 문서 `docs/setup-operator-steps.md` 추가 | UI 해설 옵션과 `GEMINI_MODELS_GENERATE_*` 매핑·비용 낭비 방지를 한 페이지에 정리 | 문서·온보딩 |
 | 2026-05-02 | DOCX 내보내기 실패 완화: `src/lib/exportDocQuality.ts`로 클라이언트·`/api/repair-explanations` 검증 기준 통일, 저장 전 결정적 패치(LaTeX·이미지 부재 문구), repair 프롬프트에 최소 분량·`-` 금지·메타 문구 삭제 명시. UI에 「내보내기 전 점검」으로 위반 문항 사전 표시. | 토의에서 ‘검토 실패’ 원인 불명·운영 부담을 줄이고 자동 보정 성공률을 높이기 위함 | `src/lib/exportDocQuality.ts`, `src/app/page.tsx`, `src/app/api/repair-explanations/route.ts`, `docs/plan.md` |
 | 2026-05-02 | 해설 **최고 신뢰도** 옵션: `EXPLANATION_CROSS_VERIFY=true`일 때 Gemini 1차 초안(품질 게이트 통과) 뒤 OpenAI vision(`OPENAI_MODEL_CROSS_VERIFY`, 기본 `gpt-4o`)으로 교차 검증 1회. 검증 실패 시 1차 초안 유지·경고. 프로필·test/final별 권장 Gemini·GPT 조합은 `docs/models.md` 「4) 최고 신뢰도」에 정리. | 운영자·MCP 토의에서 멀티모델 교차검증으로 오답·논리 오류를 줄이기 위함(100% 보장은 불가, 인간 검수는 별도) | `src/app/api/generate-explanation/route.ts`, `.env.local.example`, `docs/models.md`, `docs/plan.md` |
 | 2026-05-02 | Gemini 할당량·혼잡(429 등) 시 동일 요청에서 후보 모델 순회를 중단하고, 해설 생성에서 형식 재시도 도중에도 동일 신호면 순회를 끊도록 통일한다. OpenAI 폴백에서 형식/정합 실패 시 **2차 호출은 기본 허용**(미설정 포함, `OPENAI_EXPLANATION_FORMAT_RETRY=false`일 때만 생략). 프론트는 단건·배치 생성 중복 클릭을 막고 배치 생성 API 재시도를 1회로 제한한다. | 429 반복 시 호출 증폭(모델 순회·재시도·폴백)으로 할당량 악화와 지연을 키우는 문제를 줄이기 위함 | `src/lib/geminiRateLimit.ts`, `src/app/api/generate-explanation/route.ts`, `src/app/api/precheck-extraction/route.ts`, `src/app/page.tsx`, `.env.local.example`, `docs/plan.md` |
