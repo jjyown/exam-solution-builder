@@ -17,6 +17,38 @@ import { explanationLatexToPlain } from "@/lib/latexToPlainText";
 
 const OUTPUT_DIR = path.join(process.cwd(), "작업 완료");
 
+/** 본문·①~⑤ 등 동아시아 글리프가 깨지지 않도록 기본 런 폰트(Word 기본 한글 폰트) */
+const DOC_BODY_FONT = {
+  ascii: "Malgun Gothic",
+  eastAsia: "Malgun Gothic",
+  hAnsi: "Malgun Gothic",
+} as const;
+
+function bodyTextRun(opts: { text: string; bold?: boolean; size?: number }) {
+  return new TextRun({
+    text: opts.text,
+    bold: opts.bold,
+    size: opts.size,
+    font: DOC_BODY_FONT,
+  });
+}
+
+/** `[문항 3] ... [문항 10] ...` 에서 실제 번호를 유지해 chunk 분리 */
+function splitLabeledQuestionChunks(raw: string): Array<{ label: string; chunk: string }> {
+  const re = /\[문항\s*(\d+)\]\s*/gi;
+  const matches = [...raw.matchAll(re)];
+  if (matches.length === 0) return [];
+  const out: Array<{ label: string; chunk: string }> = [];
+  for (let i = 0; i < matches.length; i += 1) {
+    const label = matches[i][1] ?? String(i + 1);
+    const start = (matches[i].index ?? 0) + matches[i][0].length;
+    const end = i + 1 < matches.length ? (matches[i + 1].index ?? raw.length) : raw.length;
+    const chunk = raw.slice(start, end).trim();
+    if (chunk) out.push({ label, chunk });
+  }
+  return out;
+}
+
 function safeName(value: string) {
   return value.replace(/[<>:"/\\|?*\u0000-\u001F]/g, "_").trim();
 }
@@ -34,16 +66,14 @@ type QuickAnswerKind = "objective" | "short" | "essay";
 
 function parseExplanationBlocks(explanationBody: string, fallbackQuickAnswer: string) {
   const raw = explanationBody.replace(/\r\n/g, "\n");
-  const chunksRaw = raw
-    .split(/\[문항\s*\d+\]/)
-    .map((item) => item.trim())
-    .filter(Boolean);
   const hasLabeledQuestions = /\[문항\s*\d+\]/.test(raw);
 
   const blocks: ExplanationBlock[] = [];
 
-  if (hasLabeledQuestions && chunksRaw.length > 0) {
-    chunksRaw.forEach((chunk, idx) => {
+  if (hasLabeledQuestions) {
+    const labeled = splitLabeledQuestionChunks(raw);
+    labeled.forEach((item) => {
+      const { label, chunk } = item;
       const answerMatch = chunk.match(/\[정답\]\s*([^\n\r]*)/i);
       const answer = answerMatch?.[1]?.trim() || fallbackQuickAnswer || "-";
       const explanationText = chunk
@@ -56,13 +86,13 @@ function parseExplanationBlocks(explanationBody: string, fallbackQuickAnswer: st
         .filter(Boolean);
       const explanationLines = explanationLinesRaw.map((line) => explanationLatexToPlain(line));
       blocks.push({
-        questionLabel: String(idx + 1),
+        questionLabel: label,
         answer,
         explanationLines,
         explanationLinesRaw,
       });
     });
-    return blocks;
+    if (blocks.length > 0) return blocks;
   }
 
   const answers = [...raw.matchAll(/\[정답\]\s*([^\n\r]*)/gi)].map(
@@ -104,23 +134,23 @@ function buildExplanationParagraphs(blocks: ExplanationBlock[]) {
       new Paragraph({
         tabStops: [{ type: TabStopType.LEFT, position: 1800 }],
         children: [
-          new TextRun({ text: `${block.questionLabel})`, bold: true }),
-          new TextRun({ text: "\t[정답] ", bold: true }),
-          new TextRun({ text: quickAnswerText, bold: true }),
+          bodyTextRun({ text: `${block.questionLabel})`, bold: true }),
+          bodyTextRun({ text: "\t[정답] ", bold: true }),
+          bodyTextRun({ text: quickAnswerText, bold: true }),
         ],
         spacing: { before: idx === 0 ? 0 : 220, after: 80 },
       }),
     );
     paragraphs.push(
       new Paragraph({
-        children: [new TextRun({ text: "[해설]", bold: true })],
+        children: [bodyTextRun({ text: "[해설]", bold: true })],
         spacing: { after: 120 },
       }),
     );
     if (block.explanationLinesRaw.length === 0) {
       paragraphs.push(
         new Paragraph({
-          children: [new TextRun({ text: "해설 본문이 제공되지 않았습니다." })],
+          children: [bodyTextRun({ text: "해설 본문이 제공되지 않았습니다." })],
           spacing: { after: 140 },
         }),
       );
@@ -200,7 +230,7 @@ function buildQuickAnswerRows(blocks: ExplanationBlock[]) {
   return entries.map(
     (entry) =>
       new Paragraph({
-        children: [new TextRun({ text: entry, bold: true })],
+        children: [bodyTextRun({ text: entry, bold: true })],
         spacing: { after: 110 },
       }),
   );
@@ -235,20 +265,30 @@ export async function POST(request: Request) {
 
     const quickAnswerRows = buildQuickAnswerRows(blocks);
     const doc = new Document({
+      styles: {
+        default: {
+          document: {
+            run: {
+              font: DOC_BODY_FONT,
+              size: 22,
+            },
+          },
+        },
+      },
       sections: [
         {
           properties: {},
           children: [
             new Paragraph({
               alignment: AlignmentType.CENTER,
-              children: [new TextRun({ text: "수학영역", bold: true, size: 40 })],
+              children: [bodyTextRun({ text: "수학영역", bold: true, size: 40 })],
               spacing: { after: 100 },
             }),
             new Paragraph({
               alignment: AlignmentType.CENTER,
               heading: HeadingLevel.HEADING_1,
               children: [
-                new TextRun({
+                bodyTextRun({
                   text: headerTitle,
                   bold: true,
                 }),
@@ -257,17 +297,17 @@ export async function POST(request: Request) {
             }),
             new Paragraph({
               alignment: AlignmentType.CENTER,
-              children: [new TextRun({ text: docDate })],
+              children: [bodyTextRun({ text: docDate })],
               spacing: { after: 180 },
             }),
             new Paragraph({
               alignment: AlignmentType.LEFT,
-              children: [new TextRun({ text: "[빠른 정답]", bold: true })],
+              children: [bodyTextRun({ text: "[빠른 정답]", bold: true })],
               spacing: { after: 90 },
             }),
             ...(quickAnswerRows.length > 0
               ? quickAnswerRows
-              : [new Paragraph({ children: [new TextRun({ text: "추출/생성된 정답 없음" })] })]),
+              : [new Paragraph({ children: [bodyTextRun({ text: "추출/생성된 정답 없음" })] })]),
           ],
         },
         {
@@ -282,14 +322,14 @@ export async function POST(request: Request) {
           children: [
             new Paragraph({
               heading: HeadingLevel.HEADING_2,
-              children: [new TextRun({ text: "[해설]", bold: true })],
+              children: [bodyTextRun({ text: "[해설]", bold: true })],
               spacing: { before: 180, after: 180 },
             }),
             ...(explanationParagraphs.length > 0
               ? explanationParagraphs
               : [
                   new Paragraph({
-                    children: [new TextRun({ text: "해설 본문이 제공되지 않았습니다." })],
+                    children: [bodyTextRun({ text: "해설 본문이 제공되지 않았습니다." })],
                   }),
                 ]),
           ],

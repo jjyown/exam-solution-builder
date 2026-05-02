@@ -14,6 +14,12 @@ import {
 } from "docx";
 import { explanationLatexToPlain } from "./latexToPlainText";
 
+const DOC_BODY_FONT = {
+  ascii: "Malgun Gothic",
+  eastAsia: "Malgun Gothic",
+  hAnsi: "Malgun Gothic",
+} as const;
+
 /** `\left`/`\right` 등은 단순 괄호로만 취급 */
 function preprocessInlineMath(inner: string): string {
   return inner
@@ -354,14 +360,14 @@ function mathFromInner(inner: string): MathComponent[] {
 
 function mathZoneToParagraphChild(inner: string): ParagraphChild {
   const trimmed = inner.trim();
-  if (!trimmed.length) return new TextRun("");
+  if (!trimmed.length) return new TextRun({ text: "", font: DOC_BODY_FONT });
   try {
     const comps = mathFromInner(trimmed);
     if (comps.length) return new Math({ children: comps });
   } catch {
     /* fall through */
   }
-  return new TextRun(explanationLatexToPlain(`$${trimmed}$`));
+  return new TextRun({ text: explanationLatexToPlain(`$${trimmed}$`), font: DOC_BODY_FONT });
 }
 
 type LineSeg = { kind: "text" | "math"; value: string };
@@ -405,16 +411,16 @@ export function explanationLineToParagraphChildren(line: string): ParagraphChild
   const segs = segmentLineByDollars(line);
   const hasMath = segs.some((s) => s.kind === "math" && s.value.trim().length > 0);
   if (!hasMath) {
-    return [new TextRun(explanationLatexToPlain(line))];
+    return [new TextRun({ text: explanationLatexToPlain(line), font: DOC_BODY_FONT })];
   }
   const children: ParagraphChild[] = [];
   for (const seg of segs) {
     if (seg.kind === "text") {
-      if (seg.value.length) children.push(new TextRun(seg.value));
+      if (seg.value.length) children.push(new TextRun({ text: seg.value, font: DOC_BODY_FONT }));
     } else if (seg.value.trim().length) {
       children.push(mathZoneToParagraphChild(seg.value));
     }
   }
-  if (children.length === 0) children.push(new TextRun(""));
+  if (children.length === 0) children.push(new TextRun({ text: "", font: DOC_BODY_FONT }));
   return children;
 }
