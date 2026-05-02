@@ -722,6 +722,7 @@ export default function Home() {
   const [rawResponse, setRawResponse] = useState("");
   const [qualityWarnings, setQualityWarnings] = useState<string[]>([]);
   const [ruleAnalyzeInput, setRuleAnalyzeInput] = useState("");
+  const [ruleAnalyzeInputKind, setRuleAnalyzeInputKind] = useState<"weak" | "good">("weak");
   const [ruleTargetStyleInput, setRuleTargetStyleInput] = useState("");
   const [ruleAdminTokenInput, setRuleAdminTokenInput] = useState("");
   const [ruleAnalyzeImageBase64, setRuleAnalyzeImageBase64] = useState("");
@@ -2586,6 +2587,7 @@ export default function Home() {
         },
         body: JSON.stringify({
           weakExplanation: weakText,
+          inputKind: ruleAnalyzeInputKind,
           targetStyleHint: ruleTargetStyleInput.trim(),
           profile: solverModelProfile,
           referenceImageBase64: ruleAnalyzeImageBase64 || undefined,
@@ -3920,24 +3922,51 @@ export default function Home() {
             >
               <p className="font-semibold">규칙 자동 업데이트 (Supabase)</p>
               <p className="mt-1 text-[11px] text-indigo-800">
-                아쉬운 해설 또는 좋은 해설 예시(이미지)를 입력하면 모델이 규칙을 만들고, Supabase
-                `prompt_rules`에 자동 반영합니다.
+                붙여 넣은 내용이 <strong>아쉬운 해설</strong>인지 <strong>좋은 예시</strong>인지 먼저
+                고르세요. 예전에는 입력을 항상 “좋은 예시”로만 처리해 규칙이 엉키는 경우가
+                있었습니다.
               </p>
+              <div className="mt-2 flex flex-wrap gap-3 text-[11px] text-indigo-900">
+                <label className="flex cursor-pointer items-center gap-1.5">
+                  <input
+                    type="radio"
+                    name="ruleAnalyzeInputKind"
+                    checked={ruleAnalyzeInputKind === "weak"}
+                    onChange={() => setRuleAnalyzeInputKind("weak")}
+                    className="accent-indigo-600"
+                  />
+                  아쉬운 해설 → 문제 패턴을 금지·교정하는 규칙
+                </label>
+                <label className="flex cursor-pointer items-center gap-1.5">
+                  <input
+                    type="radio"
+                    name="ruleAnalyzeInputKind"
+                    checked={ruleAnalyzeInputKind === "good"}
+                    onChange={() => setRuleAnalyzeInputKind("good")}
+                    className="accent-indigo-600"
+                  />
+                  좋은 예시 → 이 스타일을 따르라는 규칙
+                </label>
+              </div>
               <textarea
                 value={ruleAnalyzeInput}
                 onChange={(event) => setRuleAnalyzeInput(event.target.value)}
                 maxLength={4000}
-                placeholder="예: 근사값(약 1.414, ≈)으로 풀고 정석 전개를 생략한 해설을 여기에 붙여넣으세요."
+                placeholder={
+                  ruleAnalyzeInputKind === "weak"
+                    ? "예: 근사값(≈)으로 풀거나 2^(1/2)만 쓴 장황한 해설을 붙여 넣으세요."
+                    : "예: 교재처럼 짧은 수식 연쇄로 잘 쓴 해설 전체를 붙여 넣으세요."
+                }
                 className="mt-2 min-h-[110px] w-full rounded-md border border-indigo-200 bg-white p-2 text-xs leading-5 text-slate-700"
               />
               <p className="mt-1 text-[11px] text-indigo-700">
                 해설 입력 길이: {ruleAnalyzeInput.length}/4000
               </p>
               <label className="mt-2 block text-[11px] font-semibold text-indigo-800">
-                해설 이미지 업로드(좋은 예시, OCR 자동 추출)
+                해설 이미지 업로드(OCR 후 위에서 고른 종류로 분석)
               </label>
               <p className="mt-1 text-[11px] text-indigo-700">
-                파일 선택 또는 이 영역에서 Ctrl+V로 클립보드 이미지를 바로 붙여넣을 수 있습니다.
+                모범 해설 스캔이면 위에서「좋은 예시」를 선택하세요. 파일 선택 또는 Ctrl+V 붙여넣기.
               </p>
               <input
                 type="file"
@@ -3991,7 +4020,9 @@ export default function Home() {
               >
                 {isApplyingRuleFeedback
                   ? "규칙 분석/적용 중..."
-                  : "아쉬운 해설 분석 후 규칙 자동 반영"}
+                  : ruleAnalyzeInputKind === "weak"
+                    ? "금지·교정 규칙 생성 후 Supabase 반영"
+                    : "스타일 규칙 생성 후 Supabase 반영"}
               </button>
               <button
                 type="button"
