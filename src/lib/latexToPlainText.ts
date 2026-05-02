@@ -1,3 +1,5 @@
+import { loosenExplanationParagraphs } from "./explanationParagraphBreaks";
+
 /**
  * KaTeX/LaTeX 스타일 수식을 DOCX·검증용 한 줄 평문으로 변환한다.
  * (save-result / exportDocQuality / 내보내기 게이트 공용)
@@ -80,5 +82,6 @@ export function explanationLatexToPlain(value: string): string {
   s = simplifyLatexContent(s);
   s = normalizeIntegerScripts(s);
   s = s.replace(/[ \t\f\v]+/g, " ").replace(/\n{3,}/g, "\n\n");
+  s = loosenExplanationParagraphs(s);
   return s.trim();
 }

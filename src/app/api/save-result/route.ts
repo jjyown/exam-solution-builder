@@ -12,6 +12,7 @@ import {
   SectionType,
   TabStopType,
 } from "docx";
+import { explanationLineToParagraphChildren } from "@/lib/docxOmmlBuilder";
 import { explanationLatexToPlain } from "@/lib/latexToPlainText";
 
 const OUTPUT_DIR = path.join(process.cwd(), "작업 완료");
@@ -20,65 +21,68 @@ function safeName(value: string) {
   return value.replace(/[<>:"/\\|?*\u0000-\u001F]/g, "_").trim();
 }
 
-function simplifyMathText(value: string) {
-  return explanationLatexToPlain(value);
-}
-
 type ExplanationBlock = {
   questionLabel: string;
   answer: string;
+  /** 빠른정답 분류 등 검증용 평문 줄 */
   explanationLines: string[];
+  /** DOCX OMML용 — `$...$` 보존 */
+  explanationLinesRaw: string[];
 };
 
 type QuickAnswerKind = "objective" | "short" | "essay";
 
 function parseExplanationBlocks(explanationBody: string, fallbackQuickAnswer: string) {
-  const normalized = simplifyMathText(explanationBody);
-  const chunks = normalized
+  const raw = explanationBody.replace(/\r\n/g, "\n");
+  const chunksRaw = raw
     .split(/\[문항\s*\d+\]/)
     .map((item) => item.trim())
     .filter(Boolean);
-  const hasLabeledQuestions = /\[문항\s*\d+\]/.test(normalized);
+  const hasLabeledQuestions = /\[문항\s*\d+\]/.test(raw);
 
   const blocks: ExplanationBlock[] = [];
 
-  if (hasLabeledQuestions && chunks.length > 0) {
-    chunks.forEach((chunk, idx) => {
+  if (hasLabeledQuestions && chunksRaw.length > 0) {
+    chunksRaw.forEach((chunk, idx) => {
       const answerMatch = chunk.match(/\[정답\]\s*([^\n\r]*)/i);
       const answer = answerMatch?.[1]?.trim() || fallbackQuickAnswer || "-";
       const explanationText = chunk
         .replace(/\[정답\]\s*[^\n\r]*/i, "")
         .replace(/\[해설\]/gi, "")
         .trim();
-      const explanationLines = explanationText
+      const explanationLinesRaw = explanationText
         .split("\n")
         .map((line) => line.trim())
         .filter(Boolean);
+      const explanationLines = explanationLinesRaw.map((line) => explanationLatexToPlain(line));
       blocks.push({
         questionLabel: String(idx + 1),
         answer,
         explanationLines,
+        explanationLinesRaw,
       });
     });
     return blocks;
   }
 
-  const answers = [...normalized.matchAll(/\[정답\]\s*([^\n\r]*)/gi)].map(
+  const answers = [...raw.matchAll(/\[정답\]\s*([^\n\r]*)/gi)].map(
     (item) => item[1]?.trim() || "-",
   );
-  const explanations = [...normalized.matchAll(/\[해설\]\s*([\s\S]*?)(?=\n\s*\[정답\]|\s*$)/gi)].map(
+  const explanationsRaw = [...raw.matchAll(/\[해설\]\s*([\s\S]*?)(?=\n\s*\[정답\]|\s*$)/gi)].map(
     (item) =>
       item[1]
         .split("\n")
         .map((line) => line.trim())
         .filter(Boolean),
   );
-  const maxLen = Math.max(answers.length, explanations.length, 1);
+  const maxLen = Math.max(answers.length, explanationsRaw.length, 1);
   for (let i = 0; i < maxLen; i += 1) {
+    const explanationLinesRaw = explanationsRaw[i] || [];
     blocks.push({
       questionLabel: String(i + 1),
       answer: answers[i] || (i === 0 ? fallbackQuickAnswer || "-" : "-"),
-      explanationLines: explanations[i] || [],
+      explanationLines: explanationLinesRaw.map((line) => explanationLatexToPlain(line)),
+      explanationLinesRaw,
     });
   }
   return blocks;
@@ -113,7 +117,7 @@ function buildExplanationParagraphs(blocks: ExplanationBlock[]) {
         spacing: { after: 120 },
       }),
     );
-    if (block.explanationLines.length === 0) {
+    if (block.explanationLinesRaw.length === 0) {
       paragraphs.push(
         new Paragraph({
           children: [new TextRun({ text: "해설 본문이 제공되지 않았습니다." })],
@@ -122,10 +126,10 @@ function buildExplanationParagraphs(blocks: ExplanationBlock[]) {
       );
       return;
     }
-    block.explanationLines.forEach((line) => {
+    block.explanationLinesRaw.forEach((line) => {
       paragraphs.push(
         new Paragraph({
-          children: [new TextRun({ text: line })],
+          children: explanationLineToParagraphChildren(line),
           spacing: { after: 140 },
         }),
       );
