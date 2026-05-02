@@ -1,0 +1,105 @@
+/**
+ * DOCX 내보내기 전 클라이언트·repair API 공통 품질 규칙.
+ * page.tsx / repair-explanations 가 동일 기준을 쓰도록 단일화한다.
+ */
+
+export type ExportDocEntry = {
+  questionNo: string;
+  quickAnswer: string;
+  body: string;
+};
+
+export const DEFAULT_EXPLANATION_BODY = `해설 생성 버튼을 누르면 이 영역에 결과가 표시됩니다.
+
+[해설]
+문제의 핵심 개념과 단계별 풀이를 학생 눈높이에 맞게 작성합니다.`;
+
+const PLACEHOLDER_TRIM = DEFAULT_EXPLANATION_BODY.trim();
+
+export function isPlaceholderExplanationBody(body: string) {
+  const t = body.trim();
+  if (!t) return true;
+  return t === PLACEHOLDER_TRIM;
+}
+
+export const EXPORT_LATEX_PATTERN =
+  /\$\$?[^$]*\$?\$?|\\(frac|sqrt|binom|left|right|cdot|times|div|pi|sin|cos|tan|log|ln|alpha|beta|gamma|theta)\b|\\[()[\]{}]/i;
+
+export const EXPORT_ESTIMATION_PATTERN =
+  /추정|근사|어림|대략|감으로|찍어서|적당히|approx|approximately|대충/i;
+
+const IMAGE_ABSENT_PATTERN = /이미지가\s*제공되지\s*않/i;
+
+const MIN_EXPLANATION_BODY_LENGTH = 35;
+
+/** LaTeX·불필요 공백 제거(보정 후처리·저장 전 정제에 사용) */
+export function sanitizeExportPlainText(value: string): string {
+  let s = value.replace(/\r\n/g, "\n");
+  s = s.replace(/\$\$[\s\S]*?\$\$/g, " ");
+  s = s.replace(/\$([^$\n]+)\$/g, " ");
+  s = s.replace(
+    /\\(frac|sqrt|binom|left|right|cdot|times|div|pi|sin|cos|tan|log|ln|alpha|beta|gamma|theta|leq|geq|neq|pm|cdots|dots|times|div)\b/gi,
+    "",
+  );
+  s = s.replace(/\\[()[\]{}]/g, "");
+  s = s.replace(/[ \t\f\v]+/g, " ").replace(/\n{3,}/g, "\n\n");
+  return s.trim();
+}
+
+/** 클라이언트 내보내기 직전에 결정적으로 적용 가능한 최소 패치 */
+export function applyDeterministicExportPatches(entries: ExportDocEntry[]): ExportDocEntry[] {
+  return entries.map((entry) => {
+    let body = entry.body;
+    body = body.replace(IMAGE_ABSENT_PATTERN, "");
+    body = body.replace(/\s*\.\s*\.\s*\.\s*$/g, "").trim();
+    return {
+      questionNo: entry.questionNo,
+      quickAnswer: sanitizeExportPlainText(entry.quickAnswer),
+      body: sanitizeExportPlainText(body),
+    };
+  });
+}
+
+export function validateExportDocEntries(entries: ExportDocEntry[]): { ok: boolean; issues: string[] } {
+  const issues: string[] = [];
+
+  entries.forEach((entry) => {
+    const quick = entry.quickAnswer.trim();
+    const body = entry.body.trim();
+    if (!quick || quick === "-") {
+      issues.push(`${entry.questionNo}번: [정답] 값이 비어 있습니다.`);
+    }
+    if (isPlaceholderExplanationBody(body)) {
+      issues.push(`${entry.questionNo}번: [해설] 본문이 비어 있거나 기본 템플릿 상태입니다.`);
+    }
+    if (body.length < MIN_EXPLANATION_BODY_LENGTH) {
+      issues.push(`${entry.questionNo}번: [해설] 분량이 너무 짧습니다.`);
+    }
+    if (EXPORT_LATEX_PATTERN.test(`${quick}\n${body}`)) {
+      issues.push(`${entry.questionNo}번: LaTeX 표기(\\frac, $, \\sqrt 등)가 남아 있습니다.`);
+    }
+    if (EXPORT_ESTIMATION_PATTERN.test(body)) {
+      issues.push(`${entry.questionNo}번: 추정/근사 중심 풀이가 감지되었습니다.`);
+    }
+    if (IMAGE_ABSENT_PATTERN.test(body)) {
+      issues.push(`${entry.questionNo}번: 이미지 부재 문구가 포함되어 있습니다.`);
+    }
+  });
+
+  return { ok: issues.length === 0, issues };
+}
+
+/** 자동 보정 결과에 대한 비차단 경고(장문 등) */
+export function getExportRepairWarnings(entry: ExportDocEntry): string[] {
+  const warnings: string[] = [];
+  const sentenceCount =
+    entry.body
+      .split(/[\n.!?]+/)
+      .map((line) => line.trim())
+      .filter(Boolean).length || 0;
+  const methodCount = (entry.body.match(/\[방법\s*\d+\]/g) ?? []).length;
+  if (methodCount <= 1 && sentenceCount > 12) {
+    warnings.push("과도한 장문");
+  }
+  return warnings;
+}

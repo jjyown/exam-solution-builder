@@ -1,11 +1,11 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { NextResponse } from "next/server";
-
-type ExportDocEntry = {
-  questionNo: string;
-  quickAnswer: string;
-  body: string;
-};
+import type { ExportDocEntry } from "@/lib/exportDocQuality";
+import {
+  getExportRepairWarnings,
+  sanitizeExportPlainText,
+  validateExportDocEntries,
+} from "@/lib/exportDocQuality";
 
 type RepairRequestBody = {
   entries?: ExportDocEntry[];
@@ -44,39 +44,18 @@ function parseJsonSafely(raw: string) {
   }
 }
 
-function sanitizeText(value: string) {
-  return value
-    .replace(/\r\n/g, "\n")
-    .replace(/\$\$?/g, "")
-    .replace(/\\(frac|sqrt|binom|left|right|cdot|times|div|pi|sin|cos|tan|log|ln|alpha|beta|gamma|theta)\b/gi, "")
-    .replace(/\\[()[\]{}]/g, "")
-    .trim();
-}
-
-function validateRepairedEntry(entry: ExportDocEntry) {
-  const fatalIssues: string[] = [];
-  const warnings: string[] = [];
-  const text = `${entry.quickAnswer}\n${entry.body}`;
-  if (
-    /\$\$?[^$]*\$?\$?|\\(frac|sqrt|binom|left|right|cdot|times|div|pi|sin|cos|tan|log|ln|alpha|beta|gamma|theta)\b|\\[()[\]{}]/i.test(
-      text,
-    )
-  ) {
-    fatalIssues.push("LaTeX 흔적");
-  }
-  if (/추정|근사|어림|대략|감으로|찍어서|적당히|approx|approximately|≈/i.test(entry.body)) {
-    fatalIssues.push("근삿값/추정 표현");
-  }
-  const sentenceCount =
-    entry.body
-      .split(/[\n.!?]+/)
-      .map((line) => line.trim())
-      .filter(Boolean).length || 0;
-  const methodCount = (entry.body.match(/\[방법\s*\d+\]/g) ?? []).length;
-  if (methodCount <= 1 && sentenceCount > 12) {
-    warnings.push("과도한 장문");
-  }
-  return { ok: fatalIssues.length === 0, fatalIssues, warnings };
+function normalizeRepairedEntries(items: unknown[]): ExportDocEntry[] {
+  return items
+    .map((item) => {
+      const row = item as ExportDocEntry;
+      return {
+        questionNo: String(row.questionNo || "").trim(),
+        quickAnswer: sanitizeExportPlainText(String(row.quickAnswer || "").trim()) || "-",
+        body:
+          sanitizeExportPlainText(String(row.body || "").trim()) || "(해설 본문 없음)",
+      };
+    })
+    .filter((item) => item.questionNo);
 }
 
 async function repairWithOpenAi(params: {
@@ -136,17 +115,17 @@ export async function POST(request: Request) {
       "반드시 JSON 하나만 반환하고, JSON 외 문장은 절대 출력하지 마.",
       '형식: {"entries":[{"questionNo":"1","quickAnswer":"...","body":"..."}]}',
       "",
-      "[필수 규칙]",
+      "[필수 규칙 — 클라이언트 검증과 동일]",
       "- 내부적으로 '중고등학교 20년 경력 교사'와 '문제 출제위원' 관점 토론을 거쳐 최종본을 작성.",
       "- 토론 과정은 출력하지 말고 최종 결과만 출력.",
-      "- quickAnswer, body는 비우지 마.",
-      "- LaTeX 표기($, \\frac, \\sqrt, \\binom, \\left, \\right 등) 금지.",
-      "- 중고등학교 교육과정의 일반적인 풀이로 재작성.",
-      "- 추정/근사/어림/대충/감으로 계산 방식 금지.",
-      "- [해설] 본문은 학생이 따라갈 수 있게 단계형 문장으로 작성.",
-      "- 단일 풀이 문제는 과도한 장문을 피하고 핵심 수식과 결론 중심으로 4~8문장 내외로 정리.",
-      "- 근사값이 꼭 필요한 문제여도 '추정한다' 같은 표현 대신 명확한 근거를 제시.",
-      "- 정답 값(quickAnswer)은 의미를 바꾸지 말고 유지.",
+      "- quickAnswer는 빈 문자열이나 '-'만 두지 마. 객관식이면 1~5, 단답형이면 최종 값/식, 서술형 지시가 명확하면 '해설참고' 등 입력과 일관되게.",
+      "- body는 공백 포함 최소 35자 이상. 부족하면 풀이 단계를 보강해 길이를 채워.",
+      "- '이미지가 제공되지 않았다', '이미지 부재' 등 메타 문구는 삭제하고 실제 풀이만 남겨.",
+      "- LaTeX 표기($, \\frac, \\sqrt, \\binom, \\left, \\right 등) 금지. 일반 한글·숫자·기호로만.",
+      "- 중고등학교 교육과정 범위의 정석 풀이.",
+      "- 추정/근사/어림/대충/감으로/approx 등 근사 중심 표현 금지. 필요하면 부등식·범위로 엄밀히.",
+      "- 단일 풀이는 핵심 수식과 결론 중심 4~8문장 내외를 권장(다중 [방법 n]이면 예외).",
+      "- 동일 questionNo는 입력과 맞출 것. 정답 의미를 바꾸지 말 것(오류 수정만).",
       "",
       "[입력 문항]",
       JSON.stringify(entries),
@@ -164,33 +143,19 @@ export async function POST(request: Request) {
           continue;
         }
         const parsed = parseJsonSafely(json);
-        const repaired = (parsed.entries || [])
-          .map((item) => ({
-            questionNo: String(item.questionNo || "").trim(),
-            quickAnswer: sanitizeText(String(item.quickAnswer || "").trim()) || "-",
-            body: sanitizeText(String(item.body || "").trim()) || "(해설 본문 없음)",
-          }))
-          .filter((item) => item.questionNo);
+        const repaired = normalizeRepairedEntries(parsed.entries || []);
         if (repaired.length === 0) {
           failures.push(`${modelName}: 보정 결과 비어 있음`);
           continue;
         }
-        const invalids = repaired
-          .map((entry) => ({ entry, check: validateRepairedEntry(entry) }))
-          .filter((item) => !item.check.ok);
-        if (invalids.length > 0) {
-          failures.push(
-            `${modelName}: 보정 후 규칙 미통과 - ${invalids
-              .map((item) => `${item.entry.questionNo}번(${item.check.fatalIssues.join(", ")})`)
-              .join(" / ")}`,
-          );
+        const gate = validateExportDocEntries(repaired);
+        if (!gate.ok) {
+          failures.push(`${modelName}: 보정 후 규칙 미통과 - ${gate.issues.join(" | ")}`);
           continue;
         }
-        const warnings = repaired
-          .map((entry) => ({ entry, check: validateRepairedEntry(entry) }))
-          .flatMap((item) =>
-            item.check.warnings.map((warning) => `${item.entry.questionNo}번(${warning})`),
-          );
+        const warnings = repaired.flatMap((entry) =>
+          getExportRepairWarnings(entry).map((warning) => `${entry.questionNo}번(${warning})`),
+        );
         return NextResponse.json({ entries: repaired, model: modelName, warnings });
       } catch (error) {
         const message = error instanceof Error ? error.message : "알 수 없는 오류";
@@ -210,22 +175,12 @@ export async function POST(request: Request) {
           failures.push(`openai:${openAiModel}: JSON 추출 실패`);
         } else {
           const parsed = parseJsonSafely(json);
-          const repaired = (parsed.entries || [])
-            .map((item) => ({
-              questionNo: String(item.questionNo || "").trim(),
-              quickAnswer: sanitizeText(String(item.quickAnswer || "").trim()) || "-",
-              body: sanitizeText(String(item.body || "").trim()) || "(해설 본문 없음)",
-            }))
-            .filter((item) => item.questionNo);
-          const invalids = repaired
-            .map((entry) => ({ entry, check: validateRepairedEntry(entry) }))
-            .filter((item) => !item.check.ok);
-          if (repaired.length > 0 && invalids.length === 0) {
-            const warnings = repaired
-              .map((entry) => ({ entry, check: validateRepairedEntry(entry) }))
-              .flatMap((item) =>
-                item.check.warnings.map((warning) => `${item.entry.questionNo}번(${warning})`),
-              );
+          const repaired = normalizeRepairedEntries(parsed.entries || []);
+          const gate = validateExportDocEntries(repaired);
+          if (repaired.length > 0 && gate.ok) {
+            const warnings = repaired.flatMap((entry) =>
+              getExportRepairWarnings(entry).map((warning) => `${entry.questionNo}번(${warning})`),
+            );
             return NextResponse.json({
               entries: repaired,
               model: `${openAiModel} (openai-fallback)`,
@@ -235,11 +190,7 @@ export async function POST(request: Request) {
           if (repaired.length === 0) {
             failures.push(`openai:${openAiModel}: 보정 결과 비어 있음`);
           } else {
-            failures.push(
-              `openai:${openAiModel}: 보정 후 규칙 미통과 - ${invalids
-                .map((item) => `${item.entry.questionNo}번(${item.check.fatalIssues.join(", ")})`)
-                .join(" / ")}`,
-            );
+            failures.push(`openai:${openAiModel}: 보정 후 규칙 미통과 - ${gate.issues.join(" | ")}`);
           }
         }
       } catch (error) {

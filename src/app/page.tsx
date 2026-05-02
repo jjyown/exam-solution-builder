@@ -9,6 +9,14 @@ import { InlineMath, BlockMath } from "react-katex";
 import "react-image-crop/dist/ReactCrop.css";
 import "katex/dist/katex.min.css";
 
+import type { ExportDocEntry } from "@/lib/exportDocQuality";
+import {
+  applyDeterministicExportPatches,
+  DEFAULT_EXPLANATION_BODY as DEFAULT_BODY,
+  isPlaceholderExplanationBody,
+  validateExportDocEntries,
+} from "@/lib/exportDocQuality";
+
 type ParsedExplanation = {
   quickAnswer: string;
   body: string;
@@ -42,12 +50,6 @@ type PromptRuleVersion = {
   is_active: boolean;
   updated_at: string;
   extra_constraints_preview: string;
-};
-
-type ExportDocEntry = {
-  questionNo: string;
-  quickAnswer: string;
-  body: string;
 };
 
 type VisionPrecheckResponse = {
@@ -233,16 +235,10 @@ type ExplanationWorkflowStep =
   | "confirm_quick_answer"
   | "generate_sheet";
 
-const DEFAULT_BODY = `해설 생성 버튼을 누르면 이 영역에 결과가 표시됩니다.
-
-[해설]
-문제의 핵심 개념과 단계별 풀이를 학생 눈높이에 맞게 작성합니다.`;
 const RULE_ADMIN_TOKEN_STORAGE_KEY = "promptRulesAdminToken";
 
 function hasCompletedExplanationBody(body: string) {
-  const t = body.trim();
-  if (!t) return false;
-  return t !== DEFAULT_BODY.trim();
+  return !isPlaceholderExplanationBody(body);
 }
 
 function clampPixelCropToSize(crop: PixelCrop, width: number, height: number): PixelCrop {
@@ -303,39 +299,6 @@ function ratioCropToPixelCrop(
     safeW,
     safeH,
   );
-}
-
-function validateDocEntriesBeforeExport(entries: ExportDocEntry[]) {
-  const issues: string[] = [];
-  const latexPattern =
-    /\$\$?[^$]*\$?\$?|\\(frac|sqrt|binom|left|right|cdot|times|div|pi|sin|cos|tan|log|ln|alpha|beta|gamma|theta)\b|\\[()[\]{}]/i;
-  const estimationPattern =
-    /추정|근사|어림|대략|감으로|찍어서|적당히|approx|approximately|대충/i;
-
-  entries.forEach((entry) => {
-    const quick = entry.quickAnswer.trim();
-    const body = entry.body.trim();
-    if (!quick || quick === "-") {
-      issues.push(`${entry.questionNo}번: [정답] 값이 비어 있습니다.`);
-    }
-    if (!hasCompletedExplanationBody(body)) {
-      issues.push(`${entry.questionNo}번: [해설] 본문이 비어 있거나 기본 템플릿 상태입니다.`);
-    }
-    if (body.length < 35) {
-      issues.push(`${entry.questionNo}번: [해설] 분량이 너무 짧습니다.`);
-    }
-    if (latexPattern.test(`${quick}\n${body}`)) {
-      issues.push(`${entry.questionNo}번: LaTeX 표기(\\frac, $, \\sqrt 등)가 남아 있습니다.`);
-    }
-    if (estimationPattern.test(body)) {
-      issues.push(`${entry.questionNo}번: 추정/근사 중심 풀이가 감지되었습니다.`);
-    }
-    if (/이미지가\s*제공되지\s*않/.test(body)) {
-      issues.push(`${entry.questionNo}번: 이미지 부재 문구가 포함되어 있습니다.`);
-    }
-  });
-
-  return { ok: issues.length === 0, issues };
 }
 
 async function parseApiErrorMessage(response: Response, fallback: string) {
@@ -941,6 +904,37 @@ export default function Home() {
     (targetQuestionNo: string) => pickSelectedVersionForQuestion(questionVersionMap[targetQuestionNo]),
     [questionVersionMap],
   );
+
+  const exportDocEntriesForSave = useMemo((): ExportDocEntry[] => {
+    return cardQuestionNos
+      .map((no) => {
+        const draft = questionCardDraftMap[no];
+        const selectedVersion = pickSelectedVersionForQuestion(questionVersionMap[no]);
+        if (!draft && !selectedVersion) return null;
+        const quick = (draft?.quickAnswer || selectedVersion?.quickAnswer || "-").trim() || "-";
+        const baseBody = draft?.explanationBody || selectedVersion?.explanationBody || "";
+        const selectedIndexes =
+          draft?.methodSelectionPolicy === "selected"
+            ? draft.selectedMethodIndexes
+            : splitMethodBlocks(baseBody).methods.map((_, index) => index);
+        const body = buildSelectedExplanationBody(
+          baseBody,
+          selectedIndexes,
+          draft?.representativeMethodIndex ?? selectedVersion?.representativeMethodIndex ?? null,
+        );
+        return {
+          questionNo: no,
+          quickAnswer: quick,
+          body: body.trim() || baseBody.trim() || "(해설 본문 없음)",
+        };
+      })
+      .filter(Boolean) as ExportDocEntry[];
+  }, [cardQuestionNos, questionCardDraftMap, questionVersionMap]);
+
+  const exportGatePreview = useMemo(() => {
+    const patched = applyDeterministicExportPatches(exportDocEntriesForSave);
+    return validateExportDocEntries(patched);
+  }, [exportDocEntriesForSave]);
 
   const pushQuestionVersion = useCallback(
     (
@@ -2768,37 +2762,14 @@ export default function Home() {
       setIsExportChecking(true);
       setErrorMessage("");
       setSuccessMessage("");
-      const docEntries = cardQuestionNos
-        .map((no) => {
-          const draft = questionCardDraftMap[no];
-          const selectedVersion = getSelectedVersionForQuestion(no);
-          if (!draft && !selectedVersion) return null;
-          const quick = (draft?.quickAnswer || selectedVersion?.quickAnswer || "-").trim() || "-";
-          const baseBody = draft?.explanationBody || selectedVersion?.explanationBody || "";
-          const selectedIndexes =
-            draft?.methodSelectionPolicy === "selected"
-              ? draft.selectedMethodIndexes
-              : splitMethodBlocks(baseBody).methods.map((_, index) => index);
-          const body = buildSelectedExplanationBody(
-            baseBody,
-            selectedIndexes,
-            draft?.representativeMethodIndex ?? selectedVersion?.representativeMethodIndex ?? null,
-          );
-          return {
-            questionNo: no,
-            quickAnswer: quick,
-            body: body.trim() || baseBody.trim() || "(해설 본문 없음)",
-          };
-        })
-        .filter(Boolean) as ExportDocEntry[];
 
-      if (docEntries.length === 0) {
+      if (exportDocEntriesForSave.length === 0) {
         setErrorMessage("DOCX에 넣을 문항 카드가 없습니다. 카드 생성/선택 상태를 확인해 주세요.");
         return;
       }
 
-      let exportEntries = docEntries;
-      let exportValidation = validateDocEntriesBeforeExport(exportEntries);
+      let exportEntries = applyDeterministicExportPatches(exportDocEntriesForSave);
+      let exportValidation = validateExportDocEntries(exportEntries);
       if (!exportValidation.ok) {
         const repairRes = await fetch("/api/repair-explanations", {
           method: "POST",
@@ -2820,9 +2791,12 @@ export default function Home() {
             (item) => repairedMap.get(String(item.questionNo)) ?? item,
           );
         }
-        exportValidation = validateDocEntriesBeforeExport(exportEntries);
+        exportEntries = applyDeterministicExportPatches(exportEntries);
+        exportValidation = validateExportDocEntries(exportEntries);
         if (!exportValidation.ok) {
-          throw new Error("자동 보정 후에도 내보내기 규칙을 만족하지 못했습니다.");
+          throw new Error(
+            `자동 보정 후에도 내보내기 규칙을 만족하지 못했습니다.\n${exportValidation.issues.join("\n")}`,
+          );
         }
         setSuccessMessage("내보내기 전 자동 보정을 적용했습니다. DOCX를 생성합니다...");
       } else {
@@ -2833,7 +2807,7 @@ export default function Home() {
       formData.append("examName", selectedExam || "직접업로드");
       formData.append(
         "questionNo",
-        `통합_${docEntries[0]?.questionNo || "1"}-${docEntries[docEntries.length - 1]?.questionNo || "1"}`,
+        `통합_${exportEntries[0]?.questionNo || "1"}-${exportEntries[exportEntries.length - 1]?.questionNo || "1"}`,
       );
       formData.append("quickAnswer", "문항별 정답은 해설 본문의 [정답]을 확인하세요.");
       formData.append(
@@ -4238,8 +4212,33 @@ export default function Home() {
             </>
           )}
 
-          {currentStep === 3 && hasGeneratedResult && (
+          {currentStep === 3 && exportDocEntriesForSave.length > 0 && (
             <div className="mt-4 grid grid-cols-1 gap-3">
+              <div
+                className={`rounded-md border px-3 py-2 text-xs ${
+                  exportGatePreview.ok
+                    ? "border-emerald-200 bg-emerald-50 text-emerald-900"
+                    : "border-amber-200 bg-amber-50 text-amber-950"
+                }`}
+              >
+                <p className="font-semibold">내보내기 전 점검 (저장 시 자동 정리·보정 반영 기준)</p>
+                {exportGatePreview.ok ? (
+                  <p className="mt-1">
+                    규칙 통과 예상입니다. 내보내기 시 LaTeX·이미지 부재 문구는 먼저 자동 제거한 뒤 검증합니다.
+                  </p>
+                ) : (
+                  <>
+                    <p className="mt-1 font-medium">
+                      아래를 수정하면 저장이 막히지 않습니다. (자동 보정으로 일부 해결될 수 있습니다.)
+                    </p>
+                    <ul className="mt-2 list-inside list-disc space-y-0.5">
+                      {exportGatePreview.issues.map((line) => (
+                        <li key={line}>{line}</li>
+                      ))}
+                    </ul>
+                  </>
+                )}
+              </div>
               <button
                 onClick={handleSaveCurrentDocx}
                 disabled={cardQuestionNos.length === 0 || isExportChecking}

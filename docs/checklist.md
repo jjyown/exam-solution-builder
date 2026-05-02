@@ -88,6 +88,7 @@
 - [x] 해설 생성 프론트 단건·배치 중복 실행 방지(`useRef` 가드) 및 배치 `generate-explanation` 백오프 재시도 1회 명시
 - [x] OpenAI 폴백 형식 재시도 기본 비활성화(`OPENAI_EXPLANATION_FORMAT_RETRY`, 필요 시만 `true`)
 - [x] 해설 최고 신뢰도 옵션: Gemini 1차 후 OpenAI vision 교차 검증(`EXPLANATION_CROSS_VERIFY`, `OPENAI_MODEL_CROSS_VERIFY`, 응답 `crossVerified`)
+- [x] DOCX 내보내기 규칙 단일화(`exportDocQuality`)·결정적 전처리·repair 프롬프트 강화·내보내기 전 점검 UI
 
 ## 배포 전 체크
 - [ ] `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REFRESH_TOKEN` 동일 OAuth 세트 확인
