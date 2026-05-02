@@ -84,6 +84,9 @@
 - [x] DOCX 출력 포맷을 섹션형 문서 구조로 개선
 - [x] API 에러 메시지 상세화(운영 로그 추적성 강화)
 - [x] `npm run build`로 타입/빌드 검증 완료
+- [x] Gemini 429 감지 시 생성·사전검증 API에서 후보 모델 순회 중단(`geminiRateLimit`, `generate-explanation`, `precheck-extraction`)
+- [x] 해설 생성 프론트 단건·배치 중복 실행 방지(`useRef` 가드) 및 배치 `generate-explanation` 백오프 재시도 1회 명시
+- [x] OpenAI 폴백 형식 재시도 기본 비활성화(`OPENAI_EXPLANATION_FORMAT_RETRY`, 필요 시만 `true`)
 
 ## 배포 전 체크
 - [ ] `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REFRESH_TOKEN` 동일 OAuth 세트 확인

@@ -293,7 +293,15 @@ export async function POST(request: Request) {
       );
     }
 
-    const applied = await applyRuntimePromptRules(sanitized);
+    const mergeExamples =
+      (process.env.PROMPT_RULES_ANALYZE_INCLUDE_EXAMPLES || "").trim().toLowerCase() === "true";
+    if (!mergeExamples) {
+      failures.push(
+        "운영 정책: 분석 결과의 스타일 예시(examples_*)는 저장하지 않고 extraConstraints만 병합합니다. (PROMPT_RULES_ANALYZE_INCLUDE_EXAMPLES=true 로 전체 반영 가능)",
+      );
+    }
+
+    const applied = await applyRuntimePromptRules(sanitized, { mergeExamples });
     const weakHash = createHash("sha256").update(weakExplanation).digest("hex");
     await logPromptRuleEvent({
       event_type: "apply",
@@ -304,10 +312,20 @@ export async function POST(request: Request) {
       model: parsedPayload ? (failures.some((f) => f.startsWith("gemini:")) ? "openai" : "gemini") : null,
       failure_details: failures.length > 0 ? failures.join(" | ") : null,
     });
+    const rulesPreview = mergeExamples
+      ? sanitized
+      : {
+          extraConstraints: sanitized.extraConstraints,
+          examplesEasy: undefined,
+          examplesBalanced: undefined,
+          examplesKiller: undefined,
+        };
+
     return NextResponse.json({
       ok: true,
       applied,
-      rulesPreview: sanitized,
+      mergeExamples,
+      rulesPreview,
       details: failures,
     });
   } catch (error) {

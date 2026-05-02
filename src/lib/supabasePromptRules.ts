@@ -157,7 +157,12 @@ export async function getRuntimePromptRules(): Promise<RuntimePromptRules | null
   });
 }
 
-export async function applyRuntimePromptRules(rules: RuntimePromptRules) {
+export async function applyRuntimePromptRules(
+  rules: RuntimePromptRules,
+  options?: { mergeExamples?: boolean },
+) {
+  const mergeExamples = options?.mergeExamples !== false;
+
   const client = createSupabaseAdminClient();
   if (!client) {
     throw new Error("SUPABASE_URL 또는 SUPABASE_SERVICE_ROLE_KEY가 설정되지 않았습니다.");
@@ -175,15 +180,15 @@ export async function applyRuntimePromptRules(rules: RuntimePromptRules) {
     currentActive?.extra_constraints ?? null,
     rules.extraConstraints,
   );
-  const mergedExamplesEasy = mergeRuleText(currentActive?.examples_easy ?? null, rules.examplesEasy);
-  const mergedExamplesBalanced = mergeRuleText(
-    currentActive?.examples_balanced ?? null,
-    rules.examplesBalanced,
-  );
-  const mergedExamplesKiller = mergeRuleText(
-    currentActive?.examples_killer ?? null,
-    rules.examplesKiller,
-  );
+  const mergedExamplesEasy = mergeExamples
+    ? mergeRuleText(currentActive?.examples_easy ?? null, rules.examplesEasy)
+    : currentActive?.examples_easy ?? null;
+  const mergedExamplesBalanced = mergeExamples
+    ? mergeRuleText(currentActive?.examples_balanced ?? null, rules.examplesBalanced)
+    : currentActive?.examples_balanced ?? null;
+  const mergedExamplesKiller = mergeExamples
+    ? mergeRuleText(currentActive?.examples_killer ?? null, rules.examplesKiller)
+    : currentActive?.examples_killer ?? null;
 
   const normalizedMerged = normalizeRuntimeRules({
     extraConstraints: mergedExtraConstraints || undefined,

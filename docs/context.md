@@ -38,6 +38,7 @@
 ## 최근 의사결정 로그
 | 날짜 | 결정 | 이유 | 영향 범위 |
 |---|---|---|---|
+| 2026-05-02 | Gemini 할당량·혼잡(429 등) 시 동일 요청에서 후보 모델 순회를 중단하고, 해설 생성에서 형식 재시도 도중에도 동일 신호면 순회를 끊도록 통일한다. OpenAI 폴백의 형식 실패 2차 호출은 기본 생략(`OPENAI_EXPLANATION_FORMAT_RETRY=true`일 때만 허용). 프론트는 단건·배치 생성 중복 클릭을 막고 배치 생성 API 재시도를 1회로 제한한다. | 429 반복 시 호출 증폭(모델 순회·재시도·폴백)으로 할당량 악화와 지연을 키우는 문제를 줄이기 위함 | `src/lib/geminiRateLimit.ts`, `src/app/api/generate-explanation/route.ts`, `src/app/api/precheck-extraction/route.ts`, `src/app/page.tsx`, `.env.local.example`, `docs/plan.md` |
 | 2026-05-01 | 버전 엔트리에 `sourceType(single/batch/manual)`와 `runId`를 추가하고, 저장(DOCX) 시 현재 문항의 `selectedVersion`을 우선 반영하도록 고정 | 문항 재생성/전체재구성 출처를 추적 가능하게 하고, 편집 화면과 저장 결과의 버전 불일치를 방지하기 위함 | `src/app/page.tsx` |
 | 2026-05-01 | 해설 제작 단계에 문항별 버전 관리(v1/v2/...)를 추가: 생성 결과를 문항별 `versions[]`로 누적하고 `selectedVersionId`로 채택 버전을 전환할 수 있게 구현 | 문항별 재생성/비교/채택 흐름을 지원해 버전 꼬임 없이 운영자가 원하는 해설을 선택 반영하기 위함 | `src/app/page.tsx` |
 | 2026-05-01 | 해설 생성 응답의 `diagramAidRecommendation`을 프론트에 노출(권장/점수/근거 + 선택 적용 안내 버튼) | 도형 보조 이미지가 필요한 문항을 운영자가 즉시 구분해 선택 적용할 수 있도록 가시성을 높이기 위함 | `src/app/page.tsx`, `src/app/api/generate-explanation/route.ts` |

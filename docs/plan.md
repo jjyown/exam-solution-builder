@@ -128,6 +128,14 @@
   - `GOOGLE_DRIVE_EXAMS_FOLDER_NAME=시험지`
   - `GOOGLE_DRIVE_COMPLETED_FOLDER_NAME=작업완료`
 
+## LLM 안정화·429 완화 로드맵(전문가 토의 반영)
+- Gemini에서 `429` / `Too Many Requests` / `Resource exhausted`가 감지되면 동일 요청 내 **후보 모델 순회를 중단**하고 즉시 폴백 단계로 넘긴다(`generate-explanation`, `precheck-extraction`).
+- 해설 생성에서 Gemini **형식 재시도(`generateContent` 2회차)** 도중 동일 신호면 **추가 모델 순회 없이** 종료한다.
+- 프론트에서 단건 해설 생성·배치 순차 생성은 **`useRef` 가드**로 중복 클릭 실행을 막는다.
+- 배치의 `/api/generate-explanation` 호출은 `fetchWithBackoff` **재시도 1회**로 제한해 클라이언트 측 호출 증폭을 줄인다(단건·사전검증과 동일 계열).
+- OpenAI 폴백에서 1차 응답이 형식/정합 미달일 때 **2차 보정 호출은 기본 생략**한다. 필요 시에만 `.env`에 `OPENAI_EXPLANATION_FORMAT_RETRY=true`를 명시한다.
+- 장기: `/api/hml/append-solution` 등 문항 다건 경로의 **문항당 LLM 호출 상한·429 정책**을 별도 설계한다.
+
 ## 검증 기준(완료 조건)
 - `/api/exams`, `/api/exams/file`, `/api/generate-explanation`, `/api/save-result` 전부 200
 - Drive `해설제작/작업완료`에 DOCX 파일 생성 확인

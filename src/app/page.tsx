@@ -714,6 +714,8 @@ function runExtractionPrecheckForDisplayedCrop(
 export default function Home() {
   const resultRef = useRef<HTMLDivElement>(null);
   const imageRef = useRef<HTMLImageElement | null>(null);
+  const explanationRunGuardRef = useRef(false);
+  const batchRunGuardRef = useRef(false);
   const dividerOverlayRef = useRef<HTMLDivElement | null>(null);
   const dividerIdRef = useRef(1);
   const verticalGuideIdRef = useRef(1);
@@ -1573,6 +1575,11 @@ export default function Home() {
       );
       return;
     }
+    if (explanationRunGuardRef.current) {
+      setErrorMessage("해설 생성이 이미 진행 중입니다. 완료 후 다시 시도해 주세요.");
+      return;
+    }
+    explanationRunGuardRef.current = true;
     try {
       setIsGenerating(true);
       const singleRunId = `single-${Date.now()}`;
@@ -1754,6 +1761,7 @@ export default function Home() {
       setErrorMessage(message);
       setDiagramAidRecommendation(null);
     } finally {
+      explanationRunGuardRef.current = false;
       setIsGenerating(false);
     }
   };
@@ -2302,6 +2310,11 @@ export default function Home() {
       setErrorMessage("이미지 로딩이 완료된 뒤 순차 생성을 다시 시도해 주세요.");
       return;
     }
+    if (batchRunGuardRef.current) {
+      setErrorMessage("순차 자동 생성이 이미 진행 중입니다. 완료 후 다시 시도해 주세요.");
+      return;
+    }
+    batchRunGuardRef.current = true;
 
     try {
       setIsBatchGenerating(true);
@@ -2317,6 +2330,8 @@ export default function Home() {
       const maxPerQuestionDelayMs = 14000;
       const perQuestionDelayStepMs = 2000;
       let perQuestionDelayMs = basePerQuestionDelayMs;
+      let precheckRateLimitCount = 0;
+      let skipVisionPrecheckForRemaining = false;
 
       const bumpBackpressureDelay = (contextLabel: string) => {
         const nextDelayMs = Math.min(maxPerQuestionDelayMs, perQuestionDelayMs + perQuestionDelayStepMs);
@@ -2346,97 +2361,112 @@ export default function Home() {
             continue;
           }
 
-          const visionPrecheckRes = await fetchWithBackoff(
-            "/api/precheck-extraction",
-            {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                imageBase64: item.imageBase64,
-                imageMimeType: item.imageMimeType,
-                crop: item.crop,
-              }),
-            },
-            { retries: 0 },
-          );
-          const visionPrecheckData = (await visionPrecheckRes.json()) as VisionPrecheckResponse;
-          if (visionPrecheckRes.status === 429) {
-            bumpBackpressureDelay(`${item.questionNo}번 사전검증`);
-          }
-          if (!visionPrecheckRes.ok) {
-            const precheckRateLimited = hasRateLimitSignal(
-              visionPrecheckRes.status,
-              visionPrecheckData.details,
-              visionPrecheckData.error,
+          if (!skipVisionPrecheckForRemaining) {
+            const visionPrecheckRes = await fetchWithBackoff(
+              "/api/precheck-extraction",
+              {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  imageBase64: item.imageBase64,
+                  imageMimeType: item.imageMimeType,
+                  crop: item.crop,
+                }),
+              },
+              { retries: 0 },
             );
-            if (precheckRateLimited) {
-              appendQualityWarningUnique(
-                `${item.questionNo}번: 비전 사전검증 429 혼잡으로 검증을 건너뛰고 생성을 계속합니다. 결과를 한 번 더 확인해 주세요.`,
-              );
-            } else if (visionPrecheckRes.status >= 500) {
-              const detailText = visionPrecheckData.details?.join(" | ");
-              appendQualityWarningUnique(
-                `${item.questionNo}번: 비전 사전검증 서버 오류(${visionPrecheckRes.status})로 검증을 건너뛰고 생성을 계속합니다.${
-                  detailText ? ` 상세: ${detailText}` : ""
-                }`,
-              );
-            } else {
-              results.push({
-                questionNo: item.questionNo,
-                quickAnswer: "-",
-                status: "error",
-                message:
-                  visionPrecheckData.error || "생성 중단(비전 사전검증 API 호출 실패)",
-              });
-              continue;
+            const visionPrecheckData = (await visionPrecheckRes.json()) as VisionPrecheckResponse;
+            if (visionPrecheckRes.status === 429) {
+              bumpBackpressureDelay(`${item.questionNo}번 사전검증`);
             }
-          }
-          if (visionPrecheckRes.ok && !visionPrecheckData.pass) {
-            const reasons = [
-              ...(visionPrecheckData.reasons || []),
-              ...(visionPrecheckData.missing || []),
-            ]
-              .filter(Boolean)
-              .join(" / ");
-            results.push({
-              questionNo: item.questionNo,
-              quickAnswer: "-",
-              status: "error",
-              message: `생성 중단(비전 사전검증 ${visionPrecheckData.score}점): ${
-                reasons || "핵심 정보 누락 가능성"
-              }`,
-            });
-            continue;
+            if (!visionPrecheckRes.ok) {
+              const precheckRateLimited = hasRateLimitSignal(
+                visionPrecheckRes.status,
+                visionPrecheckData.details,
+                visionPrecheckData.error,
+              );
+              if (precheckRateLimited) {
+                precheckRateLimitCount += 1;
+                appendQualityWarningUnique(
+                  "비전 사전검증 429 혼잡으로 일부 문항의 검증을 건너뛰고 생성을 계속합니다. 결과를 한 번 더 확인해 주세요.",
+                );
+                if (precheckRateLimitCount >= 2) {
+                  skipVisionPrecheckForRemaining = true;
+                  appendQualityWarningUnique(
+                    "사전검증 429가 연속 발생해 남은 문항은 비전 사전검증을 잠시 생략합니다.",
+                  );
+                }
+              } else if (visionPrecheckRes.status >= 500) {
+                const detailText = visionPrecheckData.details?.join(" | ");
+                appendQualityWarningUnique(
+                  `${item.questionNo}번: 비전 사전검증 서버 오류(${visionPrecheckRes.status})로 검증을 건너뛰고 생성을 계속합니다.${
+                    detailText ? ` 상세: ${detailText}` : ""
+                  }`,
+                );
+              } else {
+                results.push({
+                  questionNo: item.questionNo,
+                  quickAnswer: "-",
+                  status: "error",
+                  message:
+                    visionPrecheckData.error || "생성 중단(비전 사전검증 API 호출 실패)",
+                });
+                continue;
+              }
+            } else {
+              precheckRateLimitCount = 0;
+              if (!visionPrecheckData.pass) {
+                const reasons = [
+                  ...(visionPrecheckData.reasons || []),
+                  ...(visionPrecheckData.missing || []),
+                ]
+                  .filter(Boolean)
+                  .join(" / ");
+                results.push({
+                  questionNo: item.questionNo,
+                  quickAnswer: "-",
+                  status: "error",
+                  message: `생성 중단(비전 사전검증 ${visionPrecheckData.score}점): ${
+                    reasons || "핵심 정보 누락 가능성"
+                  }`,
+                });
+                continue;
+              }
+            }
           }
 
           const itemSolverProfile =
             questionSolverProfileOverrides[item.questionNo] ?? solverModelProfile;
-          const response = await fetchWithBackoff("/api/generate-explanation", {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
+          const response = await fetchWithBackoff(
+            "/api/generate-explanation",
+            {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+              },
+              body: JSON.stringify({
+                questionText: useTextInput ? questionText : "",
+                imageBase64: item.imageBase64,
+                imageMimeType: item.imageMimeType,
+                diagramImages: item.diagramImages,
+                generationMode,
+                solverModelProfile: itemSolverProfile,
+                includeDiagramExplanation,
+                explanationSelectionMode,
+                showAllMethods,
+                quickAnswerPageHint:
+                  quickAnswerPages.length > 0
+                    ? `빠른정답 참고 페이지: ${quickAnswerPages.join(", ")}`
+                    : "",
+                explanationReferenceHint:
+                  explanationRefPages.length > 0
+                    ? `해설 참고 페이지: ${explanationRefPages.join(", ")}`
+                    : "",
+                crop: item.crop,
+              }),
             },
-            body: JSON.stringify({
-              questionText: useTextInput ? questionText : "",
-              imageBase64: item.imageBase64,
-              imageMimeType: item.imageMimeType,
-              diagramImages: item.diagramImages,
-              generationMode,
-              solverModelProfile: itemSolverProfile,
-              includeDiagramExplanation,
-              explanationSelectionMode,
-              showAllMethods,
-              quickAnswerPageHint:
-                quickAnswerPages.length > 0
-                  ? `빠른정답 참고 페이지: ${quickAnswerPages.join(", ")}`
-                  : "",
-              explanationReferenceHint:
-                explanationRefPages.length > 0
-                  ? `해설 참고 페이지: ${explanationRefPages.join(", ")}`
-                  : "",
-              crop: item.crop,
-            }),
-          });
+            { retries: 1 },
+          );
 
           if (!response.ok) {
             const data = (await response.json()) as { error?: string; details?: string[] };
@@ -2537,6 +2567,7 @@ export default function Home() {
         error instanceof Error ? error.message : "자동 해설 생성 중 오류가 발생했습니다.";
       setErrorMessage(message);
     } finally {
+      batchRunGuardRef.current = false;
       setIsBatchGenerating(false);
     }
   };

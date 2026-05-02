@@ -43,6 +43,7 @@ insert into public.prompt_rules (
 - `PROMPT_RULES_RUNTIME_ENABLED` (선택: `false`면 Supabase 런타임 규칙 주입 비활성화)
 - `PROMPT_RULES_MAX_CONSTRAINT_CHARS` (선택: 생성 시 `extraConstraints` 주입 길이 상한, 기본 1200)
 - `PROMPT_RULES_MAX_EXAMPLES_CHARS` (선택: 생성 시 난이도별 examples 주입 길이 상한, 기본 900)
+- `PROMPT_RULES_ANALYZE_INCLUDE_EXAMPLES` (선택: 기본값 미설정=`false` 동작 — `/api/prompt-rules/analyze-and-apply` 적용 시 **`examples_*` 컬럼은 병합하지 않고** 기존 값 유지. 대량 파일 분석 결과가 스타일 예시로 들어가 출력이 섞이는 것을 방지. `true`로 두면 분석 결과의 예시도 기존처럼 병합)
 
 값이 없거나 조회 실패하면 기존 내장 프롬프트로 자동 폴백합니다.
 

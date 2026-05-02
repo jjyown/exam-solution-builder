@@ -1,5 +1,6 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { NextResponse } from "next/server";
+import { isGeminiRateLimitedMessage } from "@/lib/geminiRateLimit";
 
 type PrecheckRequestBody = {
   imageBase64?: string;
@@ -108,7 +109,7 @@ export async function POST(request: Request) {
       .join("\n");
 
     const failures: string[] = [];
-    for (const modelName of PRECHECK_MODEL_CANDIDATES) {
+    precheckModels: for (const modelName of PRECHECK_MODEL_CANDIDATES) {
       try {
         const model = client.getGenerativeModel({ model: modelName });
         const result = await model.generateContent([
@@ -141,6 +142,10 @@ export async function POST(request: Request) {
           continue;
         }
         failures.push(`${modelName}: ${message}`);
+        if (isGeminiRateLimitedMessage(message)) {
+          failures.push("precheck: Gemini 할당량/혼잡(429)으로 추가 모델 순회를 생략합니다.");
+          break precheckModels;
+        }
       }
     }
 

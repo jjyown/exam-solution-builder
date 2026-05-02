@@ -106,6 +106,7 @@ npm run dev
 - Gemini 경로: `docs/models.md` 기준으로 환경변수에서 후보를 관리합니다.
 - 생성/보정 API는 Gemini 실패 시 OpenAI 폴백을 사용합니다.
 - 모델명은 코드 하드코딩보다 `.env.local`/배포 환경변수에서 운영하는 것을 권장합니다.
+- 앱 제한 규칙을 동적으로 관리하려면 `docs/supabase-prompt-rules.md`를 참고하세요.
 
 ## 도형 보조 이미지(바나나) 자동 판정 가이드 (고정)
 

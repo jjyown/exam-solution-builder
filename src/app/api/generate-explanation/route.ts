@@ -2,6 +2,7 @@ import { GoogleGenerativeAI } from "@google/generative-ai";
 import { NextResponse } from "next/server";
 import { buildSystemInstruction } from "./prompts";
 import { getRuntimePromptRules } from "@/lib/supabasePromptRules";
+import { isGeminiRateLimitedMessage } from "@/lib/geminiRateLimit";
 
 type GenerateRequestBody = {
   questionText?: string;
@@ -22,36 +23,41 @@ type GenerateRequestBody = {
 };
 
 function parseModelCandidatesFromEnv(envKey: string, fallback: string[]) {
+  const normalize = (models: string[]) =>
+    Array.from(
+      new Set(
+        models
+          .map((item) => item.trim())
+          .filter(Boolean)
+          // v1beta generateContent에서 404가 반복되는 1.5 계열은 자동 제외한다.
+          .filter((name) => !/^gemini-1\.5-(pro|flash)$/i.test(name)),
+      ),
+    );
+
   const raw = process.env[envKey]?.trim();
-  if (!raw) return fallback;
-  const parsed = raw
-    .split(",")
-    .map((item) => item.trim())
-    .filter(Boolean);
-  return parsed.length > 0 ? parsed : fallback;
+  if (!raw) {
+    const normalizedFallback = normalize(fallback);
+    return normalizedFallback.length > 0 ? normalizedFallback : ["gemini-2.0-flash"];
+  }
+  const parsed = normalize(raw.split(","));
+  if (parsed.length > 0) return parsed;
+  const normalizedFallback = normalize(fallback);
+  return normalizedFallback.length > 0 ? normalizedFallback : ["gemini-2.0-flash"];
 }
 
 const FINAL_MODEL_CANDIDATES = parseModelCandidatesFromEnv("GEMINI_MODELS_GENERATE_FINAL", [
-  "gemini-1.5-pro",
-  "gemini-1.5-flash",
   "gemini-2.0-flash",
 ]);
 const TEST_MODEL_CANDIDATES = parseModelCandidatesFromEnv("GEMINI_MODELS_GENERATE_TEST", [
-  "gemini-1.5-flash",
   "gemini-2.0-flash",
 ]);
 const EASY_MODEL_CANDIDATES = parseModelCandidatesFromEnv("GEMINI_MODELS_GENERATE_EASY", [
-  "gemini-1.5-flash",
   "gemini-2.0-flash",
 ]);
 const BALANCED_MODEL_CANDIDATES = parseModelCandidatesFromEnv("GEMINI_MODELS_GENERATE_BALANCED", [
-  "gemini-1.5-pro",
-  "gemini-1.5-flash",
   "gemini-2.0-flash",
 ]);
 const KILLER_MODEL_CANDIDATES = parseModelCandidatesFromEnv("GEMINI_MODELS_GENERATE_KILLER", [
-  "gemini-1.5-pro",
-  "gemini-1.5-flash",
   "gemini-2.0-flash",
 ]);
 
@@ -152,6 +158,26 @@ function validateExplanationConsistency(text: string) {
   return { ok: issues.length === 0, issues };
 }
 
+/** 단일 문항 생성인데 타 문항 스크랩이 붙은 경우(규칙/컨텍스트 오염) 탐지 */
+function validateCrossProblemBleed(text: string) {
+  const issues: string[] = [];
+  const explanation = text.match(/\[해설\]\s*([\s\S]+)/i)?.[1]?.trim() ?? "";
+  if (!explanation) return { ok: true, issues };
+
+  if (/(?:입니다|이다|습니다|합니다|된다)\.?\s*\n+\s*(?:[2-9]|1[0-9])\.\s/m.test(explanation)) {
+    issues.push(
+      "[해설]에 다른 문항으로 보이는 번호 서술이 섞였습니다. 지금 이미지의 한 문항만 단계별로 풀이하세요.",
+    );
+  }
+
+  const answerHeaders = text.match(/\[정답\]/gi);
+  if (answerHeaders && answerHeaders.length > 1) {
+    issues.push("[정답] 헤더가 여러 번입니다. 한 문항만 출력하세요.");
+  }
+
+  return { ok: issues.length === 0, issues };
+}
+
 function validateCurriculumScope(text: string) {
   const issues: string[] = [];
   const bannedPatterns: Array<{ label: string; regex: RegExp }> = [
@@ -197,6 +223,12 @@ function validatePedagogicalPolicy(text: string) {
 
 function hasCriticalPedagogyIssue(issues: string[]) {
   return issues.some((issue) => /근삿값|추정/.test(issue));
+}
+
+function splitPedagogyIssues(issues: string[]) {
+  const critical = issues.filter((issue) => /근삿값|추정/.test(issue));
+  const warnings = issues.filter((issue) => !/근삿값|추정/.test(issue));
+  return { critical, warnings };
 }
 
 function buildRetryInstruction(
@@ -481,7 +513,7 @@ export async function POST(request: Request) {
     const failures: string[] = [];
     const recursiveIssueHistory: string[] = [];
 
-    for (const modelName of modelCandidates) {
+    geminiModels: for (const modelName of modelCandidates) {
       try {
         const model = client.getGenerativeModel({
           model: modelName,
@@ -499,11 +531,16 @@ export async function POST(request: Request) {
         }
         const formatCheck = validateExplanationFormat(generatedText);
         const consistencyCheck = validateExplanationConsistency(generatedText);
+        const bleedCheck = validateCrossProblemBleed(generatedText);
+        const consistencyEffective = {
+          ok: consistencyCheck.ok && bleedCheck.ok,
+          issues: [...consistencyCheck.issues, ...bleedCheck.issues],
+        };
         const scopeCheck = validateCurriculumScope(generatedText);
         const pedagogyCheck = validatePedagogicalPolicy(generatedText);
         if (
           formatCheck.ok &&
-          consistencyCheck.ok &&
+          consistencyEffective.ok &&
           scopeCheck.ok &&
           pedagogyCheck.ok &&
           !isLikelyTruncatedResult(generatedText)
@@ -521,7 +558,7 @@ export async function POST(request: Request) {
 
         const qualityWarnings = [
           ...formatCheck.missing.map((item) => `형식 누락: ${item}`),
-          ...consistencyCheck.issues,
+          ...consistencyEffective.issues,
           ...scopeCheck.issues,
           ...pedagogyCheck.issues,
         ];
@@ -535,7 +572,7 @@ export async function POST(request: Request) {
           {
             text: buildRetryInstruction(
               formatCheck.missing,
-              consistencyCheck.issues,
+              consistencyEffective.issues,
               scopeCheck.issues,
               pedagogyCheck.issues,
               recursiveIssueHistory.slice(-6),
@@ -543,7 +580,21 @@ export async function POST(request: Request) {
             ),
           },
         ];
-        const retryResult = await model.generateContent(retryContents);
+        let retryResult;
+        try {
+          retryResult = await model.generateContent(retryContents);
+        } catch (retryError) {
+          const retryMsg =
+            retryError instanceof Error ? retryError.message : "알 수 없는 모델 호출 오류";
+          failures.push(`${modelName}: 형식 재시도 중 오류 - ${retryMsg}`);
+          if (isGeminiRateLimitedMessage(retryMsg)) {
+            failures.push(
+              "generate: Gemini 할당량/혼잡(429)으로 추가 모델 순회를 생략합니다.",
+            );
+            break geminiModels;
+          }
+          continue;
+        }
         const retryText = retryResult.response.text()?.trim();
         if (!retryText) {
           failures.push(`${modelName}: 형식 재시도 응답 비어 있음`);
@@ -551,11 +602,16 @@ export async function POST(request: Request) {
         }
         const retryFormatCheck = validateExplanationFormat(retryText);
         const retryConsistencyCheck = validateExplanationConsistency(retryText);
+        const retryBleedCheck = validateCrossProblemBleed(retryText);
+        const retryConsistencyEffective = {
+          ok: retryConsistencyCheck.ok && retryBleedCheck.ok,
+          issues: [...retryConsistencyCheck.issues, ...retryBleedCheck.issues],
+        };
         const retryScopeCheck = validateCurriculumScope(retryText);
         const retryPedagogyCheck = validatePedagogicalPolicy(retryText);
         if (
           !retryFormatCheck.ok ||
-          !retryConsistencyCheck.ok ||
+          !retryConsistencyEffective.ok ||
           !retryScopeCheck.ok ||
           !retryPedagogyCheck.ok ||
           isLikelyTruncatedResult(retryText)
@@ -563,7 +619,7 @@ export async function POST(request: Request) {
           failures.push(
             `${modelName}: 형식/정합 검증 실패(재시도 포함) - 누락: ${retryFormatCheck.missing.join(
               ", ",
-            )} / 정합 이슈: ${retryConsistencyCheck.issues.join(" | ")} / 교육과정 이탈: ${retryScopeCheck.issues.join(
+            )} / 정합 이슈: ${retryConsistencyEffective.issues.join(" | ")} / 교육과정 이탈: ${retryScopeCheck.issues.join(
               " | ",
             )} / 수업기준 이슈: ${retryPedagogyCheck.issues.join(" | ")}`,
           );
@@ -583,6 +639,12 @@ export async function POST(request: Request) {
         const message =
           error instanceof Error ? error.message : "알 수 없는 모델 호출 오류";
         failures.push(`${modelName}: ${message}`);
+        if (isGeminiRateLimitedMessage(message)) {
+          failures.push(
+            "generate: Gemini 할당량/혼잡(429)으로 추가 모델 순회를 생략합니다.",
+          );
+          break geminiModels;
+        }
       }
     }
 
@@ -604,82 +666,104 @@ export async function POST(request: Request) {
         if (openAiText) {
           const formatCheck = validateExplanationFormat(openAiText);
           const consistencyCheck = validateExplanationConsistency(openAiText);
+          const bleedCheck = validateCrossProblemBleed(openAiText);
+          const consistencyEffective = {
+            ok: consistencyCheck.ok && bleedCheck.ok,
+            issues: [...consistencyCheck.issues, ...bleedCheck.issues],
+          };
           const scopeCheck = validateCurriculumScope(openAiText);
           const pedagogyCheck = validatePedagogicalPolicy(openAiText);
+          const pedagogySplit = splitPedagogyIssues(pedagogyCheck.issues);
           const truncated = isLikelyTruncatedResult(openAiText);
 
           if (
             formatCheck.ok &&
-            consistencyCheck.ok &&
+            consistencyEffective.ok &&
             scopeCheck.ok &&
             !truncated &&
-            !hasCriticalPedagogyIssue(pedagogyCheck.issues)
+            pedagogySplit.critical.length === 0
           ) {
             return NextResponse.json(
               {
                 result: openAiText,
                 model: `${openAiModel} (openai-fallback)`,
-                qualityWarnings: pedagogyCheck.ok ? [] : [...pedagogyCheck.issues],
+                qualityWarnings: pedagogySplit.warnings,
                 diagramAidRecommendation: diagramAid,
               },
               { status: 200 },
             );
           }
 
-          const retryInstruction = buildRetryInstruction(
-            formatCheck.missing,
-            consistencyCheck.issues,
-            scopeCheck.issues,
-            pedagogyCheck.issues,
-          [
-            ...recursiveIssueHistory.slice(-6),
-            ...pedagogyCheck.issues.map((item) => `OpenAI 1차 위반: ${item}`),
-          ],
-          2,
-          );
-          const retryText = await generateWithOpenAiFallback({
-            apiKey: openAiApiKey,
-            model: openAiModel,
-            prompt: `${prompt}\n\n${retryInstruction}`,
-            imageBase64,
-            mimeType,
-            diagramImageBase64,
-            diagramMimeType,
-            diagramImages: diagramImages.map((item) => ({
-              imageBase64: item.imageBase64,
-              mimeType: item.mimeType,
-            })),
-          });
-          if (retryText) {
-            const retryFormatCheck = validateExplanationFormat(retryText);
-            const retryConsistencyCheck = validateExplanationConsistency(retryText);
-            const retryScopeCheck = validateCurriculumScope(retryText);
-            const retryPedagogyCheck = validatePedagogicalPolicy(retryText);
-            const retryTruncated = isLikelyTruncatedResult(retryText);
+          const allowOpenAiFormatRetry =
+            (process.env.OPENAI_EXPLANATION_FORMAT_RETRY || "").trim().toLowerCase() ===
+            "true";
 
-            if (
-              retryFormatCheck.ok &&
-              retryConsistencyCheck.ok &&
-              retryScopeCheck.ok &&
-              !retryTruncated &&
-              !hasCriticalPedagogyIssue(retryPedagogyCheck.issues)
-            ) {
-              return NextResponse.json(
-                {
-                  result: retryText,
-                  model: `${openAiModel} (openai-fallback)`,
-                  retriedForFormat: true,
-                  qualityWarnings: retryPedagogyCheck.ok ? [] : [...retryPedagogyCheck.issues],
-                  diagramAidRecommendation: diagramAid,
-                },
-                { status: 200 },
-              );
-            }
+          if (!allowOpenAiFormatRetry) {
             failures.push(
-              `openai:${openAiModel}: 형식/정합 검증 실패(재시도 포함) - 누락: ${retryFormatCheck.missing.join(", ")} / 정합: ${retryConsistencyCheck.issues.join(" | ")} / 범위: ${retryScopeCheck.issues.join(" | ")} / 수업기준: ${retryPedagogyCheck.issues.join(" | ")}`,
+              `openai:${openAiModel}: 형식/정합 검증 실패 - OpenAI 2차 호출 생략(OPENAI_EXPLANATION_FORMAT_RETRY 미설정) - 누락: ${formatCheck.missing.join(", ")} / 정합: ${consistencyEffective.issues.join(" | ")} / 범위: ${scopeCheck.issues.join(" | ")} / 수업기준(치명): ${pedagogySplit.critical.join(" | ") || "없음"} / 수업기준(경고): ${pedagogySplit.warnings.join(" | ") || "없음"}`,
             );
           } else {
-            failures.push(`openai:${openAiModel}: 재시도 응답 비어 있음`);
+            const retryInstruction = buildRetryInstruction(
+              formatCheck.missing,
+              consistencyEffective.issues,
+              scopeCheck.issues,
+              pedagogyCheck.issues,
+              [
+                ...recursiveIssueHistory.slice(-6),
+                ...pedagogyCheck.issues.map((item) => `OpenAI 1차 위반: ${item}`),
+              ],
+              2,
+            );
+            const retryText = await generateWithOpenAiFallback({
+              apiKey: openAiApiKey,
+              model: openAiModel,
+              prompt: `${prompt}\n\n${retryInstruction}`,
+              imageBase64,
+              mimeType,
+              diagramImageBase64,
+              diagramMimeType,
+              diagramImages: diagramImages.map((item) => ({
+                imageBase64: item.imageBase64,
+                mimeType: item.mimeType,
+              })),
+            });
+            if (retryText) {
+              const retryFormatCheck = validateExplanationFormat(retryText);
+              const retryConsistencyCheck = validateExplanationConsistency(retryText);
+              const retryBleedCheck = validateCrossProblemBleed(retryText);
+              const retryConsistencyEffective = {
+                ok: retryConsistencyCheck.ok && retryBleedCheck.ok,
+                issues: [...retryConsistencyCheck.issues, ...retryBleedCheck.issues],
+              };
+              const retryScopeCheck = validateCurriculumScope(retryText);
+              const retryPedagogyCheck = validatePedagogicalPolicy(retryText);
+              const retryPedagogySplit = splitPedagogyIssues(retryPedagogyCheck.issues);
+              const retryTruncated = isLikelyTruncatedResult(retryText);
+
+              if (
+                retryFormatCheck.ok &&
+                retryConsistencyEffective.ok &&
+                retryScopeCheck.ok &&
+                !retryTruncated &&
+                retryPedagogySplit.critical.length === 0
+              ) {
+                return NextResponse.json(
+                  {
+                    result: retryText,
+                    model: `${openAiModel} (openai-fallback)`,
+                    retriedForFormat: true,
+                    qualityWarnings: retryPedagogySplit.warnings,
+                    diagramAidRecommendation: diagramAid,
+                  },
+                  { status: 200 },
+                );
+              }
+              failures.push(
+                `openai:${openAiModel}: 형식/정합 검증 실패(재시도 포함) - 누락: ${retryFormatCheck.missing.join(", ")} / 정합: ${retryConsistencyEffective.issues.join(" | ")} / 범위: ${retryScopeCheck.issues.join(" | ")} / 수업기준(치명): ${retryPedagogySplit.critical.join(" | ") || "없음"} / 수업기준(경고): ${retryPedagogySplit.warnings.join(" | ") || "없음"}`,
+              );
+            } else {
+              failures.push(`openai:${openAiModel}: 재시도 응답 비어 있음`);
+            }
           }
         } else {
           failures.push(`openai:${openAiModel}: 응답 비어 있음`);
