@@ -82,10 +82,22 @@ function pickModelCandidates(params: {
 
 function validateExplanationFormat(text: string) {
   const normalized = text.trim();
-  const answerMatch = normalized.match(/\[정답\]\s*([^\n\r]*)/i);
-  const explanationMatch = normalized.match(/\[해설\]\s*([\s\S]+)/i);
   const missing: string[] = [];
 
+  if (!/^\s*\[정답\]/i.test(normalized)) {
+    missing.push("[정답] 선두 시작(앞에 서두·다른 문항 금지)");
+  }
+  const headerExplainCount = (normalized.match(/\[해설\]/gi) ?? []).length;
+  if (headerExplainCount !== 1) {
+    missing.push(
+      headerExplainCount === 0
+        ? "[해설]"
+        : "[해설] 헤더는 응답당 정확히 한 번(연쇄 문항 붙여넣기 금지)",
+    );
+  }
+
+  const answerMatch = normalized.match(/\[정답\]\s*([^\n\r]*)/i);
+  const explanationMatch = normalized.match(/\[해설\]\s*([\s\S]+)/i);
   if (!answerMatch) missing.push("[정답]");
   if (!explanationMatch) missing.push("[해설]");
   if (answerMatch && !answerMatch[1]?.trim()) missing.push("[정답] 값");
@@ -175,6 +187,25 @@ function validateCrossProblemBleed(text: string) {
   if (/(?:^|\n)\s*(?:[3-9]|1[0-9])\s*번\s*(?:문항|문제)/m.test(explanation)) {
     issues.push(
       "[해설]에 다른 문항 번호가 등장했습니다. 단일 크롭 문항만 다루세요.",
+    );
+  }
+
+  // 연쇄 문항: 2)[정답], 3.[정답] … 한 응답에 여러 문제 붙이기
+  if (/\d+\)\s*\[정답\]/i.test(explanation)) {
+    issues.push(
+      "[해설] 안에 연속 문항 표기(예: 2)[정답])가 있습니다. 한 문항만 출력하세요.",
+    );
+  }
+  if (/(?:^|\n)\s*\d+\.\s*\[정답\]/im.test(explanation)) {
+    issues.push(
+      "[해설] 안에 번호 매긴 두 번째 [정답]이 있습니다. 한 문항만 출력하세요.",
+    );
+  }
+  // [해설] 본문 속 추가 [정답] (첫 블록 밖의 연쇄 출력)
+  const explainInnerAnswer = explanation.match(/\[정답\]/gi);
+  if (explainInnerAnswer && explainInnerAnswer.length > 0) {
+    issues.push(
+      "[해설] 본문에 [정답]이 들어가 있습니다. 맨 앞 [정답] 한 번만 쓰세요.",
     );
   }
 
@@ -287,7 +318,7 @@ function buildRetryInstruction(
     lines.push("간단한 문제는 핵심 수식과 결론 중심으로 4~8문장 내외로 간결히 정리하세요.");
   }
   lines.push(
-    "[단일 문항] 첨부 크롭은 한 문항만이다. '다음 문제', '3번 문항'처럼 다른 문항을 새로 여는 표현은 금지. (단계 번호 1.2.3. 남용 금지는 재요청 시에도 동일.)",
+    "[단일 문항] 첨부 크롭은 한 문항만이다. 2)[정답]·여러 [해설]·본문 속 [정답]으로 연쇄 붙이기 금지. '다음 문제', '3번 문항'도 금지. (단계 번호 1.2.3. 남용 금지도 동일.)",
   );
   lines.push("반드시 아래 형식으로만 다시 작성하세요.");
   lines.push("[정답] (한 줄)");
@@ -335,9 +366,11 @@ function inferDiagramAidNeed(questionText: string) {
 /** OpenAI vision은 user-only보다 system+user가 [정답]/[해설] 준수율이 높다 */
 const OPENAI_VISION_EXPLANATION_SYSTEM = `당신은 중고등 수학 문제 이미지를 읽고, 사용자가 지정한 크롭의 한 문항만 푼다.
 응답은 반드시 아래 형식만 사용한다. 인사·머리말·코드펜스(\`\`\`)·추가 제목 금지.
+맨 앞은 공백만 허용하고 반드시 [정답]으로 시작한다. 서두 장문 뒤에 [정답]을 두지 않는다.
 첫 줄: [정답] 한 줄에 최종 답만(객관식이면 1~5 하나).
-그 다음 줄에만: [해설]
-그 다음 줄부터: 풀이 본문. 매 줄마다 1.2.3. 번호를 붙이지 말고 문단·접속사로 서술할 것(복잡할 때만 번호 소량 허용).
+그 다음 줄에만: [해설] (이 헤더는 전체에서 단 한 번)
+그 다음 줄부터: 풀이 본문만 쓰고 즉시 종료. 2)[정답] 같은 연쇄 문항·두 번째 [해설]·본문 속 [정답] 금지.
+풀이는 매 줄마다 1.2.3. 번호를 붙이지 말고 문단·접속사로 서술(복잡할 때만 번호 소량).
 근호는 이미지에서 범위를 확정한다: 한 √ 안에 다른 루트가 들어간 중첩과 √·∛가 곱으로 나열된 경우를 혼동하지 말 것. 평문에서는 √(2×∛4)처럼 괄호로 중첩을 드러낼 것.
 LaTeX($, \\frac 등) 금지. 조합은 nCk 표기.`;
 
@@ -460,6 +493,7 @@ function buildCrossVerifyUserPrompt(
     "- 중고등 교육과정 범위를 벗어난 전공 수학 용어·기호 금지.",
     "- 초안이 완전히 옳으면 내용을 바꾸지 말고 동일 결론을 형식에 맞게 재출력.",
     "- 계산 오류·조건 누락·객관식 보기 불일치 등 오류가 있으면 올바른 해설로 전체를 다시 작성.",
+    "- 초안에 2)[정답]·세 번째 문항 풀이가 붙어 있으면 삭제하고, 이미지의 한 문항만 남겨라.",
     "- 제곱근·세제곱근: 이미지에서 근호 중첩과 근호들의 곱을 혼동하지 않았는지 초안의 식 구조와 대조한다. 특히 √(안쪽 전체) 인지 √a×∛b 인지부터 검증한다.",
     "",
     "[초안]",
@@ -583,6 +617,9 @@ export async function POST(request: Request) {
       "[입력 계약]",
       "- 첨부 이미지는 사용자가 시험지에서 지정한 단일 문항 영역(크롭)이다.",
       "- 이 호출에서 출력은 반드시 한 문항만: [정답] 블록 1개, [해설] 블록 1개.",
+      "- 연쇄 출력 금지: 보기 ①~⑤를 검토한 뒤에도 다른 문제를 이어 풀지 마라. 2)[정답], 3.[정답] 형태로 여러 문항을 한 응답에 붙이지 마라.",
+      "- 응답 전체에서 [해설] 헤더는 정확히 한 번. [해설] 본문 안에 [정답]을 다시 쓰지 마라.",
+      "- 출력은 선행 문구 없이 [정답]으로 시작하라(첫 줄이 문제 풀이 본문이 되면 안 된다).",
       "- 다른 문항 번호·선택지·풀이를 인용하거나 이어 붙이지 마라.",
       "- 근삿값·추정·어림으로 결론을 내리지 말고, 교과서 수준의 정확한 전개로 마무리하라.",
       solverModelProfile === "easy"
