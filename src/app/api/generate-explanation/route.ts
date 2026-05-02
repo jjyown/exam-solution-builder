@@ -366,6 +366,124 @@ async function generateWithOpenAiFallback(params: {
   return data.choices?.[0]?.message?.content?.trim() ?? "";
 }
 
+function isCrossVerifyEnabled() {
+  return (process.env.EXPLANATION_CROSS_VERIFY || "").trim().toLowerCase() === "true";
+}
+
+function resolveCrossVerifyModel() {
+  return process.env.OPENAI_MODEL_CROSS_VERIFY?.trim() || "gpt-4o";
+}
+
+/** Gemini 1차 초안과 동일 기준으로 교차검증 결과를 받아들일지 판단 */
+function passesPrimaryQualityGate(generatedText: string) {
+  const formatCheck = validateExplanationFormat(generatedText);
+  const consistencyCheck = validateExplanationConsistency(generatedText);
+  const bleedCheck = validateCrossProblemBleed(generatedText);
+  const consistencyEffective = {
+    ok: consistencyCheck.ok && bleedCheck.ok,
+    issues: [...consistencyCheck.issues, ...bleedCheck.issues],
+  };
+  const scopeCheck = validateCurriculumScope(generatedText);
+  const pedagogyCheck = validatePedagogicalPolicy(generatedText);
+  return (
+    formatCheck.ok &&
+    consistencyEffective.ok &&
+    scopeCheck.ok &&
+    pedagogyCheck.ok &&
+    !isLikelyTruncatedResult(generatedText)
+  );
+}
+
+function buildCrossVerifyUserPrompt(
+  draft: string,
+  ctx: {
+    generationMode: "test" | "final";
+    solverModelProfile: "easy" | "balanced" | "killer";
+  },
+) {
+  const profileLine =
+    ctx.solverModelProfile === "easy"
+      ? "문항 난이도 힌트: 비교적 단순한 유형 위주로 검증."
+      : ctx.solverModelProfile === "killer"
+        ? "문항 난이도 힌트: 고난도·함정·세부 조건을 놓치지 않도록 검증."
+        : "문항 난이도 힌트: 일반 난이도 기준으로 검증.";
+  const modeLine =
+    ctx.generationMode === "test"
+      ? "생성 모드: 테스트(초안 점검)."
+      : "생성 모드: 최종(발행 수준).";
+  return [
+    "[역할]",
+    "당신은 중고등 수학 해설의 독립 검토자다. 첨부 이미지의 문제를 다시 읽고, 아래 [초안]의 정답·풀이가 문제 조건·보기와 논리적으로 일치하는지 검증하라.",
+    modeLine,
+    profileLine,
+    "",
+    "[출력 규칙]",
+    "- 출력은 [정답] 한 줄, [해설] 본문만. 인사·머리말·메타 설명 금지.",
+    "- LaTeX($, \\\\frac, \\\\sqrt 등) 금지. 조합은 nCk 표기.",
+    "- 중고등 교육과정 범위를 벗어난 전공 수학 용어·기호 금지.",
+    "- 초안이 완전히 옳으면 내용을 바꾸지 말고 동일 결론을 형식에 맞게 재출력.",
+    "- 계산 오류·조건 누락·객관식 보기 불일치 등 오류가 있으면 올바른 해설로 전체를 다시 작성.",
+    "",
+    "[초안]",
+    draft,
+  ].join("\n");
+}
+
+async function runOpenAiCrossVerify(params: {
+  draft: string;
+  openAiApiKey: string;
+  imageBase64: string;
+  mimeType: string;
+  diagramImageBase64?: string;
+  diagramMimeType?: string;
+  diagramImages: Array<{ imageBase64: string; mimeType: string }>;
+  generationMode: "test" | "final";
+  solverModelProfile: "easy" | "balanced" | "killer";
+}): Promise<{ text: string; crossVerified: boolean; verifyWarning?: string }> {
+  if (!isCrossVerifyEnabled() || !params.openAiApiKey) {
+    return { text: params.draft, crossVerified: false };
+  }
+  const verifyModel = resolveCrossVerifyModel();
+  const verifyPrompt = buildCrossVerifyUserPrompt(params.draft, {
+    generationMode: params.generationMode,
+    solverModelProfile: params.solverModelProfile,
+  });
+  try {
+    const verified = await generateWithOpenAiFallback({
+      apiKey: params.openAiApiKey,
+      model: verifyModel,
+      prompt: verifyPrompt,
+      imageBase64: params.imageBase64,
+      mimeType: params.mimeType,
+      diagramImageBase64: params.diagramImageBase64,
+      diagramMimeType: params.diagramMimeType,
+      diagramImages: params.diagramImages,
+    });
+    if (!verified.trim()) {
+      return {
+        text: params.draft,
+        crossVerified: false,
+        verifyWarning: "교차검증 응답이 비어 있어 1차 초안을 유지했습니다.",
+      };
+    }
+    if (!passesPrimaryQualityGate(verified)) {
+      return {
+        text: params.draft,
+        crossVerified: false,
+        verifyWarning:
+          "교차검증 결과가 내부 품질 검증을 통과하지 못해 1차 초안을 유지했습니다.",
+      };
+    }
+    return { text: verified, crossVerified: true };
+  } catch {
+    return {
+      text: params.draft,
+      crossVerified: false,
+      verifyWarning: "교차검증 호출에 실패해 1차 초안을 유지했습니다.",
+    };
+  }
+}
+
 export async function POST(request: Request) {
   try {
     const apiKey =
@@ -545,12 +663,31 @@ export async function POST(request: Request) {
           pedagogyCheck.ok &&
           !isLikelyTruncatedResult(generatedText)
         ) {
+          const cross = await runOpenAiCrossVerify({
+            draft: generatedText,
+            openAiApiKey,
+            imageBase64,
+            mimeType,
+            diagramImageBase64,
+            diagramMimeType,
+            diagramImages: diagramImages.map((item) => ({
+              imageBase64: item.imageBase64,
+              mimeType: item.mimeType,
+            })),
+            generationMode,
+            solverModelProfile,
+          });
+          const verifyModelTag = resolveCrossVerifyModel();
+          const qualityWarningsCross = cross.verifyWarning ? [cross.verifyWarning] : [];
           return NextResponse.json(
             {
-              result: generatedText,
-              model: modelName,
-              qualityWarnings: [],
+              result: cross.text,
+              model: cross.crossVerified
+                ? `${modelName}+${verifyModelTag}(cross-verify)`
+                : modelName,
+              qualityWarnings: qualityWarningsCross,
               diagramAidRecommendation: diagramAid,
+              crossVerified: cross.crossVerified,
             },
             { status: 200 },
           );
@@ -625,13 +762,33 @@ export async function POST(request: Request) {
           );
           continue;
         }
+        const crossRetry = await runOpenAiCrossVerify({
+          draft: retryText,
+          openAiApiKey,
+          imageBase64,
+          mimeType,
+          diagramImageBase64,
+          diagramMimeType,
+          diagramImages: diagramImages.map((item) => ({
+            imageBase64: item.imageBase64,
+            mimeType: item.mimeType,
+          })),
+          generationMode,
+          solverModelProfile,
+        });
+        const verifyModelTagRetry = resolveCrossVerifyModel();
+        const qualityWarningsMerged = [...qualityWarnings];
+        if (crossRetry.verifyWarning) qualityWarningsMerged.push(crossRetry.verifyWarning);
         return NextResponse.json(
           {
-            result: retryText,
-            model: modelName,
+            result: crossRetry.text,
+            model: crossRetry.crossVerified
+              ? `${modelName}+${verifyModelTagRetry}(cross-verify)`
+              : modelName,
             retriedForFormat: true,
-            qualityWarnings,
+            qualityWarnings: qualityWarningsMerged,
             diagramAidRecommendation: diagramAid,
+            crossVerified: crossRetry.crossVerified,
           },
           { status: 200 },
         );

@@ -135,6 +135,7 @@
 - 배치의 `/api/generate-explanation` 호출은 `fetchWithBackoff` **재시도 1회**로 제한해 클라이언트 측 호출 증폭을 줄인다(단건·사전검증과 동일 계열).
 - OpenAI 폴백에서 1차 응답이 형식/정합 미달일 때 **2차 보정 호출은 기본 생략**한다. 필요 시에만 `.env`에 `OPENAI_EXPLANATION_FORMAT_RETRY=true`를 명시한다.
 - 장기: `/api/hml/append-solution` 등 문항 다건 경로의 **문항당 LLM 호출 상한·429 정책**을 별도 설계한다.
+- 최고 신뢰도 옵션: `EXPLANATION_CROSS_VERIFY=true` + `OPENAI_MODEL_CROSS_VERIFY`(기본 `gpt-4o`)로 Gemini 1차 초안 후 OpenAI vision 교차 검증 1회(`docs/models.md` §4 프로필별 모델 표).
 
 ## 검증 기준(완료 조건)
 - `/api/exams`, `/api/exams/file`, `/api/generate-explanation`, `/api/save-result` 전부 200
