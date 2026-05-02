@@ -16,6 +16,7 @@ import {
   isPlaceholderExplanationBody,
   validateExportDocEntries,
 } from "@/lib/exportDocQuality";
+import { resolveGeminiGenerateEnvKey } from "@/lib/generateExplanationGeminiEnv";
 
 type ParsedExplanation = {
   quickAnswer: string;
@@ -711,6 +712,11 @@ export default function Home() {
     useState<SolverModelProfile>("balanced");
   const [questionSolverProfileOverrides, setQuestionSolverProfileOverrides] =
     useState<Partial<Record<string, SolverModelProfile>>>({});
+  /** 해설 생성 API가 Gemini 후보를 읽는 환경변수 키(UI와 `pickModelCandidates` 일치). */
+  const resolvedGeminiGenerateEnvKey = useMemo(
+    () => resolveGeminiGenerateEnvKey({ generationMode, solverModelProfile }),
+    [generationMode, solverModelProfile],
+  );
   const [explanationSelectionMode, setExplanationSelectionMode] = useState<
     "all" | "core"
   >("all");
@@ -3851,6 +3857,15 @@ export default function Home() {
                       문항별로만 다르게 쓰려면 아래 「현재 문항」또는 문항 카드의 「모델」에서 덮어쓰기를 지정하세요.
                     </p>
                   </div>
+                  <p className="mt-2 rounded border border-amber-200 bg-amber-50 p-2 text-[11px] leading-relaxed text-amber-950">
+                    <span className="font-semibold">1차 Gemini 후보 env:</span>{" "}
+                    <code className="rounded bg-white px-1 font-mono text-[10px] text-slate-800">
+                      {resolvedGeminiGenerateEnvKey}
+                    </code>
+                    . 모든 키에 같은 모델을 두면 모드·프로필만 바꿔도 결과는 같을 수 있습니다. 교차검증은{" "}
+                    <code className="font-mono text-[10px]">EXPLANATION_CROSS_VERIFY</code>
+                    로 켜며 추가 호출 비용이 있습니다.
+                  </p>
                   <label className="mt-2 flex items-center gap-2">
                     <input
                       type="checkbox"

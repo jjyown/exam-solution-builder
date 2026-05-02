@@ -21,6 +21,18 @@
   - `GEMINI_MODELS_GENERATE_BALANCED`
   - `GEMINI_MODELS_GENERATE_KILLER`
 - 기본 후보: 각 프로필 모두 `gemini-2.0-flash`
+- **UI「생성 모드 × 문제풀이 프로필」→ 실제로 읽는 키** (`resolveGeminiGenerateEnvKey` 와 동일):
+
+| generationMode | solverProfile | 사용하는 env 키 |
+|----------------|---------------|------------------|
+| `test` | `easy` | `GEMINI_MODELS_GENERATE_EASY` |
+| `test` | `balanced` | `GEMINI_MODELS_GENERATE_TEST` |
+| `test` | `killer` | `GEMINI_MODELS_GENERATE_KILLER` |
+| `final` | `easy` | `GEMINI_MODELS_GENERATE_FINAL` |
+| `final` | `balanced` | `GEMINI_MODELS_GENERATE_BALANCED` |
+| `final` | `killer` | `GEMINI_MODELS_GENERATE_KILLER` |
+
+- **낭비 방지:** 위 키들에 **동일한 모델 ID**를 넣으면, 라디오만 바꿔도 **호출 모델은 같을 수 있습니다.** 차이를 내려면 키별로 다른 모델을 지정하세요.
 - 참고:
   - 코드에서 `gemini-1.5-pro`, `gemini-1.5-flash`는 자동 필터링됩니다.
   - Gemini 실패 시 OpenAI fallback 경로를 사용합니다.
@@ -72,7 +84,7 @@ OPENAI_MODEL_GENERATE_FALLBACK=gpt-4o
 ## 4) 최고 신뢰도(비용 감수) 권장 조합 — 전문가·MCP 토의 종합
 
 MCP `gemini_chat`·`gpt_chat`로 1차=비전·2차=교차검증 구조를 재확인했고, **코드에서 제외되는 1.5 Pro/Flash는 사용하지 않습니다.**  
-아래는 `pickModelCandidates` 매핑과 맞춘 **권장 모델 ID**입니다(계정/리전에서 404가 나면 한 단계 낮은 Flash 계열로 내리면 됨).
+아래는 `resolveGeminiGenerateEnvKey` / `pickModelCandidates` 와 맞춘 **권장 모델 ID** 예시입니다(계정/리전에서 404가 나면 한 단계 낮은 Flash 계열로 내리면 됨).
 
 | generationMode | solverProfile | 1차(Gemini, env 키) | 2차(교차검증, OpenAI vision) |
 |----------------|---------------|----------------------|--------------------------------|
@@ -81,7 +93,9 @@ MCP `gemini_chat`·`gpt_chat`로 1차=비전·2차=교차검증 구조를 재확
 | `final` | `killer` | `GEMINI_MODELS_GENERATE_KILLER` → `gemini-2.5-pro` | 동일 |
 | `test` | `easy` | `GEMINI_MODELS_GENERATE_EASY` → `gemini-2.5-flash` | 동일 |
 | `test` | `balanced` | `GEMINI_MODELS_GENERATE_TEST` → `gemini-2.5-flash` | 동일 |
-| `test` | `killer` | `GEMINI_MODELS_GENERATE_TEST` → `gemini-2.5-pro` | 동일 |
+| `test` | `killer` | `GEMINI_MODELS_GENERATE_KILLER` → `gemini-2.5-pro`(또는 실험 시 flash) | 동일 |
+
+- **비용 절감 팁:** 실험은 `GEMINI_MODELS_GENERATE_TEST`·`GEMINI_MODELS_GENERATE_EASY`만 저렴한 Flash로 두고, 발행 직전만 `BALANCED`/`KILLER`/`FINAL`을 올리는 식으로 나누면 불필요한 고가 호출을 줄일 수 있습니다.
 
 필수 플래그:
 

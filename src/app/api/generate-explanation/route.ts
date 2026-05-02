@@ -1,5 +1,6 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { NextResponse } from "next/server";
+import { resolveGeminiGenerateEnvKey } from "@/lib/generateExplanationGeminiEnv";
 import { buildSystemInstruction } from "./prompts";
 import { getRuntimePromptRules } from "@/lib/supabasePromptRules";
 import { isGeminiRateLimitedMessage } from "@/lib/geminiRateLimit";
@@ -65,19 +66,13 @@ function pickModelCandidates(params: {
   generationMode: "test" | "final";
   solverModelProfile: "easy" | "balanced" | "killer";
 }) {
-  const { generationMode, solverModelProfile } = params;
-  if (solverModelProfile === "easy") {
-    return generationMode === "test" ? [...EASY_MODEL_CANDIDATES] : [...FINAL_MODEL_CANDIDATES];
-  }
-  if (solverModelProfile === "killer") {
-    return generationMode === "test" ? [...TEST_MODEL_CANDIDATES] : [...KILLER_MODEL_CANDIDATES];
-  }
-  if (solverModelProfile === "balanced") {
-    return generationMode === "test"
-      ? [...TEST_MODEL_CANDIDATES]
-      : [...BALANCED_MODEL_CANDIDATES];
-  }
-  return generationMode === "test" ? [...TEST_MODEL_CANDIDATES] : [...FINAL_MODEL_CANDIDATES];
+  const key = resolveGeminiGenerateEnvKey(params);
+  if (key === "GEMINI_MODELS_GENERATE_EASY") return [...EASY_MODEL_CANDIDATES];
+  if (key === "GEMINI_MODELS_GENERATE_FINAL") return [...FINAL_MODEL_CANDIDATES];
+  if (key === "GEMINI_MODELS_GENERATE_TEST") return [...TEST_MODEL_CANDIDATES];
+  if (key === "GEMINI_MODELS_GENERATE_BALANCED") return [...BALANCED_MODEL_CANDIDATES];
+  if (key === "GEMINI_MODELS_GENERATE_KILLER") return [...KILLER_MODEL_CANDIDATES];
+  return [...FINAL_MODEL_CANDIDATES];
 }
 
 function validateExplanationFormat(text: string) {
