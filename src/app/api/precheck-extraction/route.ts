@@ -95,7 +95,8 @@ export async function POST(request: Request) {
     const client = new GoogleGenerativeAI(apiKey);
     const prompt = [
       "너는 수학 문제 이미지 품질 검수기다.",
-      "중고등 수학 문제 해설 생성 전, 이미지에서 핵심 정보 누락 여부만 판단하라.",
+      "전제: 이미지는 사용자가 시험지에서 지정한 단일 문항 영역(크롭)이다. 해설 파이프라인은 크롭당 한 문항만 처리한다.",
+      "중고등 수학 문제 해설 생성 전, 이 크롭이 그 한 문항을 판독·풀이하기에 충분한지 판단하라.",
       "반드시 JSON 하나만 반환하라. 다른 문장 금지.",
       '형식: {"pass":boolean,"score":0-100,"missing":[string],"reasons":[string]}',
       "판단 기준:",
@@ -103,6 +104,7 @@ export async function POST(request: Request) {
       "- 객관식이면 선택지(①~⑤ 또는 1~5) 가급적 식별 가능해야 함",
       "- 조건/식/도형 핵심 정보가 잘리지 않아야 함",
       "- 흐림, 잘림, 과도한 여백으로 정보가 부족하면 fail",
+      "- 크롭 안에 서로 다른 두 개 이상의 완결된 문항(본문·선지가 둘 다 읽히는 수준)이 동시에 들어오면 해설 혼선 위험이 크므로 점수를 크게 낮추고 reasons에 명시하라.",
       body.crop ? `- 사용자 크롭 정보 참고: ${JSON.stringify(body.crop)}` : "",
     ]
       .filter(Boolean)

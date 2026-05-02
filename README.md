@@ -100,11 +100,13 @@ npm run dev
 - Gemini 응답 형식을 안정화하기 위해 시스템 프롬프트를 API 라우트에 고정했습니다.
 - PDF는 A4 기준으로 저장되며, 내용이 길면 자동으로 다음 페이지를 추가합니다.
 - 현재 파이프라인 모델 목록은 `docs/models.md`를 참고하세요.
+- 이미지 해설은 **문제 박스(크롭)당 한 문항** 전제입니다. 영역 지정→내보내기 권장 동선은 `docs/workflow-image-to-docx.md`를 보세요.
 
 ## 모델 운영 가이드
 
 - Gemini 경로: `docs/models.md` 기준으로 환경변수에서 후보를 관리합니다.
 - 생성/보정 API는 Gemini 실패 시 OpenAI 폴백을 사용합니다.
+- OpenAI 폴백 1차가 형식/정합에 실패하면 **기본적으로 동일 이미지로 2회차 호출**합니다. 끄려면 `OPENAI_EXPLANATION_FORMAT_RETRY=false`(`docs/models.md` 참고).
 - 모델명은 코드 하드코딩보다 `.env.local`/배포 환경변수에서 운영하는 것을 권장합니다.
 - 앱 제한 규칙을 동적으로 관리하려면 `docs/supabase-prompt-rules.md`를 참고하세요.
 

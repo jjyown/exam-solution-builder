@@ -30,6 +30,11 @@ export const EXPORT_ESTIMATION_PATTERN =
 
 const IMAGE_ABSENT_PATTERN = /이미지가\s*제공되지\s*않/i;
 
+/** 본문에 타 문항으로 확장하는 패턴(생성 혼입·붙여넣기 오염 완화) */
+const EXPORT_MULTI_PROBLEM_PHRASE = /(?:^|\n)\s*(?:다음|이어서|또\s*다른)\s*문제/m;
+const EXPORT_ENUM_OTHER_ITEM =
+  /(?:입니다|이다|습니다|합니다|된다)\.?\s*\n+\s*(?:[3-9]|1[0-9])\.\s/m;
+
 const MIN_EXPLANATION_BODY_LENGTH = 35;
 
 /** LaTeX·불필요 공백 제거(보정 후처리·저장 전 정제에 사용) */
@@ -83,6 +88,19 @@ export function validateExportDocEntries(entries: ExportDocEntry[]): { ok: boole
     }
     if (IMAGE_ABSENT_PATTERN.test(body)) {
       issues.push(`${entry.questionNo}번: 이미지 부재 문구가 포함되어 있습니다.`);
+    }
+    if (/\[정답\]/i.test(body)) {
+      issues.push(
+        `${entry.questionNo}번: 해설 본문에 [정답] 헤더가 포함되어 있습니다. 빠른정답 필드와 본문을 분리하세요.`,
+      );
+    }
+    if (EXPORT_MULTI_PROBLEM_PHRASE.test(body)) {
+      issues.push(`${entry.questionNo}번: 다른 문항으로 이어지는 표현이 감지되었습니다.`);
+    }
+    if (EXPORT_ENUM_OTHER_ITEM.test(body)) {
+      issues.push(
+        `${entry.questionNo}번: 다른 문항 번호 서술이 섞였을 수 있습니다. 한 문항만 남기세요.`,
+      );
     }
   });
 

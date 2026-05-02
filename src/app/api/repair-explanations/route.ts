@@ -58,6 +58,25 @@ function normalizeRepairedEntries(items: unknown[]): ExportDocEntry[] {
     .filter((item) => item.questionNo);
 }
 
+/** 보정 결과가 입력 문항 집합·개수와 같아야 한다(병합·누락 방지). */
+function repairOutputMatchesInput(
+  input: ExportDocEntry[],
+  output: ExportDocEntry[],
+): { ok: boolean; detail?: string } {
+  if (input.length !== output.length) {
+    return {
+      ok: false,
+      detail: `문항 개수 불일치(입력 ${input.length}, 출력 ${output.length})`,
+    };
+  }
+  const inNos = input.map((e) => e.questionNo).sort();
+  const outNos = output.map((e) => e.questionNo).sort();
+  if (!inNos.every((n, i) => n === outNos[i])) {
+    return { ok: false, detail: "questionNo 집합이 입력과 다릅니다." };
+  }
+  return { ok: true };
+}
+
 async function repairWithOpenAi(params: {
   apiKey: string;
   model: string;
@@ -112,8 +131,14 @@ export async function POST(request: Request) {
     const openAiModel = process.env.OPENAI_MODEL_REPAIR_FALLBACK?.trim() || "gpt-4o-mini";
     const prompt = [
       "다음 문항 해설들을 DOCX 내보내기용으로 정제해.",
+      "입력은 내보내기 직전 스냅샷이며, 각 항목은 이미지 파이프라인에서 문항별로 생성된 텍스트다.",
       "반드시 JSON 하나만 반환하고, JSON 외 문장은 절대 출력하지 마.",
       '형식: {"entries":[{"questionNo":"1","quickAnswer":"...","body":"..."}]}',
+      "",
+      "[문항 무결성]",
+      "- 출력 entries 개수·questionNo 집합은 입력과 동일하게 유지한다. 문항 병합·누락·번호 변경 금지.",
+      "- 각 body는 해당 questionNo 한 문항의 풀이만 담는다. 타 문항 풀이나 '다음 문제'로 이어 붙이지 마라.",
+      "- body 안에 [정답] 헤더를 넣지 마라(정답은 quickAnswer만).",
       "",
       "[필수 규칙 — 클라이언트 검증과 동일]",
       "- 내부적으로 '중고등학교 20년 경력 교사'와 '문제 출제위원' 관점 토론을 거쳐 최종본을 작성.",
@@ -148,6 +173,11 @@ export async function POST(request: Request) {
           failures.push(`${modelName}: 보정 결과 비어 있음`);
           continue;
         }
+        const setCheck = repairOutputMatchesInput(entries, repaired);
+        if (!setCheck.ok) {
+          failures.push(`${modelName}: ${setCheck.detail ?? "출력 문항 집합 불일치"}`);
+          continue;
+        }
         const gate = validateExportDocEntries(repaired);
         if (!gate.ok) {
           failures.push(`${modelName}: 보정 후 규칙 미통과 - ${gate.issues.join(" | ")}`);
@@ -176,8 +206,9 @@ export async function POST(request: Request) {
         } else {
           const parsed = parseJsonSafely(json);
           const repaired = normalizeRepairedEntries(parsed.entries || []);
+          const setCheck = repairOutputMatchesInput(entries, repaired);
           const gate = validateExportDocEntries(repaired);
-          if (repaired.length > 0 && gate.ok) {
+          if (repaired.length > 0 && setCheck.ok && gate.ok) {
             const warnings = repaired.flatMap((entry) =>
               getExportRepairWarnings(entry).map((warning) => `${entry.questionNo}번(${warning})`),
             );
@@ -189,6 +220,10 @@ export async function POST(request: Request) {
           }
           if (repaired.length === 0) {
             failures.push(`openai:${openAiModel}: 보정 결과 비어 있음`);
+          } else if (!setCheck.ok) {
+            failures.push(
+              `openai:${openAiModel}: ${setCheck.detail ?? "출력 문항 집합 불일치"}`,
+            );
           } else {
             failures.push(`openai:${openAiModel}: 보정 후 규칙 미통과 - ${gate.issues.join(" | ")}`);
           }

@@ -170,6 +170,18 @@ function validateCrossProblemBleed(text: string) {
     );
   }
 
+  if (/(?:^|\n)\s*(?:다음|이어서|또\s*다른)\s*문제/m.test(explanation)) {
+    issues.push(
+      "[해설]에 다른 문항으로 이어지는 표현이 있습니다. 현재 크롭의 한 문항만 완결해 주세요.",
+    );
+  }
+
+  if (/(?:^|\n)\s*(?:[3-9]|1[0-9])\s*번\s*(?:문항|문제)/m.test(explanation)) {
+    issues.push(
+      "[해설]에 다른 문항 번호가 등장했습니다. 단일 크롭 문항만 다루세요.",
+    );
+  }
+
   const answerHeaders = text.match(/\[정답\]/gi);
   if (answerHeaders && answerHeaders.length > 1) {
     issues.push("[정답] 헤더가 여러 번입니다. 한 문항만 출력하세요.");
@@ -199,7 +211,10 @@ function validateCurriculumScope(text: string) {
   return { ok: issues.length === 0, issues };
 }
 
-function validatePedagogicalPolicy(text: string) {
+function validatePedagogicalPolicy(
+  text: string,
+  solverModelProfile: "easy" | "balanced" | "killer" = "balanced",
+) {
   const issues: string[] = [];
   const answer = text.match(/\[정답\]\s*([^\n\r]*)/i)?.[1]?.trim() ?? "";
   const explanation = text.match(/\[해설\]\s*([\s\S]+)/i)?.[1]?.trim() ?? "";
@@ -215,7 +230,9 @@ function validatePedagogicalPolicy(text: string) {
       .map((line) => line.trim())
       .filter(Boolean).length || 0;
   const methodCount = (explanation.match(/\[방법\s*\d+\]/g) ?? []).length;
-  if (methodCount <= 1 && sentenceCount > 12) {
+  const maxSentencesSingleMethod =
+    solverModelProfile === "killer" ? 22 : solverModelProfile === "easy" ? 10 : 14;
+  if (methodCount <= 1 && sentenceCount > maxSentencesSingleMethod) {
     issues.push("단일 풀이 기준으로 해설이 과도하게 장문입니다. 핵심 수식 중심으로 압축해 주세요.");
   }
   return { ok: issues.length === 0, issues };
@@ -268,6 +285,9 @@ function buildRetryInstruction(
     lines.push("중고등학교 20년 교사 + 출제위원 토론을 거쳐 정석 풀이/학생 친화 요약본으로 다시 작성하세요.");
     lines.push("간단한 문제는 핵심 수식과 결론 중심으로 4~8문장 내외로 간결히 정리하세요.");
   }
+  lines.push(
+    "[단일 문항] 첨부 크롭은 한 문항만이다. 다른 문항 번호(예: 3번 문항, 줄바꿈 뒤 2.)로 새 풀이를 시작하거나 인용하지 마세요.",
+  );
   lines.push("반드시 아래 형식으로만 다시 작성하세요.");
   lines.push("[정답] (한 줄)");
   lines.push("[해설]");
@@ -375,7 +395,10 @@ function resolveCrossVerifyModel() {
 }
 
 /** Gemini 1차 초안과 동일 기준으로 교차검증 결과를 받아들일지 판단 */
-function passesPrimaryQualityGate(generatedText: string) {
+function passesPrimaryQualityGate(
+  generatedText: string,
+  solverModelProfile: "easy" | "balanced" | "killer" = "balanced",
+) {
   const formatCheck = validateExplanationFormat(generatedText);
   const consistencyCheck = validateExplanationConsistency(generatedText);
   const bleedCheck = validateCrossProblemBleed(generatedText);
@@ -384,7 +407,7 @@ function passesPrimaryQualityGate(generatedText: string) {
     issues: [...consistencyCheck.issues, ...bleedCheck.issues],
   };
   const scopeCheck = validateCurriculumScope(generatedText);
-  const pedagogyCheck = validatePedagogicalPolicy(generatedText);
+  const pedagogyCheck = validatePedagogicalPolicy(generatedText, solverModelProfile);
   return (
     formatCheck.ok &&
     consistencyEffective.ok &&
@@ -413,7 +436,8 @@ function buildCrossVerifyUserPrompt(
       : "생성 모드: 최종(발행 수준).";
   return [
     "[역할]",
-    "당신은 중고등 수학 해설의 독립 검토자다. 첨부 이미지의 문제를 다시 읽고, 아래 [초안]의 정답·풀이가 문제 조건·보기와 논리적으로 일치하는지 검증하라.",
+    "당신은 중고등 수학 해설의 독립 검토자다. 첨부 이미지는 사용자가 지정한 단일 문항 크롭이다. 문제를 다시 읽고, 아래 [초안]의 정답·풀이가 그 한 문항의 조건·보기와 논리적으로 일치하는지 검증하라.",
+    "다른 문항의 풀이가 섞였다면 제거하고, 이 문항만 [정답]+[해설]로 완결하라.",
     modeLine,
     profileLine,
     "",
@@ -466,7 +490,7 @@ async function runOpenAiCrossVerify(params: {
         verifyWarning: "교차검증 응답이 비어 있어 1차 초안을 유지했습니다.",
       };
     }
-    if (!passesPrimaryQualityGate(verified)) {
+    if (!passesPrimaryQualityGate(verified, params.solverModelProfile)) {
       return {
         text: params.draft,
         crossVerified: false,
@@ -541,6 +565,17 @@ export async function POST(request: Request) {
 
     const prompt = [
       "다음 문제를 해설해줘.",
+      "",
+      "[입력 계약]",
+      "- 첨부 이미지는 사용자가 시험지에서 지정한 단일 문항 영역(크롭)이다.",
+      "- 이 호출에서 출력은 반드시 한 문항만: [정답] 블록 1개, [해설] 블록 1개.",
+      "- 다른 문항 번호·선택지·풀이를 인용하거나 이어 붙이지 마라.",
+      "- 근삿값·추정·어림으로 결론을 내리지 말고, 교과서 수준의 정확한 전개로 마무리하라.",
+      solverModelProfile === "easy"
+        ? "- 분량: 단일 풀이(대표 1가지) 기준으로 핵심 수식과 결론 위주, 불필요한 부연은 줄여라."
+        : solverModelProfile === "killer"
+          ? "- 분량: 고난도 문항은 필요한 논리 단계를 빠짐없이 쓰되, 여전히 한 문항 안에서만 완결하라."
+          : "- 분량: 단계를 균형 있게 제시하되 한 문항 범위를 넘기지 마라.",
       "",
       `[문제 텍스트]`,
       questionText || "(텍스트 미입력 - 이미지의 문제를 직접 읽어 해설해줘)",
@@ -655,7 +690,7 @@ export async function POST(request: Request) {
           issues: [...consistencyCheck.issues, ...bleedCheck.issues],
         };
         const scopeCheck = validateCurriculumScope(generatedText);
-        const pedagogyCheck = validatePedagogicalPolicy(generatedText);
+        const pedagogyCheck = validatePedagogicalPolicy(generatedText, solverModelProfile);
         if (
           formatCheck.ok &&
           consistencyEffective.ok &&
@@ -745,7 +780,7 @@ export async function POST(request: Request) {
           issues: [...retryConsistencyCheck.issues, ...retryBleedCheck.issues],
         };
         const retryScopeCheck = validateCurriculumScope(retryText);
-        const retryPedagogyCheck = validatePedagogicalPolicy(retryText);
+        const retryPedagogyCheck = validatePedagogicalPolicy(retryText, solverModelProfile);
         if (
           !retryFormatCheck.ok ||
           !retryConsistencyEffective.ok ||
@@ -829,7 +864,7 @@ export async function POST(request: Request) {
             issues: [...consistencyCheck.issues, ...bleedCheck.issues],
           };
           const scopeCheck = validateCurriculumScope(openAiText);
-          const pedagogyCheck = validatePedagogicalPolicy(openAiText);
+          const pedagogyCheck = validatePedagogicalPolicy(openAiText, solverModelProfile);
           const pedagogySplit = splitPedagogyIssues(pedagogyCheck.issues);
           const truncated = isLikelyTruncatedResult(openAiText);
 
@@ -851,13 +886,14 @@ export async function POST(request: Request) {
             );
           }
 
-          const allowOpenAiFormatRetry =
-            (process.env.OPENAI_EXPLANATION_FORMAT_RETRY || "").trim().toLowerCase() ===
-            "true";
+          const openAiRetryEnv = (process.env.OPENAI_EXPLANATION_FORMAT_RETRY || "")
+            .trim()
+            .toLowerCase();
+          const allowOpenAiFormatRetry = openAiRetryEnv !== "false";
 
           if (!allowOpenAiFormatRetry) {
             failures.push(
-              `openai:${openAiModel}: 형식/정합 검증 실패 - OpenAI 2차 호출 생략(OPENAI_EXPLANATION_FORMAT_RETRY 미설정) - 누락: ${formatCheck.missing.join(", ")} / 정합: ${consistencyEffective.issues.join(" | ")} / 범위: ${scopeCheck.issues.join(" | ")} / 수업기준(치명): ${pedagogySplit.critical.join(" | ") || "없음"} / 수업기준(경고): ${pedagogySplit.warnings.join(" | ") || "없음"}`,
+              `openai:${openAiModel}: 형식/정합 검증 실패 - OpenAI 2차 호출 생략(OPENAI_EXPLANATION_FORMAT_RETRY=false) - 누락: ${formatCheck.missing.join(", ")} / 정합: ${consistencyEffective.issues.join(" | ")} / 범위: ${scopeCheck.issues.join(" | ")} / 수업기준(치명): ${pedagogySplit.critical.join(" | ") || "없음"} / 수업기준(경고): ${pedagogySplit.warnings.join(" | ") || "없음"}`,
             );
           } else {
             const retryInstruction = buildRetryInstruction(
@@ -893,7 +929,7 @@ export async function POST(request: Request) {
                 issues: [...retryConsistencyCheck.issues, ...retryBleedCheck.issues],
               };
               const retryScopeCheck = validateCurriculumScope(retryText);
-              const retryPedagogyCheck = validatePedagogicalPolicy(retryText);
+              const retryPedagogyCheck = validatePedagogicalPolicy(retryText, solverModelProfile);
               const retryPedagogySplit = splitPedagogyIssues(retryPedagogyCheck.issues);
               const retryTruncated = isLikelyTruncatedResult(retryText);
 

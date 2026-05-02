@@ -1,6 +1,7 @@
 # 현재 사용 모델 목록 (Gemini / GPT)
 
-이 문서는 최신 코드 기준으로, 해설 제작 파이프라인에서 사용하는 모델과 환경변수 키를 정리합니다.
+이 문서는 최신 코드 기준으로, 해설 제작 파이프라인에서 사용하는 모델과 환경변수 키를 정리합니다.  
+전체 동선(영역 지정→게이트→내보내기)은 [workflow-image-to-docx.md](./workflow-image-to-docx.md)를 함께 보세요.
 
 ## 1) Gemini 모델
 
@@ -10,6 +11,7 @@
 - 참고:
   - 코드에서 `gemini-1.5-pro`, `gemini-1.5-flash`는 자동 필터링됩니다.
   - precheck 429(`Too Many Requests`/`Resource exhausted`)는 UI에서 생성 강행하지 않도록 차단됩니다.
+  - 프롬프트는 **한 박스·한 문항 크롭** 전제이며, 크롭에 완결된 문항이 둘 이상 동시에 들어오면 점수를 크게 낮추도록 안내합니다([workflow-image-to-docx.md](./workflow-image-to-docx.md)).
 
 ### B. 해설 생성 (`/api/generate-explanation`)
 - 환경변수 키:
@@ -32,6 +34,7 @@
 ### C. DOCX 내보내기 직전 자동 보정 (`/api/repair-explanations`)
 - 환경변수 키: `GEMINI_MODELS_REPAIR`
 - 운영 권장: `gemini-2.0-flash` 우선
+- 클라이언트와 동일한 `validateExportDocEntries` 기준을 따르며, 보정 프롬프트는 **항목별 한 문항만**·**body에 `[정답]` 금지**·**입력과 동일한 문항 집합 유지**를 요구한다.
 
 ## 2) GPT(OpenAI) 모델
 
@@ -41,6 +44,7 @@
 - 동작:
   - Gemini 후보가 모두 실패하거나 검증을 통과하지 못하면 OpenAI fallback을 시도합니다.
   - 수업기준 이슈는 치명/경고로 분리해 처리합니다.
+  - **형식·정합 재시도:** `OPENAI_EXPLANATION_FORMAT_RETRY`가 `false`가 **아니면**(미설정 포함) 폴백 1차가 검증에 실패했을 때 **동일 이미지로 2차 호출**을 시도합니다. API 비용을 줄이려면 `.env`에 `OPENAI_EXPLANATION_FORMAT_RETRY=false`를 명시하세요.
 
 ### A-2. 교차 검증 전용 (`/api/generate-explanation`)
 - 환경변수 키: `OPENAI_MODEL_CROSS_VERIFY`
@@ -62,6 +66,7 @@ GEMINI_MODELS_GENERATE_BALANCED=gemini-2.0-flash
 GEMINI_MODELS_GENERATE_KILLER=gemini-2.0-flash
 GEMINI_MODELS_REPAIR=gemini-2.0-flash
 OPENAI_MODEL_GENERATE_FALLBACK=gpt-4o
+# OPENAI_EXPLANATION_FORMAT_RETRY=false
 ```
 
 ## 4) 최고 신뢰도(비용 감수) 권장 조합 — 전문가·MCP 토의 종합

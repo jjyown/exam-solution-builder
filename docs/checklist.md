@@ -18,6 +18,7 @@
 - [x] 해설 정합 검증 2차 적용(정답-본문 모순/형식 혼합 감지 후 재생성)
 - [x] 교육과정 외 용어/기호 필터 1차 적용(로피탈/편미분/선형대수 등 감지 후 재생성)
 - [x] 문제 추출 비전 사전검증 2차 적용(`/api/precheck-extraction`, 점수 기반 생성 차단)
+- [x] 사전검증 프롬프트에 단일 크롭·단일 문항 전제 및 복수 문항 동시 노출 시 품질 경고 기준
 - [x] 품질 경고 플래그 UI 적용(자동 보정 이슈를 화면에 표시)
 - [x] 우측 저장 버튼 UX 개편(해설 생성 전 숨김, 생성 후 단계형 노출)
 - [x] 좌측 UI 단순화(현재 단계 안내/고급 설정 접기/AI 원문 기본 비노출)
@@ -86,9 +87,10 @@
 - [x] `npm run build`로 타입/빌드 검증 완료
 - [x] Gemini 429 감지 시 생성·사전검증 API에서 후보 모델 순회 중단(`geminiRateLimit`, `generate-explanation`, `precheck-extraction`)
 - [x] 해설 생성 프론트 단건·배치 중복 실행 방지(`useRef` 가드) 및 배치 `generate-explanation` 백오프 재시도 1회 명시
-- [x] OpenAI 폴백 형식 재시도 기본 비활성화(`OPENAI_EXPLANATION_FORMAT_RETRY`, 필요 시만 `true`)
+- [x] OpenAI 폴백 형식 재시도 기본 허용(비용 절감 시에만 `OPENAI_EXPLANATION_FORMAT_RETRY=false`)
 - [x] 해설 최고 신뢰도 옵션: Gemini 1차 후 OpenAI vision 교차 검증(`EXPLANATION_CROSS_VERIFY`, `OPENAI_MODEL_CROSS_VERIFY`, 응답 `crossVerified`)
 - [x] DOCX 내보내기 규칙 단일화(`exportDocQuality`)·결정적 전처리·repair 프롬프트 강화·내보내기 전 점검 UI
+- [x] 내보내기 검증에 타 문항 혼입·본문 `[정답]` 차단, repair API 출력 문항 집합 일치 게이트
 
 ## 배포 전 체크
 - [ ] `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REFRESH_TOKEN` 동일 OAuth 세트 확인

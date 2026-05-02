@@ -133,9 +133,9 @@
 - 해설 생성에서 Gemini **형식 재시도(`generateContent` 2회차)** 도중 동일 신호면 **추가 모델 순회 없이** 종료한다.
 - 프론트에서 단건 해설 생성·배치 순차 생성은 **`useRef` 가드**로 중복 클릭 실행을 막는다.
 - 배치의 `/api/generate-explanation` 호출은 `fetchWithBackoff` **재시도 1회**로 제한해 클라이언트 측 호출 증폭을 줄인다(단건·사전검증과 동일 계열).
-- OpenAI 폴백에서 1차 응답이 형식/정합 미달일 때 **2차 보정 호출은 기본 생략**한다. 필요 시에만 `.env`에 `OPENAI_EXPLANATION_FORMAT_RETRY=true`를 명시한다.
+- OpenAI 폴백에서 1차 응답이 형식/정합 미달일 때 **2차 보정 호출은 기본 허용**한다(미설정 포함). API 비용을 줄일 때만 `.env`에 `OPENAI_EXPLANATION_FORMAT_RETRY=false`를 명시한다.
 - 장기: `/api/hml/append-solution` 등 문항 다건 경로의 **문항당 LLM 호출 상한·429 정책**을 별도 설계한다.
-- 최고 신뢰도 옵션: `EXPLANATION_CROSS_VERIFY=true` + `OPENAI_MODEL_CROSS_VERIFY`(기본 `gpt-4o`)로 Gemini 1차 초안 후 OpenAI vision 교차 검증 1회(`docs/models.md` §4 프로필별 모델 표).
+- 최고 신뢰도 옵션: `EXPLANATION_CROSS_VERIFY=true` + `OPENAI_MODEL_CROSS_VERIFY`(기본 `gpt-4o`)로 Gemini 1차 초안 후 OpenAI vision 교차 검증 1회(`docs/models.md` 「4) 최고 신뢰도」 프로필별 모델 표).
 - DOCX 내보내기 품질: `src/lib/exportDocQuality.ts`에서 검증·정제 규칙 단일화. 3단계 UI에 「내보내기 전 점검」패널로 위반 문항을 저장 전 표시. 저장 시 결정적 패치(LaTeX·이미지 부재 문구 제거) 후 검증·`/api/repair-explanations` 보정 프롬프트를 클라이언트 규칙과 동일하게 강화.
 
 ## 검증 기준(완료 조건)
