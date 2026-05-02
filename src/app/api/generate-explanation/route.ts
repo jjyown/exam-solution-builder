@@ -4,6 +4,7 @@ import { resolveGeminiGenerateEnvKey } from "@/lib/generateExplanationGeminiEnv"
 import { buildSystemInstruction } from "./prompts";
 import { getRuntimePromptRules } from "@/lib/runtimePromptRules";
 import { isGeminiRateLimitedMessage } from "@/lib/geminiRateLimit";
+import { DEFAULT_GEMINI_COST_MODELS } from "@/lib/geminiDefaultModels";
 
 type GenerateRequestBody = {
   questionText?: string;
@@ -38,28 +39,28 @@ function parseModelCandidatesFromEnv(envKey: string, fallback: string[]) {
   const raw = process.env[envKey]?.trim();
   if (!raw) {
     const normalizedFallback = normalize(fallback);
-    return normalizedFallback.length > 0 ? normalizedFallback : ["gemini-2.0-flash"];
+    return normalizedFallback.length > 0 ? normalizedFallback : [...DEFAULT_GEMINI_COST_MODELS];
   }
   const parsed = normalize(raw.split(","));
   if (parsed.length > 0) return parsed;
   const normalizedFallback = normalize(fallback);
-  return normalizedFallback.length > 0 ? normalizedFallback : ["gemini-2.0-flash"];
+  return normalizedFallback.length > 0 ? normalizedFallback : [...DEFAULT_GEMINI_COST_MODELS];
 }
 
 const FINAL_MODEL_CANDIDATES = parseModelCandidatesFromEnv("GEMINI_MODELS_GENERATE_FINAL", [
-  "gemini-2.0-flash",
+  ...DEFAULT_GEMINI_COST_MODELS,
 ]);
 const TEST_MODEL_CANDIDATES = parseModelCandidatesFromEnv("GEMINI_MODELS_GENERATE_TEST", [
-  "gemini-2.0-flash",
+  ...DEFAULT_GEMINI_COST_MODELS,
 ]);
 const EASY_MODEL_CANDIDATES = parseModelCandidatesFromEnv("GEMINI_MODELS_GENERATE_EASY", [
-  "gemini-2.0-flash",
+  ...DEFAULT_GEMINI_COST_MODELS,
 ]);
 const BALANCED_MODEL_CANDIDATES = parseModelCandidatesFromEnv("GEMINI_MODELS_GENERATE_BALANCED", [
-  "gemini-2.0-flash",
+  ...DEFAULT_GEMINI_COST_MODELS,
 ]);
 const KILLER_MODEL_CANDIDATES = parseModelCandidatesFromEnv("GEMINI_MODELS_GENERATE_KILLER", [
-  "gemini-2.0-flash",
+  ...DEFAULT_GEMINI_COST_MODELS,
 ]);
 
 function pickModelCandidates(params: {

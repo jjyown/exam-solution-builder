@@ -750,6 +750,7 @@ export default function Home() {
   const [noQuickAnswerPage, setNoQuickAnswerPage] = useState(false);
   const [noExplanationRefPage, setNoExplanationRefPage] = useState(false);
   const [isLoadingExams, setIsLoadingExams] = useState(false);
+  const [isUploadingCropBundle, setIsUploadingCropBundle] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
   const [queuedProblems, setQueuedProblems] = useState<QueuedProblem[]>([]);
   const [savedPageNumbers, setSavedPageNumbers] = useState<number[]>([]);
@@ -2310,6 +2311,61 @@ export default function Home() {
     setQueuedProblems((prev) => prev.filter((item) => item.id !== id));
   };
 
+  const handleUploadCropBundleToDrive = useCallback(async () => {
+    if (queuedProblems.length === 0) return;
+    setIsUploadingCropBundle(true);
+    setErrorMessage("");
+    try {
+      const JSZip = (await import("jszip")).default;
+      const zip = new JSZip();
+      const extFromMime = (mime: string) => {
+        const m = mime.toLowerCase();
+        if (m.includes("png")) return ".png";
+        if (m.includes("jpeg")) return ".jpg";
+        if (m.includes("webp")) return ".webp";
+        if (m.includes("gif")) return ".gif";
+        return ".img";
+      };
+      const itemsMeta: Array<{ questionNo: string; pageLabel: string; file: string }> = [];
+      for (const item of queuedProblems) {
+        const label = item.pageLabel.replace(/[/\\?%*:|"<> \t\n\r]/g, "_") || "page";
+        const ext = extFromMime(item.imageMimeType || "image/png");
+        const fname = `q${item.questionNo}_${label}${ext}`;
+        zip.file(fname, item.imageBase64, { base64: true });
+        itemsMeta.push({ questionNo: item.questionNo, pageLabel: item.pageLabel, file: fname });
+      }
+      const examLabel = selectedExam || "직접업로드";
+      zip.file(
+        "manifest.json",
+        JSON.stringify(
+          {
+            exportedAt: new Date().toISOString(),
+            examName: examLabel,
+            itemCount: queuedProblems.length,
+            items: itemsMeta,
+          },
+          null,
+          2,
+        ),
+      );
+      const blob = await zip.generateAsync({ type: "blob", compression: "DEFLATE" });
+      const form = new FormData();
+      form.append("file", blob, "bundle.zip");
+      form.append("examName", examLabel);
+      const res = await fetch("/api/upload-crop-bundle", { method: "POST", body: form });
+      if (!res.ok) {
+        const msg = await parseApiErrorMessage(res, "Drive 업로드 실패");
+        throw new Error(msg);
+      }
+      const data = (await res.json()) as { message?: string };
+      setSuccessMessage(data.message || "Drive에 크롭 묶음을 올렸습니다.");
+    } catch (e) {
+      setErrorMessage(e instanceof Error ? e.message : "Drive 업로드 중 오류");
+    } finally {
+      setIsUploadingCropBundle(false);
+    }
+  }, [queuedProblems, selectedExam]);
+
   const runBatchGeneration = async () => {
     if (queuedProblems.length === 0) {
       setErrorMessage("먼저 문제 박스를 하나 이상 추가해 주세요.");
@@ -3401,8 +3457,7 @@ export default function Home() {
                       저장된 문항 ({queuedProblems.length}개)
                     </p>
                     <p className="mt-1 text-[11px] leading-snug text-emerald-900">
-                      목록은 이 브라우저 탭 세션에만 유지됩니다. 새로고침하면 초기화됩니다. 로컬에서 해설까지 하려면 동일 앱을{" "}
-                      <strong>NEXT_PUBLIC_UI_MODE 없이</strong> 실행해 주세요.
+                      목록은 이 브라우저 탭 세션에만 유지됩니다. 아래 버튼으로 Drive 「작업완료」에 ZIP 한 개로 올릴 수 있습니다(.env에 OAuth·폴더 설정 필요).
                     </p>
                     {queuedProblems.length === 0 ? (
                       <p className="mt-2 text-xs text-emerald-800">
@@ -3443,6 +3498,18 @@ export default function Home() {
                           );
                         })}
                       </ul>
+                    )}
+                    {queuedProblems.length > 0 && (
+                      <button
+                        type="button"
+                        disabled={isUploadingCropBundle}
+                        onClick={() => void handleUploadCropBundleToDrive()}
+                        className="mt-3 w-full rounded-md bg-violet-700 px-3 py-2 text-sm font-semibold text-white hover:bg-violet-800 disabled:cursor-not-allowed disabled:opacity-55"
+                      >
+                        {isUploadingCropBundle
+                          ? "Drive 업로드 중..."
+                          : "작업완료 폴더에 ZIP 묶음 업로드"}
+                      </button>
                     )}
                   </div>
                 )}
@@ -3502,6 +3569,18 @@ export default function Home() {
                   className="mt-2 w-full rounded-md border border-amber-700 bg-amber-100 px-3 py-2 text-xs font-semibold text-amber-950 hover:bg-amber-200 disabled:opacity-45"
                 >
                   저장 문항이 있는 페이지만 유지 · 나머지 PDF 제외
+                </button>
+              )}
+              {queuedProblems.length > 0 && (
+                <button
+                  type="button"
+                  disabled={isUploadingCropBundle || isBatchGenerating}
+                  onClick={() => void handleUploadCropBundleToDrive()}
+                  className="mt-2 w-full rounded-md border border-violet-500 bg-white px-3 py-2 text-sm font-semibold text-violet-900 hover:bg-violet-50 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {isUploadingCropBundle
+                    ? "Drive 업로드 중..."
+                    : "작업완료 폴더에 ZIP 묶음 업로드"}
                 </button>
               )}
               <button

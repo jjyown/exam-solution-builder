@@ -13,6 +13,7 @@
 
 ## 기능·회귀
 
+- [x] 크롭 묶음 Drive 업로드: ZIP + `작업완료` 폴더 (`/api/upload-crop-bundle`, UI 버튼)
 - [x] 로컬 최종 DOCX 경로가 `해설지 최종본` 상수와 일치 (`outputPaths.ts`, `save-result`)
 - [x] `NEXT_PUBLIC_UI_MODE=crop` 시 3단계(해설)·DOCX UI 비표시, 자동 step3 이동 없음
 - [x] `npm run build` 통과 (Turbopack NFT 경고는 별도 이슈)

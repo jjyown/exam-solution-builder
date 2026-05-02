@@ -6,6 +6,7 @@ import {
   sanitizeExportPlainText,
   validateExportDocEntries,
 } from "@/lib/exportDocQuality";
+import { DEFAULT_GEMINI_COST_MODELS } from "@/lib/geminiDefaultModels";
 
 type RepairRequestBody = {
   entries?: ExportDocEntry[];
@@ -22,7 +23,7 @@ function parseModelCandidatesFromEnv(envKey: string, fallback: string[]) {
 }
 
 const REPAIR_MODEL_CANDIDATES = parseModelCandidatesFromEnv("GEMINI_MODELS_REPAIR", [
-  "gemini-2.0-flash",
+  ...DEFAULT_GEMINI_COST_MODELS,
 ]);
 
 function extractJsonObject(raw: string) {

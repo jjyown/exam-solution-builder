@@ -1,6 +1,7 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { NextResponse } from "next/server";
 import { isGeminiRateLimitedMessage } from "@/lib/geminiRateLimit";
+import { DEFAULT_GEMINI_COST_MODELS } from "@/lib/geminiDefaultModels";
 
 type PrecheckRequestBody = {
   imageBase64?: string;
@@ -29,16 +30,16 @@ function parseModelCandidatesFromEnv(envKey: string, fallback: string[]) {
   const raw = process.env[envKey]?.trim();
   if (!raw) {
     const normalizedFallback = normalize(fallback);
-    return normalizedFallback.length > 0 ? normalizedFallback : ["gemini-2.0-flash"];
+    return normalizedFallback.length > 0 ? normalizedFallback : [...DEFAULT_GEMINI_COST_MODELS];
   }
   const parsed = normalize(raw.split(","));
   if (parsed.length > 0) return parsed;
   const normalizedFallback = normalize(fallback);
-  return normalizedFallback.length > 0 ? normalizedFallback : ["gemini-2.0-flash"];
+  return normalizedFallback.length > 0 ? normalizedFallback : [...DEFAULT_GEMINI_COST_MODELS];
 }
 
 const PRECHECK_MODEL_CANDIDATES = parseModelCandidatesFromEnv("GEMINI_MODELS_PRECHECK", [
-  "gemini-2.0-flash",
+  ...DEFAULT_GEMINI_COST_MODELS,
 ]);
 
 function extractJsonObject(raw: string) {

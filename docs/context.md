@@ -19,6 +19,9 @@
 
 | 날짜 | 결정 | 이유 | 영향 범위 |
 |------|------|------|-----------|
+| 2026-05-02 | Gemini 기본 모델을 **Flash-Lite 체인**으로 통일 | 크롭·배치 위주로 고가 Flash 불필요, 비용·지연 우선 | `geminiDefaultModels.ts`, generate/precheck/repair 라우트 |
+| 2026-05-02 | 크롭 대기열 → **ZIP** → Drive **작업완료** (`POST /api/upload-crop-bundle`) | Railway/브라우저에서 자른 문항을 한 파일로 넘기는 운영 요구 | `googleDrive.ts`, `upload-crop-bundle/route.ts`, `page.tsx`, `.env.local.example` |
+| 2026-05-02 | ZIP은 **클라이언트에서 생성**(jszip)·서버는 multipart 수신 | 대량 base64 JSON 본문 제한(413) 회피 | `page.tsx`, `jszip` |
 | 2026-05-02 | `docs/` 에 `enterprise_workflow`, `context`, `plan`, `checklist` 도입 | academy_manager와 동일한 **기록 습관**으로 추적 가능하게 | `docs/*`, `PIPELINE.md` |
 | 2026-05-02 | Railway 배포에 `NEXT_PUBLIC_UI_MODE=crop` 옵션 | 크롭만 하는 환경에서 해설 UI 노이즈 제거 | `src/lib/uiMode.ts`, `src/app/page.tsx`, `.env.local.example` |
 | 2026-05-02 | 크롭 전용에서 필수 페이지 완료 시 **3단계로 자동 이동하지 않음** | 로컬 해설기와 역할 분리 | `page.tsx` `savePendingAsQueuedProblem` |

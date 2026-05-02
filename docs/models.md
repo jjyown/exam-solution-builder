@@ -6,10 +6,11 @@
 
 ## Gemini
 
-- **사전검증** `/api/precheck-extraction`: `GEMINI_MODELS_PRECHECK` (기본 `gemini-2.0-flash`)
-- **해설 생성** `/api/generate-explanation`: `GEMINI_MODELS_GENERATE_*` 계열 (UI 생성 모드·프로필별로 키가 다름 — 코드의 `resolveGeminiGenerateEnvKey` 와 동일)
+- **기본 후보**(env 비움): `src/lib/geminiDefaultModels.ts` — **`gemini-2.5-flash-lite` → `gemini-2.0-flash-lite`** 순으로 시도(비용·지연 우선). 영역 크롭·대량 배치에 맞춘 설정이며, 품질을 우선하면 env에 `gemini-2.0-flash` 등을 직접 적으면 됨.
+- **사전검증** `/api/precheck-extraction`: `GEMINI_MODELS_PRECHECK`
+- **해설 생성** `/api/generate-explanation`: `GEMINI_MODELS_GENERATE_*` 계열 (UI 생성 모드·프로필별로 키가 다름 — `resolveGeminiGenerateEnvKey` 와 동일)
 - **내보내기 보정** `/api/repair-explanations`: `GEMINI_MODELS_REPAIR`
-- `gemini-1.5-pro`, `gemini-1.5-flash` 는 코드에서 후보에서 제외됩니다.
+- `gemini-1.5-pro`, `gemini-1.5-flash` 는 generate/precheck 후보에서 제외됩니다.
 
 ## OpenAI
 
@@ -22,13 +23,9 @@
 GEMINI_API_KEY=...
 OPENAI_API_KEY=...
 
-GEMINI_MODELS_PRECHECK=gemini-2.0-flash
-GEMINI_MODELS_GENERATE_FINAL=gemini-2.0-flash
-GEMINI_MODELS_GENERATE_TEST=gemini-2.0-flash
-GEMINI_MODELS_GENERATE_EASY=gemini-2.0-flash
-GEMINI_MODELS_GENERATE_BALANCED=gemini-2.0-flash
-GEMINI_MODELS_GENERATE_KILLER=gemini-2.0-flash
-GEMINI_MODELS_REPAIR=gemini-2.0-flash
+# (선택) 미설정 시 Flash-Lite 기본 체인 사용
+# GEMINI_MODELS_PRECHECK=gemini-2.5-flash-lite,gemini-2.0-flash-lite
+# GEMINI_MODELS_GENERATE_FINAL=gemini-2.0-flash
 ```
 
 프롬프트·스타일 규칙은 **저장소 코드**와 **Cursor**에서 관리합니다 (`getRuntimePromptRules` 는 현재 항상 `null`).

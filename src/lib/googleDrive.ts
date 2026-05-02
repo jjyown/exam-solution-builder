@@ -27,7 +27,7 @@ export function isGoogleDriveConfigured(): boolean {
 
 let driveSingleton: drive_v3.Drive | null = null;
 
-function getDriveClient(): drive_v3.Drive {
+export function getDriveClient(): drive_v3.Drive {
   if (!isGoogleDriveConfigured()) {
     throw new Error(
       "Google Drive: GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN 을 설정하세요.",
@@ -53,21 +53,24 @@ async function findChildFolderId(
   return res.data.files?.[0]?.id ?? null;
 }
 
+/** 「해설제작」 등 부모 폴더 ID (시험지·작업완료 형제 폴더의 공통 부모) */
+export async function resolveDriveParentFolderId(drive: drive_v3.Drive): Promise<string> {
+  const parentFolderId = env("GOOGLE_DRIVE_PARENT_FOLDER_ID");
+  if (parentFolderId) return parentFolderId;
+  const parentName = env("GOOGLE_DRIVE_PARENT_FOLDER_NAME") || "해설제작";
+  const qRoot = `name='${escapeDriveQueryString(parentName)}' and 'root' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`;
+  const rootRes = await drive.files.list({ q: qRoot, fields: "files(id)", pageSize: 1 });
+  return rootRes.data.files?.[0]?.id ?? "root";
+}
+
 /** Railway 크롭 묶음(읽기 전용)이 있는 Drive 폴더 ID */
 export async function resolveDriveExamsFolderId(drive: drive_v3.Drive): Promise<string> {
   const direct = env("GOOGLE_DRIVE_EXAMS_FOLDER_ID");
   if (direct) return direct;
 
-  const parentFolderId = env("GOOGLE_DRIVE_PARENT_FOLDER_ID");
   const parentName = env("GOOGLE_DRIVE_PARENT_FOLDER_NAME") || "해설제작";
   const examsName = env("GOOGLE_DRIVE_EXAMS_FOLDER_NAME") || "시험지";
-
-  let parentId = parentFolderId;
-  if (!parentId) {
-    const qRoot = `name='${escapeDriveQueryString(parentName)}' and 'root' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`;
-    const rootRes = await drive.files.list({ q: qRoot, fields: "files(id)", pageSize: 1 });
-    parentId = rootRes.data.files?.[0]?.id ?? "root";
-  }
+  const parentId = await resolveDriveParentFolderId(drive);
 
   const examsId = await findChildFolderId(drive, parentId, examsName);
   if (!examsId) {
@@ -76,6 +79,52 @@ export async function resolveDriveExamsFolderId(drive: drive_v3.Drive): Promise<
     );
   }
   return examsId;
+}
+
+/** 크롭 ZIP 업로드 대상: 기본 폴더명 「작업완료」(시험지와 같은 부모 아래) */
+export async function resolveDriveWorkCompleteFolderId(drive: drive_v3.Drive): Promise<string> {
+  const direct = env("GOOGLE_DRIVE_WORK_COMPLETE_FOLDER_ID");
+  if (direct) return direct;
+
+  const parentName = env("GOOGLE_DRIVE_PARENT_FOLDER_NAME") || "해설제작";
+  const folderName =
+    env("GOOGLE_DRIVE_WORK_COMPLETE_FOLDER_NAME") ||
+    env("GOOGLE_DRIVE_COMPLETED_FOLDER_NAME") ||
+    "작업완료";
+  const parentId = await resolveDriveParentFolderId(drive);
+  const id = await findChildFolderId(drive, parentId, folderName);
+  if (!id) {
+    throw new Error(
+      `Drive에서 「${folderName}」 폴더를 찾지 못했습니다. 루트의 「${parentName}」 아래에 「${folderName}」 폴더를 만들거나, GOOGLE_DRIVE_WORK_COMPLETE_FOLDER_ID 를 직접 지정하세요.`,
+    );
+  }
+  return id;
+}
+
+export async function uploadBufferToDriveFolder(params: {
+  folderId: string;
+  fileName: string;
+  buffer: Buffer;
+  mimeType: string;
+}): Promise<{ id: string; name: string }> {
+  const drive = getDriveClient();
+  const { Readable } = await import("node:stream");
+  const stream = Readable.from(params.buffer);
+  const res = await drive.files.create({
+    requestBody: {
+      name: params.fileName,
+      parents: [params.folderId],
+    },
+    media: {
+      mimeType: params.mimeType,
+      body: stream,
+    },
+    fields: "id, name",
+  });
+  const id = res.data.id;
+  const name = res.data.name ?? params.fileName;
+  if (!id) throw new Error("Drive 업로드 응답에 file id가 없습니다.");
+  return { id, name };
 }
 
 export async function listDriveExamFiles(allowedExtensions: Set<string>): Promise<string[]> {

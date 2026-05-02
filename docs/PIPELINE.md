@@ -60,10 +60,11 @@ flowchart TB
 
 | 위치 | 역할 | 비고 |
 |------|------|------|
-| **Drive · 입력 폴더** | Railway가 **크롭 묶음**만 올리는 곳 | **`GOOGLE_DRIVE_EXAMS_FOLDER_ID`** 로 지정. DOCX는 올리지 않음 |
+| **Drive · 입력 폴더** | 시험지 PDF 등 **읽기** | **`GOOGLE_DRIVE_EXAMS_FOLDER_ID`** (또는 부모 아래 `시험지`) |
+| **Drive · 작업완료** | 크롭 문항을 **ZIP 한 개**로 업로드 | **`GOOGLE_DRIVE_WORK_COMPLETE_FOLDER_ID`** 또는 부모 아래 **`작업완료`** 폴더. API: **`POST /api/upload-crop-bundle`** (UI: 「작업완료 폴더에 ZIP 묶음 업로드」) |
 | **로컬 · `해설지 최종본`** | **최종 해설 DOCX만** 저장(API `/api/save-result`) | 코드 상수: `src/lib/outputPaths.ts` 의 `FINAL_EXPLANATION_DIR_NAME`. 타 PC로 **이 폴더를 복사**하면 동일하게 사용 |
 
-**원칙:** 완료 후 DOCX를 Drive에 다시 넣는 API·흐름은 **없음**. 필요하면 사용자가 직접 Drive에 복사.
+**원칙:** 최종 **DOCX**는 Drive API로 올리지 않음. **크롭 ZIP**만 Drive `작업완료`에 올릴 수 있음.
 
 ---
 
