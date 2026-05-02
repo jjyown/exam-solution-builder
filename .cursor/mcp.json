@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "gemini-gpt": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["${workspaceFolder}/mcp/gemini-gpt-server.mjs"],
+      "envFile": "${workspaceFolder}/.env.local"
+    }
+  }
+}
