@@ -1,7 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { NextResponse } from "next/server";
-import { downloadExamFileByName, isGoogleDriveConfigured } from "@/lib/googleDrive";
+import { downloadDriveExamFileByName, isGoogleDriveConfigured } from "@/lib/googleDrive";
 
 const EXAM_DIR_KO = path.join(process.cwd(), "시험지");
 const EXAM_DIR_EN = path.join(process.cwd(), "exams");
@@ -47,70 +47,61 @@ export async function GET(request: Request) {
     const url = new URL(request.url);
     const name = (url.searchParams.get("name") || "").trim();
     if (!name) {
-      return NextResponse.json(
-        { error: "파일명이 필요합니다." },
-        { status: 400 },
-      );
+      return NextResponse.json({ error: "파일명이 필요합니다." }, { status: 400 });
     }
 
     const ext = path.extname(name).toLowerCase();
     if (!ALLOWED_EXTENSIONS.has(ext)) {
-      return NextResponse.json(
-        { error: "지원하지 않는 파일 형식입니다." },
-        { status: 400 },
-      );
-    }
-
-    if (isGoogleDriveConfigured()) {
-      const { buffer, mimeType } = await downloadExamFileByName(name);
-      const uint8 = new Uint8Array(buffer);
-      return new NextResponse(uint8, {
-        headers: {
-          "Content-Type": mimeType || getMimeType(ext),
-          "Cache-Control": "no-store",
-        },
-      });
+      return NextResponse.json({ error: "지원하지 않는 파일 형식입니다." }, { status: 400 });
     }
 
     const normalized = path.normalize(name);
     if (normalized.includes("..") || path.isAbsolute(normalized)) {
-      return NextResponse.json(
-        { error: "잘못된 파일 경로입니다." },
-        { status: 400 },
-      );
+      return NextResponse.json({ error: "잘못된 파일 경로입니다." }, { status: 400 });
     }
 
-    let targetPath = "";
     for (const dirPath of EXAM_DIR_CANDIDATES) {
       const candidatePath = path.join(dirPath, normalized);
       try {
         await fs.access(candidatePath);
-        targetPath = candidatePath;
-        break;
+        const data = await fs.readFile(candidatePath);
+        return new NextResponse(data, {
+          headers: {
+            "Content-Type": getMimeType(ext),
+            "Cache-Control": "no-store",
+            "X-Exam-File-Source": "local",
+          },
+        });
       } catch {
         continue;
       }
     }
 
-    if (!targetPath) {
-      return NextResponse.json(
-        { error: "시험지 파일을 찾을 수 없습니다." },
-        { status: 404 },
-      );
+    if (isGoogleDriveConfigured()) {
+      try {
+        const { buffer, mimeType } = await downloadDriveExamFileByName(normalized);
+        return new NextResponse(new Uint8Array(buffer), {
+          headers: {
+            "Content-Type": mimeType || getMimeType(ext),
+            "Cache-Control": "no-store",
+            "X-Exam-File-Source": "google-drive",
+          },
+        });
+      } catch (driveErr) {
+        const detail = driveErr instanceof Error ? driveErr.message : String(driveErr);
+        return NextResponse.json(
+          { error: "시험지 파일을 찾을 수 없습니다.", details: [detail] },
+          { status: 404 },
+        );
+      }
     }
 
-    const data = await fs.readFile(targetPath);
-    return new NextResponse(data, {
-      headers: {
-        "Content-Type": getMimeType(ext),
-        "Cache-Control": "no-store",
-      },
-    });
+    return NextResponse.json({ error: "시험지 파일을 찾을 수 없습니다." }, { status: 404 });
   } catch (error) {
     const message = error instanceof Error ? error.message : "알 수 없는 오류";
     console.error("Failed to read exam file:", message, error);
     return NextResponse.json(
-      { error: `시험지 이미지를 불러오지 못했습니다: ${message}` },
+      { error: `시험지 파일을 불러오지 못했습니다: ${message}` },
       { status: 500 },
     );
   }

@@ -17,6 +17,8 @@ import {
   validateExportDocEntries,
 } from "@/lib/exportDocQuality";
 import { resolveGeminiGenerateEnvKey } from "@/lib/generateExplanationGeminiEnv";
+import { FINAL_EXPLANATION_DIR_NAME } from "@/lib/outputPaths";
+import { isCropOnlyUi } from "@/lib/uiMode";
 
 type ParsedExplanation = {
   quickAnswer: string;
@@ -32,6 +34,8 @@ type QueuedProblem = {
   id: string;
   questionNo: string;
   pageLabel: string;
+  /** PDF일 때 원본 페이지(바로가기·일괄 제외용). 없으면 pageLabel에서 파싱 시도 */
+  pdfPage?: number;
   imageBase64: string;
   imageMimeType: string;
   diagramImages?: Array<{ imageBase64: string; mimeType: string }>;
@@ -39,18 +43,20 @@ type QueuedProblem = {
   diagramCrops?: PixelCrop[];
 };
 
+function getPdfPageFromQueuedProblem(item: QueuedProblem): number | null {
+  if (typeof item.pdfPage === "number" && Number.isFinite(item.pdfPage) && item.pdfPage >= 1) {
+    return Math.floor(item.pdfPage);
+  }
+  const m = item.pageLabel.match(/^PDF\s+(\d+)\s*p$/i);
+  if (m) return Number.parseInt(m[1]!, 10);
+  return null;
+}
+
 type BatchResult = {
   questionNo: string;
   quickAnswer: string;
   status: "success" | "error";
   message: string;
-};
-
-type PromptRuleVersion = {
-  id: number;
-  is_active: boolean;
-  updated_at: string;
-  extra_constraints_preview: string;
 };
 
 type VisionPrecheckResponse = {
@@ -235,8 +241,6 @@ type ExplanationWorkflowStep =
   | "select_explanation"
   | "confirm_quick_answer"
   | "generate_sheet";
-
-const RULE_ADMIN_TOKEN_STORAGE_KEY = "promptRulesAdminToken";
 
 function hasCompletedExplanationBody(body: string) {
   return !isPlaceholderExplanationBody(body);
@@ -727,17 +731,6 @@ export default function Home() {
   const [explanationBody, setExplanationBody] = useState(DEFAULT_BODY);
   const [rawResponse, setRawResponse] = useState("");
   const [qualityWarnings, setQualityWarnings] = useState<string[]>([]);
-  const [ruleAnalyzeInput, setRuleAnalyzeInput] = useState("");
-  const [ruleAnalyzeInputKind, setRuleAnalyzeInputKind] = useState<"weak" | "good">("weak");
-  const [ruleTargetStyleInput, setRuleTargetStyleInput] = useState("");
-  const [ruleAdminTokenInput, setRuleAdminTokenInput] = useState("");
-  const [ruleAnalyzeImageBase64, setRuleAnalyzeImageBase64] = useState("");
-  const [ruleAnalyzeImageMimeType, setRuleAnalyzeImageMimeType] = useState("image/png");
-  const [ruleAnalyzeImageName, setRuleAnalyzeImageName] = useState("");
-  const [isApplyingRuleFeedback, setIsApplyingRuleFeedback] = useState(false);
-  const [ruleVersions, setRuleVersions] = useState<PromptRuleVersion[]>([]);
-  const [isLoadingRuleVersions, setIsLoadingRuleVersions] = useState(false);
-  const [isRollingBackRule, setIsRollingBackRule] = useState(false);
   const [diagramAidRecommendation, setDiagramAidRecommendation] =
     useState<DiagramAidRecommendation | null>(null);
   const [questionVersionMap, setQuestionVersionMap] = useState<
@@ -752,14 +745,10 @@ export default function Home() {
   const hydrationReleaseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   questionCardDraftMapRef.current = questionCardDraftMap;
   questionVersionMapRef.current = questionVersionMap;
-  const [hmlFile, setHmlFile] = useState<File | null>(null);
-  const [hmlManualQuestionSelection, setHmlManualQuestionSelection] = useState("1-30");
-  const [hmlExecutionMode, setHmlExecutionMode] = useState<"manual" | "auto_assist">("manual");
   const [quickAnswerPageSelection, setQuickAnswerPageSelection] = useState("");
   const [explanationRefPageSelection, setExplanationRefPageSelection] = useState("");
   const [noQuickAnswerPage, setNoQuickAnswerPage] = useState(false);
   const [noExplanationRefPage, setNoExplanationRefPage] = useState(false);
-  const [isProcessingHml, setIsProcessingHml] = useState(false);
   const [isLoadingExams, setIsLoadingExams] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
   const [queuedProblems, setQueuedProblems] = useState<QueuedProblem[]>([]);
@@ -795,6 +784,12 @@ export default function Home() {
   }, []);
 
   const hasImage = Boolean(sourceImage && sourceFile);
+
+  useEffect(() => {
+    if (isCropOnlyUi && currentStep === 3) {
+      setCurrentStep(2);
+    }
+  }, [isCropOnlyUi, currentStep]);
   const selectedExamKind = selectedExam ? getExamSourceKind(selectedExam) : "unknown";
   const questionNoOptions = useMemo(
     () => [...new Set(queuedProblems.map((item) => item.questionNo))].sort((a, b) => Number(a) - Number(b)),
@@ -1111,7 +1106,7 @@ export default function Home() {
     const sourceKind = getExamSourceKind(file.name);
     if (sourceKind === "hml" || sourceKind === "hwp") {
       throw new Error(
-        "한글 원본 파일은 이미지 작업 단계가 아닙니다. 1단계의 '원본 HML 기반 해설 붙이기'를 사용해 주세요.",
+        "`.hml`/한글 문서는 이 화면에서 직접 열 수 없습니다. PDF 또는 이미지(png/jpg)로 변환한 뒤 선택해 주세요.",
       );
     }
 
@@ -1175,22 +1170,6 @@ export default function Home() {
       setIsLoadingExams(false);
     }
   }, []);
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    const saved = window.localStorage.getItem(RULE_ADMIN_TOKEN_STORAGE_KEY) || "";
-    if (saved) setRuleAdminTokenInput(saved);
-  }, []);
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    const token = ruleAdminTokenInput.trim();
-    if (!token) {
-      window.localStorage.removeItem(RULE_ADMIN_TOKEN_STORAGE_KEY);
-      return;
-    }
-    window.localStorage.setItem(RULE_ADMIN_TOKEN_STORAGE_KEY, token);
-  }, [ruleAdminTokenInput]);
 
   useEffect(() => {
     if (currentStep !== 1) return;
@@ -1452,122 +1431,6 @@ export default function Home() {
       });
   };
 
-  const handleHmlAppendSolution = async () => {
-    if (!hmlFile) {
-      setErrorMessage("먼저 .hml 원본 파일을 선택해 주세요.");
-      return;
-    }
-    try {
-      setIsProcessingHml(true);
-      setErrorMessage("");
-      setSuccessMessage("");
-      const formData = new FormData();
-      formData.append("hmlFile", hmlFile);
-      formData.append("mode", hmlExecutionMode);
-      if (hmlManualQuestionSelection.trim()) {
-        formData.append("manualQuestionSelection", hmlManualQuestionSelection.trim());
-      }
-      const response = await fetch("/api/hml/append-solution", {
-        method: "POST",
-        body: formData,
-      });
-      const data = (await response.json()) as {
-        error?: string;
-        message?: string;
-        fileName?: string;
-        questionCount?: number;
-        parsingDiagnostics?: {
-          strategy?: string;
-          paragraphQuestionCount?: number;
-          autonumBlockQuestionCount?: number;
-          bodyFallbackQuestionCount?: number;
-          fallbackQuestionCount?: number;
-          quickAnswerSource?: string;
-          sourceProfile?: string;
-          aiExtractedQuestionCount?: number;
-          openAiFallbackCount?: number;
-          noisyQuestionCount?: number;
-          notes?: string[];
-        };
-        parsingQuality?: {
-          pass?: boolean;
-          warnings?: string[];
-          coverageRatio?: number;
-          mismatchRatio?: number;
-        };
-        quickAnswerStats?: {
-          verifiedCount?: number;
-          filledCount?: number;
-          mismatchCount?: number;
-        };
-        manualSelectionApplied?: number[] | null;
-        mode?: "manual" | "auto_assist";
-        requiresManualReview?: boolean;
-        assistGuidance?: string | null;
-      };
-      if (!response.ok) {
-        throw new Error(data.error || "원본 기반 해설 생성에 실패했습니다.");
-      }
-      setSuccessMessage(
-        `${data.message || "원본 기반 해설 생성 완료"} (${data.questionCount || 0}문항)${
-          data.quickAnswerStats
-            ? ` | 검증 ${data.quickAnswerStats.verifiedCount || 0} / 보완 ${
-                data.quickAnswerStats.filledCount || 0
-              } / 불일치 ${data.quickAnswerStats.mismatchCount || 0}`
-            : ""
-        }${
-          data.manualSelectionApplied?.length
-            ? ` | 수동문항 ${data.manualSelectionApplied.join(", ")}`
-            : ""
-        }${
-          data.mode ? ` | 모드 ${data.mode === "manual" ? "수동메인" : "자동보조"}` : ""
-        }${
-          data.parsingDiagnostics
-            ? ` | 파싱 ${
-                data.parsingDiagnostics.strategy === "paragraph-priority" ? "문단우선" : "텍스트대체"
-              } / 문단추출 ${data.parsingDiagnostics.paragraphQuestionCount || 0} / 구조추출 ${
-                data.parsingDiagnostics.autonumBlockQuestionCount || 0
-              } / 대체추출 ${
-                data.parsingDiagnostics.bodyFallbackQuestionCount ||
-                data.parsingDiagnostics.fallbackQuestionCount ||
-                0
-              } / 정답원천 ${
-                data.parsingDiagnostics.quickAnswerSource === "hml-endnote" ? "원본정답표" : "본문추출"
-              } / 프로필 ${
-                data.parsingDiagnostics.sourceProfile === "core-request-set" ? "대표샘플" : "기본"
-              } / AI추출 ${data.parsingDiagnostics.aiExtractedQuestionCount || 0} / GPT백업 ${
-                data.parsingDiagnostics.openAiFallbackCount || 0
-              } / 노이즈문항 ${
-                data.parsingDiagnostics.noisyQuestionCount || 0
-              }`
-            : ""
-        }${
-          data.parsingQuality
-            ? ` | 품질 ${data.parsingQuality.pass ? "PASS" : "CHECK"} (커버리지 ${Math.round(
-                (data.parsingQuality.coverageRatio || 0) * 100,
-              )}%, 불일치 ${Math.round((data.parsingQuality.mismatchRatio || 0) * 100)}%)`
-            : ""
-        } ${data.fileName ? `- ${data.fileName}` : ""}`,
-      );
-      if (data.parsingDiagnostics?.notes?.length) {
-        console.info("HML 파싱 보정 노트:", data.parsingDiagnostics.notes);
-      }
-      if (data.requiresManualReview && data.assistGuidance) {
-        setErrorMessage(`자동 보조 경고: ${data.assistGuidance}`);
-      }
-      if (data.parsingQuality?.warnings?.length) {
-        setErrorMessage(`HML 품질 점검 경고: ${data.parsingQuality.warnings.join(" / ")}`);
-      }
-      setHmlFile(null);
-    } catch (error) {
-      const message =
-        error instanceof Error ? error.message : "원본 기반 해설 처리 중 오류가 발생했습니다.";
-      setErrorMessage(message);
-    } finally {
-      setIsProcessingHml(false);
-    }
-  };
-
   const handleGenerateExplanation = async () => {
     if (!sourceFile) {
       setErrorMessage("문제 이미지를 먼저 업로드해 주세요.");
@@ -1577,7 +1440,14 @@ export default function Home() {
       setErrorMessage("이미지 로딩이 완료된 뒤 다시 시도해 주세요.");
       return;
     }
-    if (isPdfSource && !requiredPageNumbers.includes(pdfPageNo)) {
+    const matchedQueuedProblem = queuedProblems.find(
+      (q) => String(q.questionNo) === String(questionNo),
+    );
+    if (
+      isPdfSource &&
+      !matchedQueuedProblem &&
+      !requiredPageNumbers.includes(pdfPageNo)
+    ) {
       setErrorMessage(
         "현재 페이지는 빠른정답/해설참고로 지정되어 풀이 대상에서 제외된 페이지입니다. 문제 페이지로 이동해 주세요.",
       );
@@ -1596,23 +1466,43 @@ export default function Home() {
       setQualityWarnings([]);
 
       const mimeType = sourceFile.type || "image/png";
-      const selectedProblemCrop =
-        pendingDiagramBoxes[0]?.crop ?? (completedCrop ? normalizeCrop(completedCrop) : null);
-      if (selectedProblemCrop && imageRef.current) {
-        const precheck = runExtractionPrecheckForDisplayedCrop(
-          selectedProblemCrop,
-          imageRef.current,
-        );
-        if (!precheck.ok) {
-          setErrorMessage(
-            `생성을 중단했습니다. 문제 추출 품질이 낮습니다: ${precheck.messages.join(" / ")} 문제 박스를 다시 지정해 주세요.`,
+      let selectedProblemCrop: PixelCrop | null = null;
+      let imageBase64: string;
+      let requestMimeType = mimeType;
+      let liveDiagramImages: Array<{ imageBase64: string; mimeType: string }>;
+
+      if (matchedQueuedProblem) {
+        /** 문항 카드 N번 재생성: 화면 첫 박스가 아니라 대기열에 저장된 N번 크롭·이미지 사용(버그 수정) */
+        selectedProblemCrop = matchedQueuedProblem.crop;
+        imageBase64 = matchedQueuedProblem.imageBase64;
+        requestMimeType = matchedQueuedProblem.imageMimeType || mimeType;
+        liveDiagramImages = matchedQueuedProblem.diagramImages?.length
+          ? [...matchedQueuedProblem.diagramImages]
+          : [];
+      } else {
+        selectedProblemCrop =
+          pendingDiagramBoxes[0]?.crop ?? (completedCrop ? normalizeCrop(completedCrop) : null);
+        if (selectedProblemCrop && imageRef.current) {
+          const precheck = runExtractionPrecheckForDisplayedCrop(
+            selectedProblemCrop,
+            imageRef.current,
           );
-          return;
+          if (!precheck.ok) {
+            setErrorMessage(
+              `생성을 중단했습니다. 문제 추출 품질이 낮습니다: ${precheck.messages.join(" / ")} 문제 박스를 다시 지정해 주세요.`,
+            );
+            return;
+          }
         }
+        imageBase64 = selectedProblemCrop
+          ? cropImageToBase64(imageRef.current, selectedProblemCrop, mimeType)
+          : await toBase64(sourceFile);
+        liveDiagramImages = pendingDiagramBoxes.map((box) => ({
+          imageBase64: cropImageToBase64(imageRef.current!, box.crop, box.mimeType || mimeType),
+          mimeType: box.mimeType || mimeType,
+        }));
       }
-      const imageBase64 = selectedProblemCrop
-        ? cropImageToBase64(imageRef.current, selectedProblemCrop, mimeType)
-        : await toBase64(sourceFile);
+
       const visionPrecheckRes = await fetchWithBackoff(
         "/api/precheck-extraction",
         {
@@ -1620,7 +1510,7 @@ export default function Home() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             imageBase64,
-            imageMimeType: mimeType,
+            imageMimeType: requestMimeType,
             crop: selectedProblemCrop,
           }),
         },
@@ -1665,10 +1555,6 @@ export default function Home() {
         );
         return;
       }
-      const liveDiagramImages = pendingDiagramBoxes.map((box) => ({
-        imageBase64: cropImageToBase64(imageRef.current!, box.crop, box.mimeType || mimeType),
-        mimeType: box.mimeType || mimeType,
-      }));
 
       const response = await fetchWithBackoff(
         "/api/generate-explanation",
@@ -1680,7 +1566,7 @@ export default function Home() {
           body: JSON.stringify({
             questionText: useTextInput ? questionText : "",
             imageBase64,
-            imageMimeType: mimeType,
+            imageMimeType: requestMimeType,
             diagramImages: liveDiagramImages,
             quickAnswerPageHint:
               quickAnswerPages.length > 0
@@ -2224,6 +2110,7 @@ export default function Home() {
         id: `${Date.now()}-${pageNumber}-${idx}`,
         questionNo: String(baseCountWithoutCurrentPage + idx + 1),
         pageLabel,
+        pdfPage: isPdfSource ? pageNumber : 1,
         imageBase64,
         imageMimeType: mimeType,
         diagramImages: [],
@@ -2263,9 +2150,15 @@ export default function Home() {
       requiredPageNumbers.length > 0 &&
       nextCompletedRequired >= requiredPageNumbers.length;
     if (allPagesDone) {
-      setCurrentStep(3);
+      if (!isCropOnlyUi) {
+        setCurrentStep(3);
+        setSuccessMessage(
+          `${pageLabel} 작업 저장 완료. 모든 페이지 작업이 끝나서 해설 제작 단계로 이동했습니다.`,
+        );
+        return;
+      }
       setSuccessMessage(
-        `${pageLabel} 작업 저장 완료. 모든 페이지 작업이 끝나서 해설 제작 단계로 이동했습니다.`,
+        `${pageLabel} 저장 완료. 필수 페이지 크롭이 모두 끝났습니다. 아래 「저장된 문항」을 확인한 뒤, 로컬 제작기(일반 모드)에서 해설·DOCX를 진행하거나 Drive에 묶음을 올리는 절차를 이어가세요.`,
       );
       return;
     }
@@ -2275,6 +2168,7 @@ export default function Home() {
   };
 
   const goToStep3IfReady = () => {
+    if (isCropOnlyUi) return;
     if (!hasImage) return;
     if (!canEnterStep3) {
       setErrorMessage(
@@ -2305,22 +2199,20 @@ export default function Home() {
     setErrorMessage("");
   };
 
-  /** 입력한 페이지·참고 전용 페이지만 남기고 나머지를 일괄 제외 */
-  const applyExcludeAllExceptListedPages = () => {
-    if (!isPdfSource || pdfPageCount < 1) return;
-    const raw = keepWorkPagesOnlyInput.trim();
-    if (!raw) {
-      setErrorMessage("유지할 페이지를 입력한 뒤 적용해 주세요. (예: 3-10, 15)");
-      setSuccessMessage("");
-      return;
-    }
-    let keepPages = parsePageSelection(raw, pdfPageCount);
-    if (keepPages.length === 0) {
-      setErrorMessage(`유효한 페이지가 없습니다. 1~${pdfPageCount} 범위·형식(예: 3-10, 15)을 확인해 주세요.`);
-      setSuccessMessage("");
-      return;
-    }
-    keepPages = [...new Set([...keepPages, ...referenceOnlyPages])].sort((a, b) => a - b);
+  /**
+   * 유지할 PDF 페이지(숫자 배열)만 남기고 나머지 일괄 제외. 빠른정답·해설참고 페이지는 자동 포함.
+   */
+  const commitWorkPagesKeepSet = (
+    baseKeepPages: number[],
+    messageMode: "manualInput" | "fromSavedQuestions" = "manualInput",
+  ): boolean => {
+    if (!isPdfSource || pdfPageCount < 1) return false;
+    const uniqBase = [...new Set(baseKeepPages.filter((p) => p >= 1 && p <= pdfPageCount))].sort(
+      (a, b) => a - b,
+    );
+    if (uniqBase.length === 0) return false;
+
+    const keepPages = [...new Set([...uniqBase, ...referenceOnlyPages])].sort((a, b) => a - b);
     const keepSet = new Set(keepPages);
     const excluded: number[] = [];
     for (let p = 1; p <= pdfPageCount; p += 1) {
@@ -2356,10 +2248,62 @@ export default function Home() {
       referenceOnlyPages.length > 0
         ? ` 빠른정답·해설참고 페이지(${referenceOnlyPages.join(", ")})는 자동 유지했습니다.`
         : "";
-    setSuccessMessage(
-      `작업 유지 페이지: ${keepPages.join(", ")}. 나머지 ${excluded.length}페이지를 제외했습니다.${refNote}`,
-    );
+    if (messageMode === "fromSavedQuestions") {
+      setSuccessMessage(
+        `저장된 문항이 있는 페이지(${uniqBase.join(", ")})만 작업 대상으로 유지하고, 나머지 ${excluded.length}페이지를 제외했습니다.${refNote}`,
+      );
+    } else {
+      setSuccessMessage(
+        `작업 유지 페이지: ${keepPages.join(", ")}. 나머지 ${excluded.length}페이지를 제외했습니다.${refNote}`,
+      );
+    }
     setErrorMessage("");
+    return true;
+  };
+
+  /** 입력한 페이지·참고 전용 페이지만 남기고 나머지를 일괄 제외 */
+  const applyExcludeAllExceptListedPages = () => {
+    if (!isPdfSource || pdfPageCount < 1) return;
+    const raw = keepWorkPagesOnlyInput.trim();
+    if (!raw) {
+      setErrorMessage("유지할 페이지를 입력한 뒤 적용해 주세요. (예: 3-10, 15)");
+      setSuccessMessage("");
+      return;
+    }
+    const parsed = parsePageSelection(raw, pdfPageCount);
+    if (parsed.length === 0) {
+      setErrorMessage(`유효한 페이지가 없습니다. 1~${pdfPageCount} 범위·형식(예: 3-10, 15)을 확인해 주세요.`);
+      setSuccessMessage("");
+      return;
+    }
+    commitWorkPagesKeepSet(parsed, "manualInput");
+  };
+
+  /** 저장된 문항이 위치한 PDF 페이지만 유지(수동 입력 없이) */
+  const applyExcludeKeepOnlySavedQuestionPages = () => {
+    if (!isPdfSource || pdfPageCount < 1) {
+      setErrorMessage("PDF 시험지에서만 사용할 수 있습니다.");
+      setSuccessMessage("");
+      return;
+    }
+    if (queuedProblems.length === 0) {
+      setErrorMessage("저장된 문항이 없습니다. 먼저 「현재 페이지 작업 저장」으로 문항을 저장해 주세요.");
+      setSuccessMessage("");
+      return;
+    }
+    const pages: number[] = [];
+    for (const item of queuedProblems) {
+      const p = getPdfPageFromQueuedProblem(item);
+      if (p !== null && p >= 1 && p <= pdfPageCount) pages.push(p);
+    }
+    const uniq = [...new Set(pages)].sort((a, b) => a - b);
+    if (uniq.length === 0) {
+      setErrorMessage("저장된 문항에서 PDF 페이지 번호를 읽지 못했습니다.");
+      setSuccessMessage("");
+      return;
+    }
+    setKeepWorkPagesOnlyInput(uniq.join(", "));
+    commitWorkPagesKeepSet(uniq, "fromSavedQuestions");
   };
 
   const removeQueuedProblem = (id: string) => {
@@ -2637,152 +2581,6 @@ export default function Home() {
     }
   };
 
-  const handleAnalyzeAndApplyRules = async () => {
-    const weakText = ruleAnalyzeInput.trim();
-    if (!weakText && !ruleAnalyzeImageBase64) {
-      setErrorMessage("분석할 해설 텍스트 또는 이미지를 먼저 입력해 주세요.");
-      return;
-    }
-    try {
-      setIsApplyingRuleFeedback(true);
-      setErrorMessage("");
-      setSuccessMessage("");
-      const response = await fetch("/api/prompt-rules/analyze-and-apply", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...(ruleAdminTokenInput.trim()
-            ? { "x-admin-token": ruleAdminTokenInput.trim() }
-            : {}),
-        },
-        body: JSON.stringify({
-          weakExplanation: weakText,
-          inputKind: ruleAnalyzeInputKind,
-          targetStyleHint: ruleTargetStyleInput.trim(),
-          profile: solverModelProfile,
-          referenceImageBase64: ruleAnalyzeImageBase64 || undefined,
-          referenceImageMimeType: ruleAnalyzeImageMimeType || undefined,
-        }),
-      });
-      if (!response.ok) {
-        const message = await parseApiErrorMessage(
-          response,
-          "규칙 자동 분석/적용에 실패했습니다.",
-        );
-        throw new Error(message);
-      }
-      const data = (await response.json()) as {
-        rulesPreview?: { extraConstraints?: string };
-      };
-      setSuccessMessage(
-        "Supabase 규칙을 자동 업데이트했습니다. 다음 해설 생성부터 바로 반영됩니다.",
-      );
-      if (data.rulesPreview?.extraConstraints) {
-        appendQualityWarningUnique(
-          "규칙 자동 업데이트 완료: 운영자 추가 제한 규칙이 갱신되었습니다.",
-        );
-      }
-      await loadPromptRuleVersions();
-    } catch (error) {
-      const message =
-        error instanceof Error ? error.message : "규칙 자동 적용 중 오류가 발생했습니다.";
-      setErrorMessage(message);
-    } finally {
-      setIsApplyingRuleFeedback(false);
-    }
-  };
-
-  const applyRuleAnalyzeImageFile = async (file: File) => {
-    if (!file) return;
-    try {
-      setErrorMessage("");
-      const base64 = await toBase64(file);
-      setRuleAnalyzeImageBase64(base64);
-      setRuleAnalyzeImageMimeType(file.type || "image/png");
-      setRuleAnalyzeImageName(file.name);
-      if (!ruleAnalyzeInput.trim()) {
-        setSuccessMessage("이미지를 업로드했습니다. 텍스트 입력 없이도 OCR 분석이 가능합니다.");
-      }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "이미지 업로드 처리 중 오류";
-      setErrorMessage(message);
-    }
-  };
-
-  const handleRuleAnalyzeImageChange = async (
-    event: React.ChangeEvent<HTMLInputElement>,
-  ) => {
-    const file = event.target.files?.[0];
-    await applyRuleAnalyzeImageFile(file as File);
-  };
-
-  const handleRuleAnalyzePaste = async (event: React.ClipboardEvent<HTMLDivElement>) => {
-    const items = Array.from(event.clipboardData.items || []);
-    const imageItem = items.find((item) => item.type.startsWith("image/"));
-    if (!imageItem) return;
-    event.preventDefault();
-    const file = imageItem.getAsFile();
-    if (!file) return;
-    await applyRuleAnalyzeImageFile(file);
-  };
-
-  const loadPromptRuleVersions = async () => {
-    try {
-      setIsLoadingRuleVersions(true);
-      const response = await fetch("/api/prompt-rules/history?limit=10", {
-        headers: {
-          ...(ruleAdminTokenInput.trim()
-            ? { "x-admin-token": ruleAdminTokenInput.trim() }
-            : {}),
-        },
-      });
-      if (!response.ok) {
-        const message = await parseApiErrorMessage(response, "규칙 이력 조회에 실패했습니다.");
-        throw new Error(message);
-      }
-      const data = (await response.json()) as { versions?: PromptRuleVersion[] };
-      setRuleVersions(Array.isArray(data.versions) ? data.versions : []);
-    } catch (error) {
-      const message =
-        error instanceof Error ? error.message : "규칙 이력 조회 중 오류가 발생했습니다.";
-      setErrorMessage(message);
-    } finally {
-      setIsLoadingRuleVersions(false);
-    }
-  };
-
-  const handleRollbackRule = async (ruleId: number) => {
-    try {
-      setIsRollingBackRule(true);
-      setErrorMessage("");
-      setSuccessMessage("");
-      const response = await fetch("/api/prompt-rules/rollback", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...(ruleAdminTokenInput.trim()
-            ? { "x-admin-token": ruleAdminTokenInput.trim() }
-            : {}),
-        },
-        body: JSON.stringify({
-          ruleId,
-          reason: "ui-manual-rollback",
-        }),
-      });
-      if (!response.ok) {
-        const message = await parseApiErrorMessage(response, "규칙 롤백에 실패했습니다.");
-        throw new Error(message);
-      }
-      setSuccessMessage(`${ruleId}번 규칙으로 롤백했습니다. 다음 생성부터 즉시 반영됩니다.`);
-      await loadPromptRuleVersions();
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "규칙 롤백 중 오류가 발생했습니다.";
-      setErrorMessage(message);
-    } finally {
-      setIsRollingBackRule(false);
-    }
-  };
-
   const movePdfPage = async (delta: number) => {
     if (!originalFile || !isPdfSource) return;
     const nextPage = pdfPageNo + delta;
@@ -2818,6 +2616,34 @@ export default function Home() {
       restorePageDraft(targetPage);
       setCrop(undefined);
       setCompletedCrop(undefined);
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "PDF 페이지 이동 중 오류가 발생했습니다.";
+      setErrorMessage(message);
+    }
+  };
+
+  /** 저장 문항이 있는 PDF 페이지로 이동(현재 표시와 무관). 단계 3에서도 2로 전환해 시험지를 보여 줌 */
+  const navigateToQuestionPdfPage = async (targetPage: number) => {
+    if (!originalFile || !isPdfSource) {
+      setErrorMessage("PDF가 열려 있을 때만 페이지 이동이 가능합니다.");
+      return;
+    }
+    if (!Number.isFinite(targetPage) || targetPage < 1 || targetPage > pdfPageCount) {
+      setErrorMessage(`이동할 페이지는 1~${pdfPageCount} 사이여야 합니다.`);
+      return;
+    }
+    try {
+      setErrorMessage("");
+      setSuccessMessage("");
+      savePageDraft(pdfPageNo);
+      setPdfPageInput(String(targetPage));
+      await renderPdfPageToImage(originalFile, targetPage);
+      restorePageDraft(targetPage);
+      setCrop(undefined);
+      setCompletedCrop(undefined);
+      if (currentStep !== 2) setCurrentStep(2);
+      setSuccessMessage(`${targetPage}페이지로 이동했습니다. (문항 박스·크롭은 해당 페이지 저장본 기준)`);
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "PDF 페이지 이동 중 오류가 발생했습니다.";
@@ -2900,7 +2726,10 @@ export default function Home() {
         throw new Error(msg);
       }
       const savedMessage = (await saveRes.json()) as { message?: string };
-      setSuccessMessage(savedMessage.message || "문항 카드 편집 결과로 해설지 DOCX 생성이 완료되었습니다.");
+      setSuccessMessage(
+        savedMessage.message ||
+          `문항 카드 편집 결과로 해설지 DOCX를 「${FINAL_EXPLANATION_DIR_NAME}」에 저장했습니다.`,
+      );
       setWorkflowStep("generate_sheet");
     } catch (error) {
       const message = error instanceof Error ? error.message : "DOCX 저장 중 오류가 발생했습니다.";
@@ -2915,14 +2744,18 @@ export default function Home() {
       <div className="mx-auto grid max-w-[1600px] grid-cols-1 gap-4 lg:grid-cols-2">
         <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm md:p-6">
           <h1 className="text-xl font-bold text-slate-900">
-            하이로드 수학 해설지 제작기
+            {isCropOnlyUi ? "하이로드 수학 · 영역 크롭" : "하이로드 수학 해설지 제작기"}
           </h1>
           <p className="mt-1 text-sm text-slate-600">
-            필요한 단계만 보이도록 단순화된 제작 흐름
+            {isCropOnlyUi
+              ? "PDF·이미지에서 문제 영역만 지정합니다. 해설·DOCX는 로컬에서 일반 모드로 실행하세요."
+              : "필요한 단계만 보이도록 단순화된 제작 흐름"}
           </p>
 
           <div className="mt-5 space-y-4">
-            <div className="grid grid-cols-3 gap-2 text-xs">
+            <div
+              className={`grid gap-2 text-xs ${isCropOnlyUi ? "grid-cols-2" : "grid-cols-3"}`}
+            >
               <button
                 onClick={() => {
                   setCurrentStep(1);
@@ -2947,25 +2780,29 @@ export default function Home() {
               >
                 2) 영역 지정
               </button>
-              <button
-                onClick={goToStep3IfReady}
-                disabled={!hasImage}
-                className={`rounded border px-2 py-2 font-semibold ${
-                  currentStep === 3
-                    ? "border-blue-500 bg-blue-50 text-blue-700"
-                    : "border-slate-200 bg-white text-slate-500"
-                } disabled:cursor-not-allowed disabled:opacity-50`}
-              >
-                3) 해설 제작
-              </button>
+              {!isCropOnlyUi && (
+                <button
+                  onClick={goToStep3IfReady}
+                  disabled={!hasImage}
+                  className={`rounded border px-2 py-2 font-semibold ${
+                    currentStep === 3
+                      ? "border-blue-500 bg-blue-50 text-blue-700"
+                      : "border-slate-200 bg-white text-slate-500"
+                  } disabled:cursor-not-allowed disabled:opacity-50`}
+                >
+                  3) 해설 제작
+                </button>
+              )}
             </div>
 
             <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700">
               {currentStep === 1 &&
                 "현재 단계: 시험지 선택. 목록에서 파일을 선택하거나 직접 업로드하세요."}
               {currentStep === 2 &&
-                "현재 단계: 수동 영역 지정. 한 박스에는 한 문항만(선지·조건까지). 여러 문항이 보이면 박스를 나눕니다. 저장 후 해설 제작으로 넘어가세요."}
-              {currentStep === 3 &&
+                (isCropOnlyUi
+                  ? "현재 단계: 크롭 전용. 한 박스에 한 문항만(선지·조건까지). 페이지마다 「현재 페이지 작업 저장」으로 대기열에 쌓입니다."
+                  : "현재 단계: 수동 영역 지정. 한 박스에는 한 문항만(선지·조건까지). 여러 문항이 보이면 박스를 나눕니다. 저장 후 해설 제작으로 넘어가세요.")}
+              {!isCropOnlyUi && currentStep === 3 &&
                 "현재 단계: 해설 제작. 문제풀이 → 해설선택 → 빠른정답 → 해설지 생성 순서로 진행하세요."}
             </div>
 
@@ -3141,12 +2978,48 @@ export default function Home() {
                           나머지 페이지 제외 적용
                         </button>
                       </div>
+                      <button
+                        type="button"
+                        onClick={applyExcludeKeepOnlySavedQuestionPages}
+                        disabled={queuedProblems.length === 0}
+                        className="mt-2 w-full rounded border border-amber-800 bg-amber-200/90 px-2 py-2 text-xs font-semibold text-amber-950 hover:bg-amber-300 disabled:cursor-not-allowed disabled:opacity-45"
+                      >
+                        선택(저장) 문항이 있는 페이지만 유지 · 나머지 일괄 제외
+                      </button>
+                      <p className="mt-1 text-[10px] leading-snug text-amber-900/90">
+                        위 입력 없이, 지금 대기열에 저장된 문항의 PDF 페이지만 남기고 나머지는 전부 제외합니다.
+                        빠른정답·해설참고 페이지는 기존과 같이 자동 유지됩니다.
+                      </p>
                       {invalidKeepWorkPagesInput && (
                         <p className="mt-1 text-[11px] text-rose-700">
                           입력 형식이나 범위를 확인해 주세요. (쉼표·하이픈 구간, 1~{pdfPageCount}페이지)
                         </p>
                       )}
                     </div>
+                    {isPdfSource && queuedProblems.length > 0 && (
+                      <div className="mt-2 rounded-md border border-sky-200 bg-sky-50/90 p-2">
+                        <p className="text-xs font-semibold text-sky-950">저장된 문항 → PDF 페이지 바로 가기</p>
+                        <p className="mt-0.5 text-[10px] text-sky-900">
+                          현재 화면이 아니어도 해당 문항을 저장했을 때의 페이지로 이동합니다.
+                        </p>
+                        <div className="mt-1.5 flex flex-wrap gap-1.5">
+                          {queuedProblems.map((item) => {
+                            const p = getPdfPageFromQueuedProblem(item);
+                            return (
+                              <button
+                                key={`jump-${item.id}`}
+                                type="button"
+                                disabled={p === null}
+                                onClick={() => p !== null && void navigateToQuestionPdfPage(p)}
+                                className="rounded border border-sky-600 bg-white px-2 py-1 text-[11px] font-semibold text-sky-900 hover:bg-sky-100 disabled:cursor-not-allowed disabled:opacity-40"
+                              >
+                                {item.questionNo}번 → {p ?? "?"}페이지
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
                     <div className="mt-2 grid grid-cols-1 gap-2 md:grid-cols-2">
                       <div>
                         <p className="text-xs font-semibold text-slate-700">빠른정답 페이지 지정(선택)</p>
@@ -3507,21 +3380,76 @@ export default function Home() {
                 <div className="mt-2 flex gap-2">
                   <button
                     onClick={() => setCurrentStep(1)}
-                    className="w-1/2 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm"
+                    className={`rounded-md border border-slate-300 bg-white px-3 py-2 text-sm ${
+                      isCropOnlyUi ? "w-full" : "w-1/2"
+                    }`}
                   >
                     이전: 시험지 선택
                   </button>
-                  <button
-                    onClick={goToStep3IfReady}
-                    className="w-1/2 rounded-md bg-blue-600 px-3 py-2 text-sm font-semibold text-white"
-                  >
-                    다음: 해설 제작
-                  </button>
+                  {!isCropOnlyUi && (
+                    <button
+                      onClick={goToStep3IfReady}
+                      className="w-1/2 rounded-md bg-blue-600 px-3 py-2 text-sm font-semibold text-white"
+                    >
+                      다음: 해설 제작
+                    </button>
+                  )}
                 </div>
+                {isCropOnlyUi && (
+                  <div className="mt-4 rounded-md border border-emerald-200 bg-emerald-50/90 p-3">
+                    <p className="text-sm font-semibold text-emerald-950">
+                      저장된 문항 ({queuedProblems.length}개)
+                    </p>
+                    <p className="mt-1 text-[11px] leading-snug text-emerald-900">
+                      목록은 이 브라우저 탭 세션에만 유지됩니다. 새로고침하면 초기화됩니다. 로컬에서 해설까지 하려면 동일 앱을{" "}
+                      <strong>NEXT_PUBLIC_UI_MODE 없이</strong> 실행해 주세요.
+                    </p>
+                    {queuedProblems.length === 0 ? (
+                      <p className="mt-2 text-xs text-emerald-800">
+                        페이지를 저장하면 여기에 문항이 쌓입니다.
+                      </p>
+                    ) : (
+                      <ul className="mt-2 max-h-52 space-y-1 overflow-y-auto text-xs text-emerald-950">
+                        {queuedProblems.map((item, index) => {
+                          const p = getPdfPageFromQueuedProblem(item);
+                          return (
+                            <li
+                              key={item.id}
+                              className="flex flex-wrap items-center justify-between gap-1 rounded bg-white px-2 py-1"
+                            >
+                              <span className="min-w-0 flex-1">
+                                {index + 1}. {item.questionNo}번 ({item.pageLabel}
+                                {isPdfSource && p !== null ? ` · ${p}페이지` : ""})
+                              </span>
+                              <div className="flex shrink-0 flex-wrap gap-1">
+                                {isPdfSource && p !== null && (
+                                  <button
+                                    type="button"
+                                    onClick={() => void navigateToQuestionPdfPage(p)}
+                                    className="rounded border border-emerald-600 bg-emerald-50 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-900 hover:bg-emerald-100"
+                                  >
+                                    {p}p로
+                                  </button>
+                                )}
+                                <button
+                                  type="button"
+                                  onClick={() => removeQueuedProblem(item.id)}
+                                  className="rounded border border-emerald-300 px-2 py-0.5 text-[11px]"
+                                >
+                                  삭제
+                                </button>
+                              </div>
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    )}
+                  </div>
+                )}
               </div>
             )}
 
-            {currentStep >= 3 && (
+            {!isCropOnlyUi && currentStep >= 3 && (
               <>
             <div className="rounded-md border border-violet-200 bg-violet-50 p-3">
               <p className="text-sm font-semibold text-violet-900">
@@ -3533,20 +3461,48 @@ export default function Home() {
                 </p>
               ) : (
                 <ul className="mt-2 space-y-1 text-xs text-violet-900">
-                  {queuedProblems.map((item, index) => (
-                    <li key={item.id} className="flex items-center justify-between rounded bg-white px-2 py-1">
-                      <span>
-                        {index + 1}. {item.questionNo}번 ({item.pageLabel})
-                      </span>
-                      <button
-                        onClick={() => removeQueuedProblem(item.id)}
-                        className="rounded border border-violet-300 px-2 py-0.5 text-[11px]"
+                  {queuedProblems.map((item, index) => {
+                    const p = getPdfPageFromQueuedProblem(item);
+                    return (
+                      <li
+                        key={item.id}
+                        className="flex flex-wrap items-center justify-between gap-1 rounded bg-white px-2 py-1"
                       >
-                        삭제
-                      </button>
-                    </li>
-                  ))}
+                        <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1">
+                          <span className="truncate">
+                            {index + 1}. {item.questionNo}번 ({item.pageLabel})
+                          </span>
+                          {isPdfSource && p !== null && (
+                            <button
+                              type="button"
+                              onClick={() => void navigateToQuestionPdfPage(p)}
+                              className="shrink-0 rounded border border-violet-500 bg-violet-50 px-1.5 py-0.5 text-[10px] font-semibold text-violet-800 hover:bg-violet-100"
+                            >
+                              {p}페이지로
+                            </button>
+                          )}
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => removeQueuedProblem(item.id)}
+                          className="rounded border border-violet-300 px-2 py-0.5 text-[11px]"
+                        >
+                          삭제
+                        </button>
+                      </li>
+                    );
+                  })}
                 </ul>
+              )}
+              {isPdfSource && queuedProblems.length > 0 && (
+                <button
+                  type="button"
+                  onClick={applyExcludeKeepOnlySavedQuestionPages}
+                  disabled={isBatchGenerating}
+                  className="mt-2 w-full rounded-md border border-amber-700 bg-amber-100 px-3 py-2 text-xs font-semibold text-amber-950 hover:bg-amber-200 disabled:opacity-45"
+                >
+                  저장 문항이 있는 페이지만 유지 · 나머지 PDF 제외
+                </button>
               )}
               <button
                 onClick={runBatchGeneration}
@@ -4026,157 +3982,6 @@ export default function Home() {
               </div>
             )}
 
-            <div
-              className="rounded-md border border-indigo-200 bg-indigo-50 p-3 text-xs text-indigo-900"
-              onPaste={(event) => {
-                void handleRuleAnalyzePaste(event);
-              }}
-            >
-              <p className="font-semibold">규칙 자동 업데이트 (Supabase)</p>
-              <p className="mt-1 text-[11px] text-indigo-800">
-                붙여 넣은 내용이 <strong>아쉬운 해설</strong>인지 <strong>좋은 예시</strong>인지 먼저
-                고르세요. 예전에는 입력을 항상 “좋은 예시”로만 처리해 규칙이 엉키는 경우가
-                있었습니다.
-              </p>
-              <div className="mt-2 flex flex-wrap gap-3 text-[11px] text-indigo-900">
-                <label className="flex cursor-pointer items-center gap-1.5">
-                  <input
-                    type="radio"
-                    name="ruleAnalyzeInputKind"
-                    checked={ruleAnalyzeInputKind === "weak"}
-                    onChange={() => setRuleAnalyzeInputKind("weak")}
-                    className="accent-indigo-600"
-                  />
-                  아쉬운 해설 → 문제 패턴을 금지·교정하는 규칙
-                </label>
-                <label className="flex cursor-pointer items-center gap-1.5">
-                  <input
-                    type="radio"
-                    name="ruleAnalyzeInputKind"
-                    checked={ruleAnalyzeInputKind === "good"}
-                    onChange={() => setRuleAnalyzeInputKind("good")}
-                    className="accent-indigo-600"
-                  />
-                  좋은 예시 → 이 스타일을 따르라는 규칙
-                </label>
-              </div>
-              <textarea
-                value={ruleAnalyzeInput}
-                onChange={(event) => setRuleAnalyzeInput(event.target.value)}
-                maxLength={4000}
-                placeholder={
-                  ruleAnalyzeInputKind === "weak"
-                    ? "예: 근사값(≈)으로 풀거나 2^(1/2)만 쓴 장황한 해설을 붙여 넣으세요."
-                    : "예: 교재처럼 짧은 수식 연쇄로 잘 쓴 해설 전체를 붙여 넣으세요."
-                }
-                className="mt-2 min-h-[110px] w-full rounded-md border border-indigo-200 bg-white p-2 text-xs leading-5 text-slate-700"
-              />
-              <p className="mt-1 text-[11px] text-indigo-700">
-                해설 입력 길이: {ruleAnalyzeInput.length}/4000
-              </p>
-              <label className="mt-2 block text-[11px] font-semibold text-indigo-800">
-                해설 이미지 업로드(OCR 후 위에서 고른 종류로 분석)
-              </label>
-              <p className="mt-1 text-[11px] text-indigo-700">
-                모범 해설 스캔이면 위에서「좋은 예시」를 선택하세요. 파일 선택 또는 Ctrl+V 붙여넣기.
-              </p>
-              <input
-                type="file"
-                accept="image/*"
-                onChange={(event) => {
-                  void handleRuleAnalyzeImageChange(event);
-                }}
-                className="mt-1 w-full rounded-md border border-indigo-200 bg-white px-2 py-1 text-xs text-slate-700 file:mr-2 file:rounded file:border-0 file:bg-indigo-100 file:px-2 file:py-1 file:text-indigo-800"
-              />
-              {ruleAnalyzeImageName && (
-                <div className="mt-1 flex items-center justify-between gap-2 text-[11px] text-indigo-700">
-                  <span className="truncate">업로드됨: {ruleAnalyzeImageName}</span>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setRuleAnalyzeImageBase64("");
-                      setRuleAnalyzeImageMimeType("image/png");
-                      setRuleAnalyzeImageName("");
-                    }}
-                    className="shrink-0 rounded border border-indigo-300 bg-white px-2 py-0.5 text-[11px] font-semibold text-indigo-700"
-                  >
-                    이미지 제거
-                  </button>
-                </div>
-              )}
-              <textarea
-                value={ruleTargetStyleInput}
-                onChange={(event) => setRuleTargetStyleInput(event.target.value)}
-                maxLength={1000}
-                placeholder="선택: 원하는 정석 스타일(예: 식 전개 3단계, 결론 1문장, 객관식은 번호만)"
-                className="mt-2 min-h-[64px] w-full rounded-md border border-indigo-200 bg-white p-2 text-xs leading-5 text-slate-700"
-              />
-              <p className="mt-1 text-[11px] text-indigo-700">
-                스타일 힌트 길이: {ruleTargetStyleInput.length}/1000
-              </p>
-              <input
-                type="password"
-                value={ruleAdminTokenInput}
-                onChange={(event) => setRuleAdminTokenInput(event.target.value)}
-                placeholder="선택: 운영자 토큰(PROMPT_RULES_ADMIN_TOKEN)"
-                className="mt-2 w-full rounded-md border border-indigo-200 bg-white px-2 py-2 text-xs text-slate-700"
-              />
-              <p className="mt-1 text-[11px] text-indigo-700">
-                입력한 토큰은 현재 브라우저에 자동 저장되며, 비우면 저장값이 삭제됩니다.
-              </p>
-              <button
-                type="button"
-                onClick={handleAnalyzeAndApplyRules}
-                disabled={isApplyingRuleFeedback || explanationGenerationBusy}
-                className="mt-2 w-full rounded bg-indigo-600 px-3 py-2 text-xs font-semibold text-white disabled:cursor-not-allowed disabled:bg-indigo-300"
-              >
-                {isApplyingRuleFeedback
-                  ? "규칙 분석/적용 중..."
-                  : ruleAnalyzeInputKind === "weak"
-                    ? "금지·교정 규칙 생성 후 Supabase 반영"
-                    : "스타일 규칙 생성 후 Supabase 반영"}
-              </button>
-              <button
-                type="button"
-                onClick={() => void loadPromptRuleVersions()}
-                disabled={isLoadingRuleVersions || isApplyingRuleFeedback || isRollingBackRule}
-                className="mt-2 w-full rounded border border-indigo-300 bg-white px-3 py-2 text-xs font-semibold text-indigo-700 disabled:cursor-not-allowed disabled:bg-indigo-100"
-              >
-                {isLoadingRuleVersions ? "규칙 이력 불러오는 중..." : "규칙 이력 새로고침"}
-              </button>
-              {ruleVersions.length > 0 && (
-                <div className="mt-2 rounded border border-indigo-200 bg-white p-2">
-                  <p className="text-[11px] font-semibold text-indigo-900">최근 규칙 버전 (최대 10개)</p>
-                  <ul className="mt-1 space-y-1">
-                    {ruleVersions.map((item) => (
-                      <li
-                        key={`rule-version-${item.id}`}
-                        className="rounded border border-slate-200 bg-slate-50 px-2 py-1"
-                      >
-                        <div className="flex items-center justify-between gap-2">
-                          <p className="text-[11px] text-slate-700">
-                            #{item.id} {item.is_active ? "(활성)" : ""} /{" "}
-                            {new Date(item.updated_at).toLocaleString()}
-                          </p>
-                          <button
-                            type="button"
-                            onClick={() => void handleRollbackRule(item.id)}
-                            disabled={item.is_active || isRollingBackRule || isApplyingRuleFeedback}
-                            className="rounded border border-rose-300 bg-white px-2 py-0.5 text-[11px] font-semibold text-rose-700 disabled:cursor-not-allowed disabled:border-slate-200 disabled:text-slate-400"
-                          >
-                            {isRollingBackRule ? "롤백 중..." : "이 버전으로 롤백"}
-                          </button>
-                        </div>
-                        <p className="mt-1 line-clamp-2 text-[11px] text-slate-600">
-                          {item.extra_constraints_preview || "(미리보기 없음)"}
-                        </p>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-            </div>
-
             {diagramAidRecommendation && (
               <div
                 className={`rounded-md border p-3 text-xs ${
@@ -4213,14 +4018,32 @@ export default function Home() {
         </section>
 
         <section className="rounded-xl border border-slate-300 bg-[#fdfcf8] p-4 shadow-sm md:p-6">
-          {currentStep !== 3 ? (
+          {isCropOnlyUi && currentStep === 2 && sourceImage ? (
+            <div className="sticky top-4 space-y-3">
+              <p className="text-sm font-semibold text-slate-800">전체 페이지 보기</p>
+              <p className="text-xs text-slate-600">
+                좌측 패널에서 박스 크롭을 지정합니다. 여기서는 레이아웃·작은 글씨 확인용입니다.
+              </p>
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src={sourceImage}
+                alt="현재 시험지 페이지"
+                className="max-h-[min(85vh,900px)] w-full rounded-md border border-slate-200 bg-white object-contain shadow-sm"
+              />
+            </div>
+          ) : isCropOnlyUi && currentStep === 1 ? (
+            <div className="rounded-md border border-dashed border-slate-300 bg-white p-8 text-center text-slate-500">
+              <p className="text-sm">시험지를 선택한 뒤 「영역 지정」으로 넘어가면</p>
+              <p className="mt-2 text-xs">이쪽에 페이지 전체가 크게 표시되어 크롭 작업을 보조합니다.</p>
+            </div>
+          ) : !isCropOnlyUi && currentStep !== 3 ? (
             <div className="rounded-md border border-dashed border-slate-300 bg-white p-8 text-center text-slate-500">
               <p className="text-sm">3단계(해설 제작)에서 해설 미리보기가 표시됩니다.</p>
               <p className="mt-2 text-xs">
                 지금은 좌측에서 시험지 선택과 문제 영역 지정을 먼저 진행하세요.
               </p>
             </div>
-          ) : (
+          ) : !isCropOnlyUi && currentStep === 3 ? (
             <>
               {!hasGeneratedResult && (
                 <div className="rounded-md border border-amber-300 bg-amber-50 p-5 text-center text-amber-900">
@@ -4357,9 +4180,9 @@ export default function Home() {
                 </div>
               )}
             </>
-          )}
+          ) : null}
 
-          {currentStep === 3 && exportDocEntriesForSave.length > 0 && (
+          {!isCropOnlyUi && currentStep === 3 && exportDocEntriesForSave.length > 0 && (
             <div className="mt-4 grid grid-cols-1 gap-3">
               <div
                 className={`rounded-md border px-3 py-2 text-xs ${

@@ -38,7 +38,7 @@ yarn-error.log*
 
 # local runtime data (not for repo)
 시험지/
-작업 완료/
+해설지 최종본/
 *.pdf
 *.docx
 *.txt
@@ -47,14 +47,8 @@ yarn-error.log*
 *.bat
 *.sh
 
-# docker files (optional; keep only if Railway deploys via Docker)
-Dockerfile
-.dockerignore
-docker-compose.yml
-
-# internal notes
-AGENTS.md
-CLAUDE.md
+# scratch / 로컬만 쓰는 작업 폴더
+/work/
 # typescript
 *.tsbuildinfo
 next-env.d.ts

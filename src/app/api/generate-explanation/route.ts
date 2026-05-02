@@ -2,7 +2,7 @@ import { GoogleGenerativeAI } from "@google/generative-ai";
 import { NextResponse } from "next/server";
 import { resolveGeminiGenerateEnvKey } from "@/lib/generateExplanationGeminiEnv";
 import { buildSystemInstruction } from "./prompts";
-import { getRuntimePromptRules } from "@/lib/supabasePromptRules";
+import { getRuntimePromptRules } from "@/lib/runtimePromptRules";
 import { isGeminiRateLimitedMessage } from "@/lib/geminiRateLimit";
 
 type GenerateRequestBody = {
@@ -446,20 +446,24 @@ async function generateWithOpenAiFallback(params: {
     });
   });
 
+  const payload: Record<string, unknown> = {
+    model: params.model,
+    messages: [
+      { role: "system", content: OPENAI_VISION_EXPLANATION_SYSTEM },
+      { role: "user", content },
+    ],
+  };
+  const t = resolveOpenAiRequestTemperature(params.model);
+  if (t !== undefined) {
+    payload.temperature = t;
+  }
   const response = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${params.apiKey}`,
     },
-    body: JSON.stringify({
-      model: params.model,
-      messages: [
-        { role: "system", content: OPENAI_VISION_EXPLANATION_SYSTEM },
-        { role: "user", content },
-      ],
-      temperature: 0.2,
-    }),
+    body: JSON.stringify(payload),
   });
   if (!response.ok) {
     const text = await response.text();
@@ -475,7 +479,27 @@ function isCrossVerifyEnabled() {
   return (process.env.EXPLANATION_CROSS_VERIFY || "").trim().toLowerCase() === "true";
 }
 
-function resolveCrossVerifyModel() {
+/** o·o3 등 추론 계열은 temperature 지정 시 API 400이 나는 경우가 많아 생략한다 */
+function resolveOpenAiRequestTemperature(model: string): number | undefined {
+  const id = model.trim().toLowerCase();
+  if (/^o[0-9]/.test(id)) {
+    return undefined;
+  }
+  return 0.2;
+}
+
+/**
+ * killer 프로필(또는 킬러급 검토)에는 기본적으로 고역량 GPT를 쓴다.
+ * `OPENAI_MODEL_CROSS_VERIFY_KILLER` → `OPENAI_MODEL_CROSS_VERIFY` → 기본값
+ */
+function resolveCrossVerifyModel(profile: "easy" | "balanced" | "killer") {
+  if (profile === "killer") {
+    return (
+      process.env.OPENAI_MODEL_CROSS_VERIFY_KILLER?.trim() ||
+      process.env.OPENAI_MODEL_CROSS_VERIFY?.trim() ||
+      "gpt-5.2"
+    );
+  }
   return process.env.OPENAI_MODEL_CROSS_VERIFY?.trim() || "gpt-4o";
 }
 
@@ -554,7 +578,7 @@ async function runOpenAiCrossVerify(params: {
   if (!isCrossVerifyEnabled() || !params.openAiApiKey) {
     return { text: params.draft, crossVerified: false };
   }
-  const verifyModel = resolveCrossVerifyModel();
+  const verifyModel = resolveCrossVerifyModel(params.solverModelProfile);
   const verifyPrompt = buildCrossVerifyUserPrompt(params.draft, {
     generationMode: params.generationMode,
     solverModelProfile: params.solverModelProfile,
@@ -639,7 +663,11 @@ export async function POST(request: Request) {
     const openAiApiKey =
       process.env.OPENAI_API_KEY?.trim() || process.env.OPENAI_KEY?.trim() || "";
     const openAiModel =
-      process.env.OPENAI_MODEL_GENERATE_FALLBACK?.trim() || "gpt-4o-mini";
+      solverModelProfile === "killer"
+        ? process.env.OPENAI_MODEL_GENERATE_FALLBACK_KILLER?.trim() ||
+          process.env.OPENAI_MODEL_GENERATE_FALLBACK?.trim() ||
+          "gpt-5.2"
+        : process.env.OPENAI_MODEL_GENERATE_FALLBACK?.trim() || "gpt-4o-mini";
 
     if (!imageBase64) {
       return NextResponse.json(
@@ -802,7 +830,7 @@ export async function POST(request: Request) {
             generationMode,
             solverModelProfile,
           });
-          const verifyModelTag = resolveCrossVerifyModel();
+          const verifyModelTag = resolveCrossVerifyModel(solverModelProfile);
           const qualityWarningsCross = cross.verifyWarning ? [cross.verifyWarning] : [];
           return NextResponse.json(
             {
@@ -896,7 +924,7 @@ export async function POST(request: Request) {
           generationMode,
           solverModelProfile,
         });
-        const verifyModelTagRetry = resolveCrossVerifyModel();
+        const verifyModelTagRetry = resolveCrossVerifyModel(solverModelProfile);
         const qualityWarningsMerged = [...qualityWarnings];
         if (crossRetry.verifyWarning) qualityWarningsMerged.push(crossRetry.verifyWarning);
         return NextResponse.json(

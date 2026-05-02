@@ -1,76 +1,27 @@
-# 현재 사용 모델 목록 (Gemini / GPT)
+# 모델·환경변수 (로컬 API 전제)
 
-이 문서는 최신 코드 기준으로, 해설 제작 파이프라인에서 사용하는 모델과 환경변수 키를 정리합니다.  
-**운영자 단계별 세팅(처음부터 끝까지)**은 [setup-operator-steps.md](./setup-operator-steps.md)를 보세요.  
-전체 동선(영역 지정→게이트→내보내기)은 [workflow-image-to-docx.md](./workflow-image-to-docx.md)를 함께 보세요.
+- 문서 기준일: 2026-05-02
 
-## 1) Gemini 모델
+해설 파이프라인은 **로컬 `npm run dev`** 와 `.env.local` 로 동작합니다. (선택) **Google Drive**는 Railway 크롭 묶음 **읽기**만 하며, **최종 DOCX는 로컬 `해설지 최종본`에만** 저장됩니다.
 
-### A. 문제 영역 사전검증 (`/api/precheck-extraction`)
-- 환경변수 키: `GEMINI_MODELS_PRECHECK`
-- 기본 후보: `gemini-2.0-flash`
-- 참고:
-  - 코드에서 `gemini-1.5-pro`, `gemini-1.5-flash`는 자동 필터링됩니다.
-  - precheck 429(`Too Many Requests`/`Resource exhausted`)는 UI에서 생성 강행하지 않도록 차단됩니다.
-  - 프롬프트는 **한 박스·한 문항 크롭** 전제이며, 크롭에 완결된 문항이 둘 이상 동시에 들어오면 점수를 크게 낮추도록 안내합니다([workflow-image-to-docx.md](./workflow-image-to-docx.md)).
+## Gemini
 
-### B. 해설 생성 (`/api/generate-explanation`)
-- 환경변수 키:
-  - `GEMINI_MODELS_GENERATE_FINAL`
-  - `GEMINI_MODELS_GENERATE_TEST`
-  - `GEMINI_MODELS_GENERATE_EASY`
-  - `GEMINI_MODELS_GENERATE_BALANCED`
-  - `GEMINI_MODELS_GENERATE_KILLER`
-- 기본 후보: 각 프로필 모두 `gemini-2.0-flash`
-- **UI「생성 모드 × 문제풀이 프로필」→ 실제로 읽는 키** (`resolveGeminiGenerateEnvKey` 와 동일):
+- **사전검증** `/api/precheck-extraction`: `GEMINI_MODELS_PRECHECK` (기본 `gemini-2.0-flash`)
+- **해설 생성** `/api/generate-explanation`: `GEMINI_MODELS_GENERATE_*` 계열 (UI 생성 모드·프로필별로 키가 다름 — 코드의 `resolveGeminiGenerateEnvKey` 와 동일)
+- **내보내기 보정** `/api/repair-explanations`: `GEMINI_MODELS_REPAIR`
+- `gemini-1.5-pro`, `gemini-1.5-flash` 는 코드에서 후보에서 제외됩니다.
 
-| generationMode | solverProfile | 사용하는 env 키 |
-|----------------|---------------|------------------|
-| `test` | `easy` | `GEMINI_MODELS_GENERATE_EASY` |
-| `test` | `balanced` | `GEMINI_MODELS_GENERATE_TEST` |
-| `test` | `killer` | `GEMINI_MODELS_GENERATE_KILLER` |
-| `final` | `easy` | `GEMINI_MODELS_GENERATE_FINAL` |
-| `final` | `balanced` | `GEMINI_MODELS_GENERATE_BALANCED` |
-| `final` | `killer` | `GEMINI_MODELS_GENERATE_KILLER` |
+## OpenAI
 
-- **낭비 방지:** 위 키들에 **동일한 모델 ID**를 넣으면, 라디오만 바꿔도 **호출 모델은 같을 수 있습니다.** 차이를 내려면 키별로 다른 모델을 지정하세요.
-- 참고:
-  - 코드에서 `gemini-1.5-pro`, `gemini-1.5-flash`는 자동 필터링됩니다.
-  - Gemini 실패 시 OpenAI fallback 경로를 사용합니다.
-- **교차 검증(신뢰도 최우선, 옵션)**  
-  - `EXPLANATION_CROSS_VERIFY=true` 이고 `OPENAI_API_KEY`가 있으면, **Gemini 1차 초안이 품질 게이트를 통과한 뒤** OpenAI vision으로 **2차 독립 검토**를 한 번 더 수행합니다.  
-  - 검토 모델: `OPENAI_MODEL_CROSS_VERIFY` (기본 `gpt-4o`).  
-  - 검증 결과가 내부 품질 검증을 통과하지 못하면 **1차 초안을 유지**하고 `qualityWarnings`에 사유를 남깁니다.  
-  - 응답 JSON에 `crossVerified: true/false`가 포함될 수 있습니다.  
-  - LLM은 절대적인 100% 정답을 보장하지 않으나, **서로 다른 계열(멀티모델) 검증**으로 실수를 줄이는 용도입니다.
+- **폴백** (Gemini 실패 시): `OPENAI_MODEL_GENERATE_FALLBACK` (기본 `gpt-4o-mini`), `OPENAI_EXPLANATION_FORMAT_RETRY`
+- **교차 검증**(옵션): `EXPLANATION_CROSS_VERIFY=true`, `OPENAI_MODEL_CROSS_VERIFY`
 
-### C. DOCX 내보내기 직전 자동 보정 (`/api/repair-explanations`)
-- 환경변수 키: `GEMINI_MODELS_REPAIR`
-- 운영 권장: `gemini-2.0-flash` 우선
-- 클라이언트와 동일한 `validateExportDocEntries` 기준을 따르며, 보정 프롬프트는 **항목별 한 문항만**·**body에 `[정답]` 금지**·**입력과 동일한 문항 집합 유지**를 요구한다.
-
-## 2) GPT(OpenAI) 모델
-
-### A. 일반 해설 파이프라인 fallback (`/api/generate-explanation`)
-- 환경변수 키: `OPENAI_MODEL_GENERATE_FALLBACK`
-- 기본값: `gpt-4o-mini`
-- 동작:
-  - Gemini 후보가 모두 실패하거나 검증을 통과하지 못하면 OpenAI fallback을 시도합니다.
-  - 수업기준 이슈는 치명/경고로 분리해 처리합니다.
-  - **형식·정합 재시도:** `OPENAI_EXPLANATION_FORMAT_RETRY`가 `false`가 **아니면**(미설정 포함) 폴백 1차가 검증에 실패했을 때 **동일 이미지로 2차 호출**을 시도합니다. API 비용을 줄이려면 `.env`에 `OPENAI_EXPLANATION_FORMAT_RETRY=false`를 명시하세요.
-
-### A-2. 교차 검증 전용 (`/api/generate-explanation`)
-- 환경변수 키: `OPENAI_MODEL_CROSS_VERIFY`
-- 기본값: `gpt-4o`
-- 전제: `EXPLANATION_CROSS_VERIFY=true`
-
-### B. HML 붙이기 백업 경로 (`/api/hml/append-solution`)
-- 코드 경로에서 GPT를 보조로 사용할 수 있습니다.
-- 모델 가용성은 계정/리전/정책에 따라 달라질 수 있습니다.
-
-## 3) 운영 권장 환경변수 예시
+## 예시 `.env.local`
 
 ```env
+GEMINI_API_KEY=...
+OPENAI_API_KEY=...
+
 GEMINI_MODELS_PRECHECK=gemini-2.0-flash
 GEMINI_MODELS_GENERATE_FINAL=gemini-2.0-flash
 GEMINI_MODELS_GENERATE_TEST=gemini-2.0-flash
@@ -78,34 +29,8 @@ GEMINI_MODELS_GENERATE_EASY=gemini-2.0-flash
 GEMINI_MODELS_GENERATE_BALANCED=gemini-2.0-flash
 GEMINI_MODELS_GENERATE_KILLER=gemini-2.0-flash
 GEMINI_MODELS_REPAIR=gemini-2.0-flash
-OPENAI_MODEL_GENERATE_FALLBACK=gpt-4o
-# OPENAI_EXPLANATION_FORMAT_RETRY=false
 ```
 
-## 4) 최고 신뢰도(비용 감수) 권장 조합 — 전문가·MCP 토의 종합
+프롬프트·스타일 규칙은 **저장소 코드**와 **Cursor**에서 관리합니다 (`getRuntimePromptRules` 는 현재 항상 `null`).
 
-MCP `gemini_chat`·`gpt_chat`로 1차=비전·2차=교차검증 구조를 재확인했고, **코드에서 제외되는 1.5 Pro/Flash는 사용하지 않습니다.**  
-아래는 `resolveGeminiGenerateEnvKey` / `pickModelCandidates` 와 맞춘 **권장 모델 ID** 예시입니다(계정/리전에서 404가 나면 한 단계 낮은 Flash 계열로 내리면 됨).
-
-| generationMode | solverProfile | 1차(Gemini, env 키) | 2차(교차검증, OpenAI vision) |
-|----------------|---------------|----------------------|--------------------------------|
-| `final` | `easy` | `GEMINI_MODELS_GENERATE_FINAL` → `gemini-2.5-flash` | `OPENAI_MODEL_CROSS_VERIFY=gpt-4o` |
-| `final` | `balanced` | `GEMINI_MODELS_GENERATE_BALANCED` → `gemini-2.5-pro` | 동일 |
-| `final` | `killer` | `GEMINI_MODELS_GENERATE_KILLER` → `gemini-2.5-pro` | 동일 |
-| `test` | `easy` | `GEMINI_MODELS_GENERATE_EASY` → `gemini-2.5-flash` | 동일 |
-| `test` | `balanced` | `GEMINI_MODELS_GENERATE_TEST` → `gemini-2.5-flash` | 동일 |
-| `test` | `killer` | `GEMINI_MODELS_GENERATE_KILLER` → `gemini-2.5-pro`(또는 실험 시 flash) | 동일 |
-
-- **비용 절감 팁:** 실험은 `GEMINI_MODELS_GENERATE_TEST`·`GEMINI_MODELS_GENERATE_EASY`만 저렴한 Flash로 두고, 발행 직전만 `BALANCED`/`KILLER`/`FINAL`을 올리는 식으로 나누면 불필요한 고가 호출을 줄일 수 있습니다.
-
-필수 플래그:
-
-```env
-EXPLANATION_CROSS_VERIFY=true
-OPENAI_API_KEY=...
-OPENAI_MODEL_CROSS_VERIFY=gpt-4o
-OPENAI_MODEL_GENERATE_FALLBACK=gpt-4o
-```
-
-**역할 분담:** Gemini로 이미지 중심 초안 생성 → 동일 이미지를 보낸 채 GPT가 논리·계산·보기 일치를 재점검해 초안을 수정 또는 동일 재출력.  
-**한계:** 어떤 조합도 수학 정답을 법적으로 “100% 보증”하지는 않으며, 인간 검수가 최종 방어선입니다.
+**Google Drive**(시험지 묶음 읽기 전용) 환경변수는 [PIPELINE.md](./PIPELINE.md) 와 `.env.local.example` 을 참고하세요.

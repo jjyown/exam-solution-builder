@@ -6,14 +6,10 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint",
-    "smoke:hml": "node scripts/hml-smoke.mjs",
-    "extract:hml-style": "node scripts/extract-hml-style-samples.mjs",
-    "mcp:gemini-gpt": "node mcp/gemini-gpt-server.mjs"
+    "lint": "eslint"
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
-    "@supabase/supabase-js": "^2.105.1",
     "docx": "^9.6.1",
     "googleapis": "^171.4.0",
     "html2canvas": "^1.4.1",
@@ -27,7 +23,6 @@
     "react-katex": "^3.1.0"
   },
   "devDependencies": {
-    "@modelcontextprotocol/sdk": "^1.29.0",
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
     "@types/react": "^19",

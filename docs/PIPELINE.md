@@ -1,0 +1,89 @@
+# 해설지 파이프라인 — 확정 동선
+
+- 문서 기준일: 2026-05-02
+
+## 문서 세트 (기록·운영)
+
+작업을 지속할 때 **academy_manager `docs`와 같은 습관**으로 아래를 함께 갱신합니다.
+
+| 문서 | 역할 |
+|------|------|
+| [enterprise_workflow.md](./enterprise_workflow.md) | Gate A~E, 작업 단위·PRD-lite, 트리아지 |
+| [context.md](./context.md) | 제품 컨텍스트, **의사결정 로그 표** |
+| [plan.md](./plan.md) | 목표, 원칙, 완료/다음 단계 |
+| [checklist.md](./checklist.md) | PASS/FAIL·회귀·미완료 |
+| [models.md](./models.md) | LLM·env 키 |
+
+각 파일 상단의 **문서 기준일**을 작업일에 맞출 것.
+
+---
+
+## 한 줄 구조(사용자 기준)
+
+1. **Railway** — PDF에서 영역 지정한 부분 **크롭**  
+   - 배포 시 **`NEXT_PUBLIC_UI_MODE=crop`** 를 넣으면 UI가 **시험지 선택 + 영역 지정**만 남고, 해설·DOCX 단계는 숨깁니다. 로컬 제작기에서는 이 변수를 두지 않습니다.  
+2. **Google Drive** — 그 묶음(이미지·zip 등)을 **Drive의 지정 폴더**에 저장  
+3. **Cursor** — 프롬프트·검수·문서 보조로 **해설 작업** 지원 (+ 로컬 Next 앱에서 생성·편집)  
+4. **로컬 `해설지 최종본`** — 최종 해설지(DOCX 등)를 **반드시 이 폴더에 저장**해 두어, 다른 PC로 폴더만 복사해도 동일하게 쓸 수 있게 함  
+
+---
+
+## 다이어그램
+
+```mermaid
+flowchart TB
+  subgraph r["1. Railway"]
+    PDF[PDF]
+    CROP[영역 지정·크롭]
+    BUNDLE[묶음 파일]
+    PDF --> CROP --> BUNDLE
+  end
+  subgraph d["2. Google Drive"]
+    GD_IN[(입력용 폴더\nRailway 업로드)]
+    BUNDLE --> GD_IN
+  end
+  subgraph work["3. 해설 작업"]
+    CUR[Cursor\n보조·규칙·검토]
+    APP[로컬 Next 앱\n생성·배치·DOCX]
+    CUR -.-> APP
+  end
+  subgraph out["4. 로컬 산출"]
+    LOCAL[(프로젝트/해설지 최종본)]
+    APP --> LOCAL
+  end
+  GD_IN -->|목록·다운로드\n또는 수동 동기화| APP
+```
+
+---
+
+## 폴더 이름 정리 (헷갈림 방지)
+
+| 위치 | 역할 | 비고 |
+|------|------|------|
+| **Drive · 입력 폴더** | Railway가 **크롭 묶음**만 올리는 곳 | **`GOOGLE_DRIVE_EXAMS_FOLDER_ID`** 로 지정. DOCX는 올리지 않음 |
+| **로컬 · `해설지 최종본`** | **최종 해설 DOCX만** 저장(API `/api/save-result`) | 코드 상수: `src/lib/outputPaths.ts` 의 `FINAL_EXPLANATION_DIR_NAME`. 타 PC로 **이 폴더를 복사**하면 동일하게 사용 |
+
+**원칙:** 완료 후 DOCX를 Drive에 다시 넣는 API·흐름은 **없음**. 필요하면 사용자가 직접 Drive에 복사.
+
+---
+
+## 타 컴퓨터에서 동일하게 쓰기 (이기성)
+
+1. 프로젝트 폴더 `highroad-math-solution` 전체 복사  
+2. (선택) 로컬 **`시험지`**, **`해설지 최종본`** 폴더도 같이 복사 — 오프라인·동일 스냅샷  
+3. 새 PC에서 `.env.local` 다시 작성(API 키·Drive OAuth·폴더 ID). **Drive를 쓰지 않으면** 묶음만 `시험지`에 넣고 앱만 실행해도 됨  
+4. `npm install` → `npm run dev`  
+
+앱은 경로를 **`process.cwd()` 기준 상대 경로**(`시험지`, `해설지 최종본`)로만 쓰므로, **같은 구조로 내려받으면** 동작이 동일합니다.
+
+---
+
+## 전문가 토의에서 유지한 판단(요약)
+
+- 크롭 단위가 비전 품질에 유리하고, **파싱 본체는 Railway**, **Cursor는 보조**  
+- DOCX는 **2단·문제·빠른정답·해설** 형식만 맞추면 됨(픽셀 단위 동일 불필요)  
+- LLM 키·모델: `docs/models.md`  
+
+## 환경변수
+
+- `.env.local.example` — Drive OAuth(선택), **`GOOGLE_DRIVE_EXAMS_FOLDER_ID`**(Railway 묶음 **읽기 전용**)

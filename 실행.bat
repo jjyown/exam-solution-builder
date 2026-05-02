@@ -4,8 +4,8 @@ cd /d "%~dp0"
 
 if not exist ".env.local" (
   echo [안내] .env.local 파일이 없습니다.
-  echo [안내] .env.example를 복사해 GEMINI_API_KEY를 입력해주세요.
-  if exist ".env.example" copy /Y ".env.example" ".env.local" >nul
+  echo [안내] .env.local.example를 복사해 API 키를 입력해주세요.
+  if exist ".env.local.example" copy /Y ".env.local.example" ".env.local" >nul
   echo [안내] .env.local 파일을 자동 생성했습니다. API 키를 입력해주세요.
   notepad ".env.local"
   pause
