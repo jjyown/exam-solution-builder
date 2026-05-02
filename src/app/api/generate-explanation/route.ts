@@ -164,11 +164,7 @@ function validateCrossProblemBleed(text: string) {
   const explanation = text.match(/\[해설\]\s*([\s\S]+)/i)?.[1]?.trim() ?? "";
   if (!explanation) return { ok: true, issues };
 
-  if (/(?:입니다|이다|습니다|합니다|된다)\.?\s*\n+\s*(?:[2-9]|1[0-9])\.\s/m.test(explanation)) {
-    issues.push(
-      "[해설]에 다른 문항으로 보이는 번호 서술이 섞였습니다. 지금 이미지의 한 문항만 단계별로 풀이하세요.",
-    );
-  }
+  // 주의: '입니다/습니다' 뒤 줄바꿈 + '2.' 는 정상 단계 번호(1. 2. 3. 풀이)와 동일해 오탐이 매우 많다. 사용하지 않는다.
 
   if (/(?:^|\n)\s*(?:다음|이어서|또\s*다른)\s*문제/m.test(explanation)) {
     issues.push(
@@ -224,16 +220,21 @@ function validatePedagogicalPolicy(
   if (estimationPattern.test(combined)) {
     issues.push("근삿값/추정 중심 풀이 표현이 감지되었습니다.");
   }
-  const sentenceCount =
-    explanation
-      .split(/[\n.!?]+/)
-      .map((line) => line.trim())
-      .filter(Boolean).length || 0;
   const methodCount = (explanation.match(/\[방법\s*\d+\]/g) ?? []).length;
-  const maxSentencesSingleMethod =
-    solverModelProfile === "killer" ? 22 : solverModelProfile === "easy" ? 10 : 14;
-  if (methodCount <= 1 && sentenceCount > maxSentencesSingleMethod) {
-    issues.push("단일 풀이 기준으로 해설이 과도하게 장문입니다. 핵심 수식 중심으로 압축해 주세요.");
+  const lines = explanation.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const numberedLines = lines.filter((line) => /^\d+\.\s/.test(line)).length;
+  const stepHeavy =
+    lines.length >= 3 && numberedLines >= 2 && numberedLines / lines.length >= 0.35;
+  const maxChars =
+    solverModelProfile === "killer" ? 6200 : solverModelProfile === "easy" ? 2600 : 4400;
+  const maxLines =
+    solverModelProfile === "killer" ? 28 : solverModelProfile === "easy" ? 16 : 22;
+  if (methodCount <= 1) {
+    const tooLongByChars = explanation.length > maxChars;
+    const tooLongBySteps = stepHeavy && lines.length > maxLines;
+    if (tooLongBySteps || (!stepHeavy && tooLongByChars)) {
+      issues.push("단일 풀이 기준으로 해설이 과도하게 장문입니다. 핵심 수식 중심으로 압축해 주세요.");
+    }
   }
   return { ok: issues.length === 0, issues };
 }
@@ -286,7 +287,7 @@ function buildRetryInstruction(
     lines.push("간단한 문제는 핵심 수식과 결론 중심으로 4~8문장 내외로 간결히 정리하세요.");
   }
   lines.push(
-    "[단일 문항] 첨부 크롭은 한 문항만이다. 다른 문항 번호(예: 3번 문항, 줄바꿈 뒤 2.)로 새 풀이를 시작하거나 인용하지 마세요.",
+    "[단일 문항] 첨부 크롭은 한 문항만이다. '다음 문제', '3번 문항'처럼 다른 문항을 새로 여는 표현은 금지. 1. 2. 3. 단계 번호는 같은 문항 풀이에 허용된다.",
   );
   lines.push("반드시 아래 형식으로만 다시 작성하세요.");
   lines.push("[정답] (한 줄)");
@@ -331,6 +332,14 @@ function inferDiagramAidNeed(questionText: string) {
   };
 }
 
+/** OpenAI vision은 user-only보다 system+user가 [정답]/[해설] 준수율이 높다 */
+const OPENAI_VISION_EXPLANATION_SYSTEM = `당신은 중고등 수학 문제 이미지를 읽고, 사용자가 지정한 크롭의 한 문항만 푼다.
+응답은 반드시 아래 형식만 사용한다. 인사·머리말·코드펜스(\`\`\`)·추가 제목 금지.
+첫 줄: [정답] 한 줄에 최종 답만(객관식이면 1~5 하나).
+그 다음 줄에만: [해설]
+그 다음 줄부터: 단계별 풀이 본문(1. 2. 3. 번호 단계 사용 가능).
+LaTeX($, \\frac 등) 금지. 조합은 nCk 표기.`;
+
 async function generateWithOpenAiFallback(params: {
   apiKey: string;
   model: string;
@@ -372,7 +381,10 @@ async function generateWithOpenAiFallback(params: {
     },
     body: JSON.stringify({
       model: params.model,
-      messages: [{ role: "user", content }],
+      messages: [
+        { role: "system", content: OPENAI_VISION_EXPLANATION_SYSTEM },
+        { role: "user", content },
+      ],
       temperature: 0.2,
     }),
   });
@@ -588,6 +600,7 @@ export async function POST(request: Request) {
       "- 수식은 LaTeX 표기(\\binom, \\frac 등)로 쓰지 말고 학생이 읽기 쉬운 일반 표기로 작성해.",
       "- 조합은 반드시 nCk 표기(예: 10C3)로 작성해.",
       "- [해설] 본문 첫 줄에 문제 번호(예: 17.)를 다시 쓰지 마.",
+      "- [해설]에서 1. 2. 3. 번호는 한 문항 풀이의 단계 표시로 써도 된다(검증에서 단계 번호는 타 문항 혼입으로 보지 않는다).",
       "- [정답], [해설] 형식을 엄격히 유지해.",
       "- 이미지에서 선택지 ①~⑤ 또는 1~5 보기 형식이 보이면 객관식으로 판단해.",
       "- 객관식이면 [정답]에 정답 번호만 1~5 중 하나로 출력해.",

@@ -32,8 +32,6 @@ const IMAGE_ABSENT_PATTERN = /이미지가\s*제공되지\s*않/i;
 
 /** 본문에 타 문항으로 확장하는 패턴(생성 혼입·붙여넣기 오염 완화) */
 const EXPORT_MULTI_PROBLEM_PHRASE = /(?:^|\n)\s*(?:다음|이어서|또\s*다른)\s*문제/m;
-const EXPORT_ENUM_OTHER_ITEM =
-  /(?:입니다|이다|습니다|합니다|된다)\.?\s*\n+\s*(?:[3-9]|1[0-9])\.\s/m;
 
 const MIN_EXPLANATION_BODY_LENGTH = 35;
 
@@ -97,11 +95,6 @@ export function validateExportDocEntries(entries: ExportDocEntry[]): { ok: boole
     if (EXPORT_MULTI_PROBLEM_PHRASE.test(body)) {
       issues.push(`${entry.questionNo}번: 다른 문항으로 이어지는 표현이 감지되었습니다.`);
     }
-    if (EXPORT_ENUM_OTHER_ITEM.test(body)) {
-      issues.push(
-        `${entry.questionNo}번: 다른 문항 번호 서술이 섞였을 수 있습니다. 한 문항만 남기세요.`,
-      );
-    }
   });
 
   return { ok: issues.length === 0, issues };
@@ -110,13 +103,15 @@ export function validateExportDocEntries(entries: ExportDocEntry[]): { ok: boole
 /** 자동 보정 결과에 대한 비차단 경고(장문 등) */
 export function getExportRepairWarnings(entry: ExportDocEntry): string[] {
   const warnings: string[] = [];
-  const sentenceCount =
-    entry.body
-      .split(/[\n.!?]+/)
-      .map((line) => line.trim())
-      .filter(Boolean).length || 0;
   const methodCount = (entry.body.match(/\[방법\s*\d+\]/g) ?? []).length;
-  if (methodCount <= 1 && sentenceCount > 12) {
+  const lines = entry.body.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  const numbered = lines.filter((l) => /^\d+\.\s/.test(l)).length;
+  const stepHeavy =
+    lines.length >= 3 && numbered >= 2 && numbered / lines.length >= 0.35;
+  if (
+    methodCount <= 1 &&
+    (!stepHeavy ? entry.body.length > 4200 : lines.length > 22)
+  ) {
     warnings.push("과도한 장문");
   }
   return warnings;
