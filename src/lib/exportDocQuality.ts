@@ -3,6 +3,8 @@
  * page.tsx / repair-explanations 가 동일 기준을 쓰도록 단일화한다.
  */
 
+import { explanationLatexToPlain } from "./latexToPlainText";
+
 export type ExportDocEntry = {
   questionNo: string;
   quickAnswer: string;
@@ -35,18 +37,9 @@ const EXPORT_MULTI_PROBLEM_PHRASE = /(?:^|\n)\s*(?:다음|이어서|또\s*다른
 
 const MIN_EXPLANATION_BODY_LENGTH = 35;
 
-/** LaTeX·불필요 공백 제거(보정 후처리·저장 전 정제에 사용) */
+/** KaTeX/LaTeX 구간을 평문(√, 분수 등)으로 바꾼 뒤 불필요 공백 정리 */
 export function sanitizeExportPlainText(value: string): string {
-  let s = value.replace(/\r\n/g, "\n");
-  s = s.replace(/\$\$[\s\S]*?\$\$/g, " ");
-  s = s.replace(/\$([^$\n]+)\$/g, " ");
-  s = s.replace(
-    /\\(frac|sqrt|binom|left|right|cdot|times|div|pi|sin|cos|tan|log|ln|alpha|beta|gamma|theta|leq|geq|neq|pm|cdots|dots|times|div)\b/gi,
-    "",
-  );
-  s = s.replace(/\\[()[\]{}]/g, "");
-  s = s.replace(/[ \t\f\v]+/g, " ").replace(/\n{3,}/g, "\n\n");
-  return s.trim();
+  return explanationLatexToPlain(value);
 }
 
 /** 클라이언트 내보내기 직전에 결정적으로 적용 가능한 최소 패치 */

@@ -12,6 +12,7 @@ import {
   SectionType,
   TabStopType,
 } from "docx";
+import { explanationLatexToPlain } from "@/lib/latexToPlainText";
 
 const OUTPUT_DIR = path.join(process.cwd(), "작업 완료");
 
@@ -20,36 +21,7 @@ function safeName(value: string) {
 }
 
 function simplifyMathText(value: string) {
-  return value
-    .replace(/\$\$?/g, "")
-    .replace(/\\left|\\right/g, "")
-    .replace(/\\binom\{([^}]+)\}\{([^}]+)\}/g, "$1C$2")
-    .replace(/\\times|\\cdot/g, "×")
-    .replace(/\\div/g, "÷")
-    .replace(/\\pi/g, "π")
-    .replace(/\\sqrt\{([^}]+)\}/g, "√$1")
-    .replace(/\\frac\{([^}]+)\}\{([^}]+)\}/g, "$1/$2")
-    .replace(/\\geq|\\ge/g, "≥")
-    .replace(/\\leq|\\le/g, "≤")
-    .replace(/\\neq/g, "≠")
-    .replace(/\\pm/g, "±")
-    .replace(/\\sin/g, "sin")
-    .replace(/\\cos/g, "cos")
-    .replace(/\\tan/g, "tan")
-    .replace(/\\log/g, "log")
-    .replace(/\\ln/g, "ln")
-    .replace(/\\alpha/g, "α")
-    .replace(/\\beta/g, "β")
-    .replace(/\\gamma/g, "γ")
-    .replace(/\\theta/g, "θ")
-    .replace(/\\cdots|\\dots/g, "...")
-    .replace(/\\,/g, " ")
-    .replace(/\{([^{}]+)\}/g, "$1")
-    .replace(/\\([A-Za-z]+)/g, "$1")
-    .replace(/\r\n/g, "\n")
-    .replace(/\t/g, " ")
-    .replace(/[ \f\v]+/g, " ")
-    .trim();
+  return explanationLatexToPlain(value);
 }
 
 type ExplanationBlock = {

@@ -4226,7 +4226,7 @@ export default function Home() {
                 <p className="font-semibold">내보내기 전 점검 (저장 시 자동 정리·보정 반영 기준)</p>
                 {exportGatePreview.ok ? (
                   <p className="mt-1">
-                    규칙 통과 예상입니다. 내보내기 시 LaTeX·이미지 부재 문구는 먼저 자동 제거한 뒤 검증합니다.
+                    규칙 통과 예상입니다. 내보내기 시 $…$ 수식은 평문(√ 등)으로 바꾼 뒤 검증합니다.
                   </p>
                 ) : (
                   <>
