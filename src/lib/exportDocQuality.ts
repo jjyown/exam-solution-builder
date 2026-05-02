@@ -110,7 +110,7 @@ export function getExportRepairWarnings(entry: ExportDocEntry): string[] {
     lines.length >= 3 && numbered >= 2 && numbered / lines.length >= 0.35;
   if (
     methodCount <= 1 &&
-    (!stepHeavy ? entry.body.length > 4200 : lines.length > 22)
+    (!stepHeavy ? entry.body.length > 3000 : lines.length > 18)
   ) {
     warnings.push("과도한 장문");
   }
