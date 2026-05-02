@@ -217,6 +217,42 @@ function validateCrossProblemBleed(text: string) {
   return { ok: issues.length === 0, issues };
 }
 
+/** 출제 비평·정답 번복·모순 유발 표현(저품질 해설 패턴) */
+function validateNoMetaUndermining(text: string) {
+  const issues: string[] = [];
+  const explanation = text.match(/\[해설\]\s*([\s\S]+)/i)?.[1]?.trim() ?? "";
+  if (!explanation) return { ok: true, issues };
+
+  const patterns: Array<{ label: string; regex: RegExp }> = [
+    { label: "출제/문제 오류·비평 표현", regex: /문제(?:에|의)?\s*오류|출제\s*오류|오류(?:가\s*)?있는\s*문제/ },
+    { label: "기존·이전 풀이 메타 언급", regex: /기존\s*풀이|이전\s*(?:풀이|응답)|원본\s*풀이/ },
+    {
+      label: "정답·결론 번복 문장",
+      regex: /답(?:은)?\s*.+이\s*아니라|최종\s*답은\s*.+이\s*아니라|아니라\s*보기|문제\s*의도와\s*다르|반드시\s*\d+여야/,
+    },
+    {
+      label: "조건 불충분·풀이 불가 단정",
+      regex: /추가\s*조건이\s*필요|이대로는\s*(?:답을\s*)?구할\s*수\s*없|풀\s*수\s*없(?:습니다|다)\./,
+    },
+  ];
+  for (const { label, regex } of patterns) {
+    if (regex.test(explanation)) {
+      issues.push(`[해설]에 ${label}이 감지되었습니다. 교과서형 정석 풀이만 쓰세요.`);
+    }
+  }
+  return { ok: issues.length === 0, issues };
+}
+
+function mergeConsistencyIssues(text: string) {
+  const consistencyCheck = validateExplanationConsistency(text);
+  const bleedCheck = validateCrossProblemBleed(text);
+  const metaCheck = validateNoMetaUndermining(text);
+  return {
+    ok: consistencyCheck.ok && bleedCheck.ok && metaCheck.ok,
+    issues: [...consistencyCheck.issues, ...bleedCheck.issues, ...metaCheck.issues],
+  };
+}
+
 function validateCurriculumScope(text: string) {
   const issues: string[] = [];
   const bannedPatterns: Array<{ label: string; regex: RegExp }> = [
@@ -448,12 +484,7 @@ function passesPrimaryQualityGate(
   solverModelProfile: "easy" | "balanced" | "killer" = "balanced",
 ) {
   const formatCheck = validateExplanationFormat(generatedText);
-  const consistencyCheck = validateExplanationConsistency(generatedText);
-  const bleedCheck = validateCrossProblemBleed(generatedText);
-  const consistencyEffective = {
-    ok: consistencyCheck.ok && bleedCheck.ok,
-    issues: [...consistencyCheck.issues, ...bleedCheck.issues],
-  };
+  const consistencyEffective = mergeConsistencyIssues(generatedText);
   const scopeCheck = validateCurriculumScope(generatedText);
   const pedagogyCheck = validatePedagogicalPolicy(generatedText, solverModelProfile);
   return (
@@ -499,6 +530,7 @@ function buildCrossVerifyUserPrompt(
     "- 초안에 2)[정답]·세 번째 문항 풀이가 붙어 있으면 삭제하고, 이미지의 한 문항만 남겨라.",
     "- 제곱근·세제곱근: 이미지에서 근호 중첩과 근호들의 곱을 혼동하지 않았는지 초안의 식 구조와 대조한다. 특히 √(안쪽 전체) 인지 √a×∛b 인지부터 검증한다.",
     "- 방정식·삼각식이면 초안의 최종 값을 원조건에 대입해 성립하는지 확인한다. 성립하지 않으면 초안 계산 오류로 보고 수정한다.",
+    "- 「문제 오류」「추가 조건 필요」「답은 ○이 아니라 △」「기존 풀이 오류」 같은 메타 문장과 근사(≈)만으로 결론 내리기 금지. 교과서형 단일 결론만.",
     "",
     "[초안]",
     draft,
@@ -742,12 +774,7 @@ export async function POST(request: Request) {
           continue;
         }
         const formatCheck = validateExplanationFormat(generatedText);
-        const consistencyCheck = validateExplanationConsistency(generatedText);
-        const bleedCheck = validateCrossProblemBleed(generatedText);
-        const consistencyEffective = {
-          ok: consistencyCheck.ok && bleedCheck.ok,
-          issues: [...consistencyCheck.issues, ...bleedCheck.issues],
-        };
+        const consistencyEffective = mergeConsistencyIssues(generatedText);
         const scopeCheck = validateCurriculumScope(generatedText);
         const pedagogyCheck = validatePedagogicalPolicy(generatedText, solverModelProfile);
         if (
@@ -832,12 +859,7 @@ export async function POST(request: Request) {
           continue;
         }
         const retryFormatCheck = validateExplanationFormat(retryText);
-        const retryConsistencyCheck = validateExplanationConsistency(retryText);
-        const retryBleedCheck = validateCrossProblemBleed(retryText);
-        const retryConsistencyEffective = {
-          ok: retryConsistencyCheck.ok && retryBleedCheck.ok,
-          issues: [...retryConsistencyCheck.issues, ...retryBleedCheck.issues],
-        };
+        const retryConsistencyEffective = mergeConsistencyIssues(retryText);
         const retryScopeCheck = validateCurriculumScope(retryText);
         const retryPedagogyCheck = validatePedagogicalPolicy(retryText, solverModelProfile);
         if (
@@ -916,12 +938,7 @@ export async function POST(request: Request) {
         });
         if (openAiText) {
           const formatCheck = validateExplanationFormat(openAiText);
-          const consistencyCheck = validateExplanationConsistency(openAiText);
-          const bleedCheck = validateCrossProblemBleed(openAiText);
-          const consistencyEffective = {
-            ok: consistencyCheck.ok && bleedCheck.ok,
-            issues: [...consistencyCheck.issues, ...bleedCheck.issues],
-          };
+          const consistencyEffective = mergeConsistencyIssues(openAiText);
           const scopeCheck = validateCurriculumScope(openAiText);
           const pedagogyCheck = validatePedagogicalPolicy(openAiText, solverModelProfile);
           const pedagogySplit = splitPedagogyIssues(pedagogyCheck.issues);
@@ -981,12 +998,7 @@ export async function POST(request: Request) {
             });
             if (retryText) {
               const retryFormatCheck = validateExplanationFormat(retryText);
-              const retryConsistencyCheck = validateExplanationConsistency(retryText);
-              const retryBleedCheck = validateCrossProblemBleed(retryText);
-              const retryConsistencyEffective = {
-                ok: retryConsistencyCheck.ok && retryBleedCheck.ok,
-                issues: [...retryConsistencyCheck.issues, ...retryBleedCheck.issues],
-              };
+              const retryConsistencyEffective = mergeConsistencyIssues(retryText);
               const retryScopeCheck = validateCurriculumScope(retryText);
               const retryPedagogyCheck = validatePedagogicalPolicy(retryText, solverModelProfile);
               const retryPedagogySplit = splitPedagogyIssues(retryPedagogyCheck.issues);
