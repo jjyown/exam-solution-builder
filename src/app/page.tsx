@@ -765,6 +765,8 @@ export default function Home() {
   const [queuedProblems, setQueuedProblems] = useState<QueuedProblem[]>([]);
   const [savedPageNumbers, setSavedPageNumbers] = useState<number[]>([]);
   const [excludedPageNumbers, setExcludedPageNumbers] = useState<number[]>([]);
+  /** PDF에서 문제 작업으로 남길 페이지만 입력 후 「나머지 제외」에 사용 */
+  const [keepWorkPagesOnlyInput, setKeepWorkPagesOnlyInput] = useState("");
   const [savedPageWorks, setSavedPageWorks] = useState<Record<number, QueuedProblem[]>>({});
   const [pageDrafts, setPageDrafts] = useState<Record<number, PageDraft>>({});
   const [pendingLineCrop, setPendingLineCrop] = useState<PixelCrop | null>(null);
@@ -859,6 +861,10 @@ export default function Home() {
     !noExplanationRefPage && explanationRefPageSelection.trim().length > 0;
   const invalidQuickAnswerSelection = hasQuickAnswerSelectionInput && quickAnswerPages.length === 0;
   const invalidExplanationRefSelection = hasExplanationRefSelectionInput && explanationRefPages.length === 0;
+  const invalidKeepWorkPagesInput =
+    isPdfSource &&
+    keepWorkPagesOnlyInput.trim().length > 0 &&
+    parsePageSelection(keepWorkPagesOnlyInput, totalPageCount).length === 0;
   const requiredPageNumbers = useMemo(
     () =>
       Array.from({ length: totalPageCount }, (_, idx) => idx + 1).filter(
@@ -1123,6 +1129,7 @@ export default function Home() {
     setQueuedProblems([]);
     setSavedPageNumbers([]);
     setExcludedPageNumbers([]);
+    setKeepWorkPagesOnlyInput("");
     setSavedPageWorks({});
     setPageDrafts({});
     setQuestionNo("1");
@@ -2298,6 +2305,63 @@ export default function Home() {
     setErrorMessage("");
   };
 
+  /** 입력한 페이지·참고 전용 페이지만 남기고 나머지를 일괄 제외 */
+  const applyExcludeAllExceptListedPages = () => {
+    if (!isPdfSource || pdfPageCount < 1) return;
+    const raw = keepWorkPagesOnlyInput.trim();
+    if (!raw) {
+      setErrorMessage("유지할 페이지를 입력한 뒤 적용해 주세요. (예: 3-10, 15)");
+      setSuccessMessage("");
+      return;
+    }
+    let keepPages = parsePageSelection(raw, pdfPageCount);
+    if (keepPages.length === 0) {
+      setErrorMessage(`유효한 페이지가 없습니다. 1~${pdfPageCount} 범위·형식(예: 3-10, 15)을 확인해 주세요.`);
+      setSuccessMessage("");
+      return;
+    }
+    keepPages = [...new Set([...keepPages, ...referenceOnlyPages])].sort((a, b) => a - b);
+    const keepSet = new Set(keepPages);
+    const excluded: number[] = [];
+    for (let p = 1; p <= pdfPageCount; p += 1) {
+      if (!keepSet.has(p)) excluded.push(p);
+    }
+    setExcludedPageNumbers(excluded);
+    setSavedPageNumbers((prev) => prev.filter((p) => keepSet.has(p)));
+
+    const nextWorks: Record<number, QueuedProblem[]> = {};
+    for (const [k, items] of Object.entries(savedPageWorks)) {
+      const pn = Number.parseInt(k, 10);
+      if (Number.isFinite(pn) && keepSet.has(pn)) nextWorks[pn] = items;
+    }
+    setSavedPageWorks(nextWorks);
+    const mergedProblems = Object.entries(nextWorks)
+      .map(([page, items]) => ({ page: Number.parseInt(page, 10), items }))
+      .sort((a, b) => a.page - b.page)
+      .flatMap((entry) => entry.items);
+    setQueuedProblems(
+      mergedProblems.map((item, idx) => ({
+        ...item,
+        questionNo: String(idx + 1),
+      })),
+    );
+
+    setPageDrafts((prev) => {
+      const next = { ...prev };
+      for (const p of excluded) delete next[p];
+      return next;
+    });
+
+    const refNote =
+      referenceOnlyPages.length > 0
+        ? ` 빠른정답·해설참고 페이지(${referenceOnlyPages.join(", ")})는 자동 유지했습니다.`
+        : "";
+    setSuccessMessage(
+      `작업 유지 페이지: ${keepPages.join(", ")}. 나머지 ${excluded.length}페이지를 제외했습니다.${refNote}`,
+    );
+    setErrorMessage("");
+  };
+
   const removeQueuedProblem = (id: string) => {
     setQueuedProblems((prev) => prev.filter((item) => item.id !== id));
   };
@@ -3051,6 +3115,37 @@ export default function Home() {
                       >
                         {isCurrentPageExcluded ? "이 페이지 제외 해제" : "이 페이지 제외"}
                       </button>
+                    </div>
+                    <div className="mt-2 rounded-md border border-amber-200 bg-amber-50/90 p-2">
+                      <p className="text-xs font-semibold text-amber-950">
+                        작업할 페이지만 남기기 (나머지 일괄 제외)
+                      </p>
+                      <p className="mt-0.5 text-[11px] leading-snug text-amber-900">
+                        <strong>문제 지정·저장</strong>을 계속할 페이지만 입력하면, 그 외는 모두 「이 페이지 제외」와
+                        같이 처리됩니다. 빠른정답·해설참고로 이미 지정한 페이지는 범위에 넣지 않아도{" "}
+                        <strong>자동으로 유지</strong>됩니다.
+                      </p>
+                      <div className="mt-1.5 flex flex-col gap-1.5 sm:flex-row sm:items-stretch">
+                        <input
+                          type="text"
+                          value={keepWorkPagesOnlyInput}
+                          onChange={(event) => setKeepWorkPagesOnlyInput(event.target.value)}
+                          placeholder="예: 3-15, 18, 22-25"
+                          className="min-w-0 flex-1 rounded border border-amber-300/80 bg-white px-2 py-1 text-xs"
+                        />
+                        <button
+                          type="button"
+                          onClick={applyExcludeAllExceptListedPages}
+                          className="shrink-0 rounded border border-amber-700 bg-amber-100 px-2 py-1 text-xs font-semibold text-amber-950 hover:bg-amber-200"
+                        >
+                          나머지 페이지 제외 적용
+                        </button>
+                      </div>
+                      {invalidKeepWorkPagesInput && (
+                        <p className="mt-1 text-[11px] text-rose-700">
+                          입력 형식이나 범위를 확인해 주세요. (쉼표·하이픈 구간, 1~{pdfPageCount}페이지)
+                        </p>
+                      )}
                     </div>
                     <div className="mt-2 grid grid-cols-1 gap-2 md:grid-cols-2">
                       <div>
