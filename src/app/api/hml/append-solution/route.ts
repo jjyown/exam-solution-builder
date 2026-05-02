@@ -1145,6 +1145,10 @@ function evaluateParsingQuality(params: {
   };
 }
 
+/** HML 배치·해설 생성이 길어질 수 있음(로컬·호스팅 상한 완화). */
+export const maxDuration = 900;
+export const dynamic = "force-dynamic";
+
 export async function POST(request: Request) {
   try {
     const apiKey =

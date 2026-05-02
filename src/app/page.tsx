@@ -3708,7 +3708,9 @@ export default function Home() {
                             }
                           }}
                         />
-                        <span className="line-clamp-2">{method.split("\n")[0]}</span>
+                        <span className="line-clamp-3 block text-[11px] leading-snug [&_.katex]:text-[11px]">
+                          {renderWithMath(method.split("\n").slice(0, 4).join("\n"))}
+                        </span>
                       </label>
                       <button
                         type="button"
@@ -4191,7 +4193,9 @@ export default function Home() {
                                       }
                                     }}
                                   />
-                                  <span className="line-clamp-2">{method.split("\n")[0]}</span>
+                                  <span className="line-clamp-3 block text-[11px] leading-snug [&_.katex]:text-[11px]">
+                          {renderWithMath(method.split("\n").slice(0, 4).join("\n"))}
+                        </span>
                                 </label>
                                 <button
                                   type="button"
