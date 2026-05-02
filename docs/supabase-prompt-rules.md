@@ -21,6 +21,8 @@ create index if not exists idx_prompt_rules_active_updated
 
 ## 2) 초기 데이터 예시
 
+앱 코드(`prompts.ts`)에 **`FIXED_RUNTIME_SYMBOL_CONSTRAINT`** 가 있어, Supabase를 쓰지 않아도 해설에 수학 기호·`$...$` 사용이 시스템 프롬프트에 항상 붙습니다. DB의 `extra_constraints`에는 **학원별 추가 금지/톤**만 넣어도 됩니다. 아래는 DB에도 동일 정책을 남기고 싶을 때 복붙하는 예시입니다.
+
 ```sql
 insert into public.prompt_rules (
   is_active,
@@ -28,8 +30,8 @@ insert into public.prompt_rules (
   examples_balanced
 ) values (
   true,
-  '- 근사/추정/어림/약/≈ 표현을 절대 사용하지 마.\n- [정답], [해설] 형식을 유지해.',
-  '[예시]\n[정답] 2\n[해설]\n1. ...\n2. ...\n3. 따라서 정답은 2이다.'
+  E'- 근사/추정/어림/약/≈ 표현을 절대 사용하지 마.\n- [정답], [해설] 형식을 유지해.\n- [해설]은 한글 장문만으로 끝내지 말고, 조건·전개·결론을 $...$ 안의 수학 기호·등식으로 써.',
+  E'[예시]\n[정답] 2\n[해설]\n$(x-1)(x-3)=0$이므로 $x=1$ 또는 $x=3$. 조건상 $x=3$만 성립 → 보기 ②.'
 );
 ```
 
@@ -49,6 +51,7 @@ insert into public.prompt_rules (
 
 ## 4) 반영 방식
 
+- `buildSystemInstruction`은 **내장 `SYSTEM_PROMPT_BASE` → `FIXED_RUNTIME_SYMBOL_CONSTRAINT`(항상) →** (선택) `[운영자 추가 제한 규칙]`(`extra_constraints`) → `[스타일 기준 예시]` 순으로 이어 붙입니다.
 - 요청 시마다 `prompt_rules`에서 `is_active = true`인 최신 1건 조회
 - `extra_constraints`는 `[운영자 추가 제한 규칙]` 섹션으로 주입
 - 난이도별 예시(`examples_easy/balanced/killer`)는 해당 프로필 예시를 덮어씀

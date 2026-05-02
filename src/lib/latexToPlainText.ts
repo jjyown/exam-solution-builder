@@ -2,6 +2,41 @@
  * KaTeX/LaTeX 스타일 수식을 DOCX·검증용 한 줄 평문으로 변환한다.
  * (save-result / exportDocQuality / 내보내기 게이트 공용)
  */
+
+const UNICODE_SUPERSCRIPT_DIGITS = "⁰¹²³⁴⁵⁶⁷⁸⁹";
+const UNICODE_SUBSCRIPT_DIGITS = "₀₁₂₃₄₅₆₇₈₉";
+
+function mapAsciiDigitsToScript(s: string, table: string): string {
+  return [...s]
+    .map((ch) => {
+      const d = ch.codePointAt(0)! - 0x30;
+      return d >= 0 && d <= 9 ? table[d]! : ch;
+    })
+    .join("");
+}
+
+/** 정수 지수·밑 등을 유니코드 위·아래첨자로 바꿔 문서에서 수학 기호가 분명히 보이게 한다. */
+function normalizeIntegerScripts(text: string): string {
+  let t = text;
+  t = t.replace(/\b(sin|cos|tan)\^(\d+)/gi, (_, fn: string, exp: string) => {
+    return `${fn.toLowerCase()}${mapAsciiDigitsToScript(exp, UNICODE_SUPERSCRIPT_DIGITS)}`;
+  });
+  t = t.replace(/\b(log|ln)_(\d+)/gi, (_, fn: string, sub: string) => {
+    return `${fn.toLowerCase()}${mapAsciiDigitsToScript(sub, UNICODE_SUBSCRIPT_DIGITS)}`;
+  });
+  t = t.replace(/(\d+)\^(\d+)/g, (_, base: string, exp: string) => {
+    return `${base}${mapAsciiDigitsToScript(exp, UNICODE_SUPERSCRIPT_DIGITS)}`;
+  });
+  t = t.replace(/([A-Za-zα-ωθπ])\^(\d+)/g, (_, base: string, exp: string) => {
+    return `${base}${mapAsciiDigitsToScript(exp, UNICODE_SUPERSCRIPT_DIGITS)}`;
+  });
+  t = t.replace(/([A-Za-zα-ωθπ])_(\d+)/g, (_, base: string, sub: string) => {
+    return `${base}${mapAsciiDigitsToScript(sub, UNICODE_SUBSCRIPT_DIGITS)}`;
+  });
+  t = t.replace(/\^\((\d+)\)/g, (_, exp: string) => mapAsciiDigitsToScript(exp, UNICODE_SUPERSCRIPT_DIGITS));
+  return t;
+}
+
 export function simplifyLatexContent(value: string): string {
   return value
     .replace(/\$\$?/g, "")
@@ -43,6 +78,7 @@ export function explanationLatexToPlain(value: string): string {
   s = s.replace(/\$\$([\s\S]*?)\$\$/g, (_, inner) => simplifyLatexContent(inner));
   s = s.replace(/\$([^$\n]+)\$/g, (_, inner) => simplifyLatexContent(inner));
   s = simplifyLatexContent(s);
+  s = normalizeIntegerScripts(s);
   s = s.replace(/[ \t\f\v]+/g, " ").replace(/\n{3,}/g, "\n\n");
   return s.trim();
 }
