@@ -3,7 +3,7 @@
  * page.tsx / repair-explanations 가 동일 기준을 쓰도록 단일화한다.
  */
 
-import { explanationLatexToPlain } from "./latexToPlainText";
+import { explanationLatexToPlain, quickAnswerToPlainLine } from "./latexToPlainText";
 
 export type ExportDocEntry = {
   questionNo: string;
@@ -42,6 +42,11 @@ export function sanitizeExportPlainText(value: string): string {
   return explanationLatexToPlain(value);
 }
 
+/** 빠른정답 필드: 한 줄·길이 상한( DOCX TextRun / 검수 게이트와 동일 취지) */
+export function sanitizeExportQuickAnswer(value: string): string {
+  return quickAnswerToPlainLine(value, 200);
+}
+
 /** 클라이언트 내보내기 직전에 결정적으로 적용 가능한 최소 패치 */
 export function applyDeterministicExportPatches(entries: ExportDocEntry[]): ExportDocEntry[] {
   return entries.map((entry) => {
@@ -50,7 +55,7 @@ export function applyDeterministicExportPatches(entries: ExportDocEntry[]): Expo
     body = body.replace(/\s*\.\s*\.\s*\.\s*$/g, "").trim();
     return {
       questionNo: entry.questionNo,
-      quickAnswer: sanitizeExportPlainText(entry.quickAnswer),
+      quickAnswer: sanitizeExportQuickAnswer(entry.quickAnswer),
       body: sanitizeExportPlainText(body),
     };
   });

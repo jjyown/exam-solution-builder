@@ -42,6 +42,7 @@ function normalizeIntegerScripts(text: string): string {
 
 export function simplifyLatexContent(value: string): string {
   return normalizeLatexSourceText(value)
+    .replace(/\\dfrac\b|\\tfrac\b/g, "\\frac")
     .replace(/\$\$?/g, "")
     .replace(/\\left|\\right/g, "")
     .replace(/\\binom\{([^}]+)\}\{([^}]+)\}/g, "$1C$2")
@@ -85,4 +86,15 @@ export function explanationLatexToPlain(value: string): string {
   s = s.replace(/[ \t\f\v]+/g, " ").replace(/\n{3,}/g, "\n\n");
   s = loosenExplanationParagraphs(s);
   return s.trim();
+}
+
+/**
+ * DOCX «빠른 정답» 칸·요약 필드용: LaTeX·`$`를 풀어 읽을 수 있는 한 줄로 만든다.
+ * (Word OMML을 타지 않는 TextRun 전용 — 긴 전개는 [해설]에만 둔다.)
+ */
+export function quickAnswerToPlainLine(value: string, maxLen = 200): string {
+  let s = explanationLatexToPlain(value).replace(/\s+/g, " ").trim();
+  if (!s) return "-";
+  if (s.length > maxLen) s = `${s.slice(0, Math.max(0, maxLen - 1))}…`;
+  return s;
 }

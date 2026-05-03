@@ -67,6 +67,17 @@ MCP 도구 **`generate_math_explanation`** / **`generate_math_explanation_openai
 
 ※ 참고 HML 전체를 MCP에 넣지 않아도 되고, Cursor 채팅에 **단원별 한두 문단**만 붙여 “이 말투·전개로 다듬어라”고 하면 된다.
 
+### `postToolUse` 훅: MCP 해설 직후 체크리스트 자동 주입
+
+에이전트가 **`generate_math_explanation`** / **`generate_math_explanation_openai`** 를 호출해 성공하면, Cursor가 **`postToolUse`** 훅을 돌리고 스크립트(`.cursor/hooks/mcp-explanation-post-tool.mjs`)가 **`additional_context`** 로 **필수 다듬기 체크리스트**를 대화에 붙인다. (객관식 `[정답]` 표기, 서술형 `해설참고`, LaTeX·`$` 짝, 정답–해설 일치, 회피 문구·재풀이, **검수 완료본만** `문항##_API초안.md`·`합본_편집용.md` 저장, 마무리 보고 문장.)
+
+| 위치 | 용도 |
+|------|------|
+| 저장소 `highroad-math-solution/.cursor/hooks.json` | 폴더를 Cursor **프로젝트 루트**로 열었을 때 |
+| 상위 워크스페이스 `시험지 해설 제작/.cursor/hooks.json` | 상위 폴더를 루트로 둔 현재 구성(같은 스크립트를 `node highroad-math-solution/.cursor/hooks/...` 로 호출) |
+
+규칙 백업: `.cursor/rules/mcp-explanation-post-review.mdc` (`alwaysApply`). 훅이 안 먹으면 Cursor **Hooks** 설정·출력 채널을 보고, `hooks.json` 저장 후에도 로드가 안 되면 **Cursor 재시작**을 시도한다.
+
 ### Cursor에 붙여 넣는 중재 지시문 (복사용)
 
 아래를 채팅에 넣고, 그 아래에 **MCP 초안 전문** 또는 **`합본_편집용.md`** 내용을 붙인다.

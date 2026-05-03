@@ -26,8 +26,8 @@ export function ExamSolutionReviewListBlock() {
         <div className="min-w-0 flex-1">
           <p className="text-sm font-semibold text-indigo-950">Supabase · exam_solutions</p>
           <p className="mt-0.5 text-[11px] text-indigo-900">
-            시험명은 `해설 작업중` 폴더명과 같아야 목록이 맞습니다. 로컬에서 `npm run upload-solutions` 로
-            동기화하세요.
+            시험명은 DB의 `exam_name`(보통 `해설 작업중` 하위 폴더명)과 같아야 합니다. `npm run db-push` 로
+            올린 뒤, `.env.local` 을 수정했으면 `next dev` 를 한 번 재시작하세요.
           </p>
         </div>
         <button
@@ -108,7 +108,6 @@ export function ExamSolutionReviewDetailBlock() {
     saving,
     saveBody,
     markVerified,
-    cropImageSrc,
     detailError,
     deleteSelectionInEditor,
   } = useExamSolutionReview();
@@ -153,25 +152,15 @@ export function ExamSolutionReviewDetailBlock() {
             </p>
           </header>
 
-          {cropImageSrc ? (
-            <div>
-              <p className="mb-1 text-[11px] font-semibold text-slate-600">문항 이미지 (로컬 크롭 묶음)</p>
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img
-                src={cropImageSrc}
-                alt="문항 크롭"
-                className="max-h-48 w-full rounded border border-slate-200 bg-white object-contain"
-              />
-            </div>
-          ) : selected.question_no !== "합본" ? (
-            <p className="rounded bg-amber-50 px-2 py-1 text-[11px] text-amber-900">
-              이 문항의 크롭 이미지를 서버에서 찾지 못했습니다. `크롭된 시험지` 와 manifest 의 시험명을
-              확인하세요.
-            </p>
-          ) : null}
+          <p className="rounded bg-slate-100 px-2 py-1.5 text-[11px] text-slate-700">
+            이 단계는 <strong>Supabase에 저장된 해설 본문</strong>만 골라 미리봅니다. 시험지 이미지·크롭은{" "}
+            <strong>1·2단계</strong>에서만 다룹니다.
+          </p>
 
           <div>
-            <p className="mb-1 text-[11px] font-semibold text-slate-600">미리보기 (Markdown · LaTeX)</p>
+            <p className="mb-1 text-[11px] font-semibold text-slate-600">
+              미리보기 — DB 본문 (Markdown · LaTeX)
+            </p>
             <div className="max-h-[min(50vh,480px)] overflow-y-auto rounded border border-slate-200 bg-white p-3">
               <ExplanationMarkdownMath source={bodyDraft} />
             </div>

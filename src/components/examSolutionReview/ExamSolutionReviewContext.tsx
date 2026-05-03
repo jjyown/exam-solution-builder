@@ -38,7 +38,6 @@ type Ctx = {
   saving: boolean;
   saveBody: () => Promise<void>;
   markVerified: () => Promise<void>;
-  cropImageSrc: string | null;
   detailError: string | null;
   deleteSelectionInEditor: () => void;
 };
@@ -136,14 +135,6 @@ export function ExamSolutionReviewProvider({
     [active],
   );
 
-  const cropImageSrc = useMemo(() => {
-    if (!active || !selected) return null;
-    if (selected.question_no === "합본") return null;
-    const en = encodeURIComponent(selected.exam_name);
-    const qn = encodeURIComponent(selected.question_no);
-    return `/api/exam-solutions/crop-image?examName=${en}&questionNo=${qn}`;
-  }, [active, selected]);
-
   const saveBody = useCallback(async () => {
     if (!selected) return;
     setSaving(true);
@@ -228,7 +219,6 @@ export function ExamSolutionReviewProvider({
       saving,
       saveBody,
       markVerified,
-      cropImageSrc,
       detailError,
       deleteSelectionInEditor,
     }),
@@ -246,7 +236,6 @@ export function ExamSolutionReviewProvider({
       saving,
       saveBody,
       markVerified,
-      cropImageSrc,
       detailError,
       deleteSelectionInEditor,
     ],

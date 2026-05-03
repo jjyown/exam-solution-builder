@@ -1,15 +1,7 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
+import { getSupabaseServiceClient } from "@/lib/supabaseServiceClient";
 
 export const runtime = "nodejs";
-
-function supabaseServer() {
-  const url =
-    process.env.NEXT_PUBLIC_SUPABASE_URL?.trim() || process.env.SUPABASE_URL?.trim() || "";
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim() || "";
-  if (!url || !key) return null;
-  return createClient(url, key, { auth: { persistSession: false, autoRefreshToken: false } });
-}
 
 type Row = {
   id: string;
@@ -28,7 +20,7 @@ type ListRow = Omit<Row, "body">;
  * GET ?id=<uuid>     → 단건 전체
  */
 export async function GET(request: Request) {
-  const supabase = supabaseServer();
+  const supabase = getSupabaseServiceClient();
   if (!supabase) {
     return NextResponse.json(
       { error: "Supabase 서버 설정이 없습니다.", configured: false },
@@ -38,7 +30,11 @@ export async function GET(request: Request) {
 
   const url = new URL(request.url);
   const id = (url.searchParams.get("id") || "").trim();
-  const examName = (url.searchParams.get("examName") || "").trim();
+  const examName = (
+    url.searchParams.get("examName") ||
+    url.searchParams.get("testName") ||
+    ""
+  ).trim();
   const listOnly = url.searchParams.get("listOnly") !== "0";
 
   if (id) {
@@ -88,7 +84,7 @@ export async function GET(request: Request) {
  * PATCH JSON: { id, body?, status? } — id 필수
  */
 export async function PATCH(request: Request) {
-  const supabase = supabaseServer();
+  const supabase = getSupabaseServiceClient();
   if (!supabase) {
     return NextResponse.json(
       { error: "Supabase 서버 설정이 없습니다.", configured: false },

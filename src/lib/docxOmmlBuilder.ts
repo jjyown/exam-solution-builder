@@ -3,7 +3,6 @@ import {
   MathComponent,
   MathCurlyBrackets,
   MathFraction,
-  MathFunction,
   MathIntegral,
   MathPreSubSuperScript,
   MathRadical,
@@ -158,6 +157,24 @@ function buildLogLikeFunctionName(
   return [baseName];
 }
 
+/**
+ * Word OMML `m:func` 는 `m:fName` 과 인자 `m:e` 사이에 표준 수식 간격(함수 적용)이 들어가
+ * 삼각함수·로그처럼 `\sin\theta`, `\log_2 x` 옆에 과한 빈칸이 보이는 경우가 많다.
+ * 가시적 괄호 문자는 없고 `m:dPr` 만 있는 `m:d`(docx `MathRoundBrackets` 기본형)로 묶으면
+ * 같은 수식 박스 안에서 이름과 인자가 바로 이어진다.
+ */
+function wrapTightFunctionNameAndArgs(
+  nameParts: MathComponent[],
+  args: MathComponent[],
+): MathComponent {
+  if (args.length === 0) {
+    if (nameParts.length === 0) return new MathRun("");
+    if (nameParts.length === 1) return nameParts[0]!;
+    return new MathRoundBrackets({ children: nameParts });
+  }
+  return new MathRoundBrackets({ children: [...nameParts, ...args] });
+}
+
 function parseLogLike(cmd: "log" | "ln" | "lg", afterCmd: string): [MathComponent, string] {
   let rest = afterCmd.trimStart();
   let sub: MathComponent[] | undefined;
@@ -188,10 +205,7 @@ function parseLogLike(cmd: "log" | "ln" | "lg", afterCmd: string): [MathComponen
     }
   }
   return [
-    new MathFunction({
-      name: buildLogLikeFunctionName(cmd, sub, sup),
-      children,
-    }),
+    wrapTightFunctionNameAndArgs(buildLogLikeFunctionName(cmd, sub, sup), children),
     rest,
   ];
 }
@@ -383,10 +397,7 @@ function parseBackslashCommand(s: string): [MathComponent, string] | null {
       }
     }
     return [
-      new MathFunction({
-        name: [new MathRun(cmd === "Pr" ? "Pr" : cmd)],
-        children,
-      }),
+      wrapTightFunctionNameAndArgs([new MathRun(cmd === "Pr" ? "Pr" : cmd)], children),
       rest,
     ];
   }

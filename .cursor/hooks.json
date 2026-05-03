@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "hooks": {
+    "postToolUse": [
+      {
+        "command": "node .cursor/hooks/mcp-explanation-post-tool.mjs",
+        "matcher": "generate_math_explanation"
+      }
+    ]
+  }
+}

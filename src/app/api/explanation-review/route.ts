@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
+import { getSupabaseServiceClient } from "@/lib/supabaseServiceClient";
 
 export const runtime = "nodejs";
 
@@ -34,23 +34,17 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "explanationBody 가 비었습니다." }, { status: 400 });
   }
 
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-
-  if (!url || !serviceKey) {
+  const supabase = getSupabaseServiceClient();
+  if (!supabase) {
     return NextResponse.json(
       {
         error:
-          "Supabase 환경변수가 설정되지 않았습니다. NEXT_PUBLIC_SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY 를 확인하세요.",
+          "Supabase 환경변수가 설정되지 않았습니다. 프로젝트 루트 `.env.local` 에 NEXT_PUBLIC_SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY 를 넣고 개발 서버를 재시작하세요.",
         configured: false,
       },
       { status: 503 },
     );
   }
-
-  const supabase = createClient(url, serviceKey, {
-    auth: { persistSession: false, autoRefreshToken: false },
-  });
 
   const row = {
     exam_name: examName,

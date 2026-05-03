@@ -13,6 +13,7 @@
     "batch:crops-drafts": "tsx scripts/batch-crops-to-docx.mts --drafts-only",
     "mcp:gemini-explanation": "tsx mcp/gemini-explanation.mts",
     "check-api": "tsx scripts/check-api-connection.mts",
+    "check-supabase": "tsx scripts/check-supabase-connection.mts",
     "mcp:smoke": "node scripts/mcp-stdio-smoke.mjs",
     "mcp:test-llm": "node scripts/mcp-llm-smoke.mjs",
     "db-push": "tsx scripts/upload-to-supabase.mts",

@@ -15,7 +15,7 @@ import {
   EXAM_DOCX_FONT,
   EXAM_DOCX_SECTION_TITLE_HALF_PT,
 } from "@/lib/examDocxTheme";
-import { explanationLatexToPlain } from "@/lib/latexToPlainText";
+import { explanationLatexToPlain, quickAnswerToPlainLine } from "@/lib/latexToPlainText";
 import { normalizeLatexSourceText } from "@/lib/latexSourceNormalize";
 
 function bodyTextRun(opts: { text: string; bold?: boolean; size?: number }) {
@@ -130,7 +130,7 @@ function parseExplanationBlocks(explanationBody: string, fallbackQuickAnswer: st
 }
 
 function normalizeObjectiveAnswer(answer: string) {
-  const t = answer.trim();
+  let t = answer.trim();
   if (!t) return null;
   const circledMap: Record<string, string> = {
     "①": "1",
@@ -139,6 +139,9 @@ function normalizeObjectiveAnswer(answer: string) {
     "④": "4",
     "⑤": "5",
   };
+  const dollarDigit = t.match(/^\$\s*([1-5])\s*\$$/);
+  if (dollarDigit) return dollarDigit[1];
+  t = t.replace(/\s*번\s*$/u, "").trim();
   if (/^[①②③④⑤]$/.test(t)) return circledMap[t] ?? null;
   if (/^[1-5]$/.test(t)) return t;
   const parenOnly = t.match(/^\(([1-5])\)$/);
@@ -166,12 +169,15 @@ function classifyQuickAnswerKind(answer: string, explanationLines: string[]): Qu
   if (normalizeObjectiveAnswer(answer)) return "objective";
   const clean = answer.trim();
   const explanationText = explanationLines.join(" ");
-  if (
-    /서술|논술|증명|과정을\s*쓰|풀이를\s*쓰|설명하/.test(`${clean} ${explanationText}`) ||
-    clean.length >= 24
-  ) {
-    return "essay";
-  }
+  const essayCue = /서술|논술|증명|과정을\s*쓰|풀이를\s*쓰|설명하|해설참고|서술형/.test(
+    `${clean} ${explanationText}`,
+  );
+  /** 괄호·보조 설명이 붙은 객관식 요약(예: ②번 (값 6))은 길이만으로 서술형 처리하지 않는다 */
+  const looksLikeMcWithNote =
+    /^[①②③④⑤]/.test(clean) || /^[1-5]\s*번/u.test(clean) || /^\(\s*[1-5]\s*\)/.test(clean);
+  const longProse =
+    clean.length >= 36 && !looksLikeMcWithNote && /[.!?。…]\s*\S/.test(clean.replace(/\([^)]*\)/g, ""));
+  if (essayCue || longProse) return "essay";
   return "short";
 }
 
@@ -181,12 +187,19 @@ function buildExplanationParagraphs(blocks: ExplanationBlock[]) {
   blocks.forEach((block, idx) => {
     const answerKind = classifyQuickAnswerKind(block.answer, block.explanationLines);
     const objective = normalizeObjectiveAnswer(block.answer);
+    const rawAnswer = block.answer.trim();
+    /** ③만이 아니라 「③번」「③번 (구하는 값은 6)」처럼 붙은 객관식 요약은 평문 한 줄로 유지 */
+    const objectiveWithExtra =
+      Boolean(objective) &&
+      (/번/u.test(rawAnswer) || /\([^)]+\)/u.test(rawAnswer) || rawAnswer.replace(/\s/g, "").length > 2);
     const quickAnswerText =
       answerKind === "essay"
         ? "해설참고"
-        : objective
-          ? toCircledObjectiveAnswer(objective)
-          : block.answer || "-";
+        : objectiveWithExtra
+          ? quickAnswerToPlainLine(block.answer || "-")
+          : objective
+            ? toCircledObjectiveAnswer(objective)
+            : quickAnswerToPlainLine(block.answer || "-");
     if (block.problemLinesRaw.length > 0) {
       paragraphs.push(
         new Paragraph({
