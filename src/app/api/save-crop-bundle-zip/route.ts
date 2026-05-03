@@ -1,10 +1,8 @@
+import { mkdir, writeFile } from "node:fs/promises";
+import path from "node:path";
 import { NextResponse } from "next/server";
-import {
-  getDriveClient,
-  isGoogleDriveConfigured,
-  resolveDriveWorkCompleteFolderId,
-  uploadBufferToDriveFolder,
-} from "@/lib/googleDrive";
+
+import { CROPPED_EXAMS_DIR_NAME } from "@/lib/outputPaths";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
@@ -15,13 +13,6 @@ function safeZipBaseName(raw: string): string {
 }
 
 export async function POST(request: Request) {
-  if (!isGoogleDriveConfigured()) {
-    return NextResponse.json(
-      { error: "Google Drive OAuth(GOOGLE_CLIENT_ID/SECRET, GOOGLE_REFRESH_TOKEN)가 설정되지 않았습니다." },
-      { status: 503 },
-    );
-  }
-
   let form: FormData;
   try {
     form = await request.formData();
@@ -42,27 +33,22 @@ export async function POST(request: Request) {
   }
 
   try {
-    const drive = getDriveClient();
-    const folderId = await resolveDriveWorkCompleteFolderId(drive);
+    const dir = path.join(process.cwd(), CROPPED_EXAMS_DIR_NAME);
+    await mkdir(dir, { recursive: true });
     const base = safeZipBaseName(examNameRaw || "cropped");
     const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
     const zipName = `${base}_크롭묶음_${stamp}.zip`;
-
-    const { id, name } = await uploadBufferToDriveFolder({
-      folderId,
-      fileName: zipName,
-      buffer: buf,
-      mimeType: "application/zip",
-    });
-
+    const filePath = path.join(dir, zipName);
+    await writeFile(filePath, buf);
+    const relativePath = path.join(CROPPED_EXAMS_DIR_NAME, zipName).split(path.sep).join("/");
     return NextResponse.json({
       ok: true,
-      message: `Drive 「작업완료」 폴더에 업로드했습니다: ${name}`,
-      fileId: id,
-      fileName: name,
+      message: `「${CROPPED_EXAMS_DIR_NAME}」 폴더에 저장했습니다: ${zipName}`,
+      relativePath,
+      serverCwd: process.cwd(),
     });
   } catch (e) {
-    const msg = e instanceof Error ? e.message : "Drive 업로드 중 오류가 발생했습니다.";
-    return NextResponse.json({ error: msg }, { status: 500 });
+    const message = e instanceof Error ? e.message : "저장 중 오류가 발생했습니다.";
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }

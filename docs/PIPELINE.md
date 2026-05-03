@@ -1,6 +1,7 @@
 # 해설지 파이프라인 — 확정 동선
 
 - 문서 기준일: 2026-05-02
+- 작업 후 문서를 어떻게 맞출지: [POST_WORK_DOCS.md](./POST_WORK_DOCS.md)
 
 ## 문서 세트 (기록·운영)
 
@@ -13,6 +14,7 @@
 | [plan.md](./plan.md) | 목표, 원칙, 완료/다음 단계 |
 | [checklist.md](./checklist.md) | PASS/FAIL·회귀·미완료 |
 | [models.md](./models.md) | LLM·env 키 |
+| [POST_WORK_DOCS.md](./POST_WORK_DOCS.md) | **작업 후 문서 반영 규칙**(코드 변경 시 함께 갱신할 문서) |
 
 각 파일 상단의 **문서 기준일**을 작업일에 맞출 것.
 
@@ -68,21 +70,22 @@ flowchart TB
 | 위치 | 역할 | 비고 |
 |------|------|------|
 | **Drive · 입력 폴더** | 시험지 PDF 등 **읽기** | **`GOOGLE_DRIVE_EXAMS_FOLDER_ID`** (또는 부모 아래 `시험지`) |
-| **Drive · 작업완료** | 크롭 문항을 **ZIP 한 개**로 업로드 | **`GOOGLE_DRIVE_WORK_COMPLETE_FOLDER_ID`** 또는 부모 아래 **`작업완료`** 폴더. API: **`POST /api/upload-crop-bundle`** (UI: 「작업완료 폴더에 ZIP 묶음 업로드」) |
-| **로컬 · `해설지 최종본`** | **최종 해설 DOCX만** 저장 | **`npm run write-final-docx`** 또는 API `/api/save-result`(동일 빌더). 상수: `src/lib/outputPaths.ts` 의 `FINAL_EXPLANATION_DIR_NAME` |
+| **Drive · 작업완료** | 크롭 문항을 **ZIP 한 개**로 업로드 | **`GOOGLE_DRIVE_WORK_COMPLETE_FOLDER_ID`** 또는 부모 아래 **`작업완료`**. API: **`POST /api/upload-crop-bundle`** |
+| **로컬(서버 디스크) · `크롭된 시험지`** | 크롭 ZIP을 **프로젝트 루트 기준** 폴더에 저장 (`npm run dev` 시 PC 프로젝트에 생성) | API: **`POST /api/save-crop-bundle-zip`**. 상수: `CROPPED_EXAMS_DIR_NAME`. 원격 배포 시에는 컨테이너 내부 경로임 |
+| **로컬 · `해설지 최종본`** | **최종 해설 DOCX만** 저장 | **`npm run write-final-docx`** 또는 API `/api/save-result`(동일 빌더). 상수: `FINAL_EXPLANATION_DIR_NAME` |
 
-**원칙:** 최종 **DOCX**는 Drive API로 올리지 않음. **크롭 ZIP**만 Drive `작업완료`에 올릴 수 있음.
+**원칙:** 최종 **DOCX**는 Drive API로 올리지 않음. **크롭 ZIP**은 **로컬 `크롭된 시험지`** 저장, **브라우저 다운로드**, 또는 Drive **`작업완료`** 중 선택(UI).
 
 ---
 
 ## 타 컴퓨터에서 동일하게 쓰기 (이기성)
 
 1. 프로젝트 폴더 `highroad-math-solution` 전체 복사  
-2. (선택) 로컬 **`시험지`**, **`해설지 최종본`** 폴더도 같이 복사 — 오프라인·동일 스냅샷  
+2. (선택) 로컬 **`시험지`**, **`크롭된 시험지`**, **`해설지 최종본`** 폴더도 같이 복사 — 오프라인·동일 스냅샷  
 3. 새 PC에서 `.env.local` 다시 작성(API 키·Drive OAuth·폴더 ID). **Drive를 쓰지 않으면** 묶음만 `시험지`에 넣고 앱만 실행해도 됨  
 4. `npm install` → `npm run dev`  
 
-앱은 경로를 **`process.cwd()` 기준 상대 경로**(`시험지`, `해설지 최종본`)로만 쓰므로, **같은 구조로 내려받으면** 동작이 동일합니다.
+앱은 경로를 **`process.cwd()` 기준 상대 경로**(`시험지`, `크롭된 시험지`, `해설지 최종본`)로 쓰므로, **같은 구조로 내려받으면** 동작이 동일합니다.
 
 ---
 

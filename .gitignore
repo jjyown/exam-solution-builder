@@ -38,6 +38,7 @@ yarn-error.log*
 
 # local runtime data (not for repo)
 시험지/
+크롭된 시험지/
 해설지 최종본/
 *.pdf
 *.docx

@@ -17,7 +17,7 @@ import {
   validateExportDocEntries,
 } from "@/lib/exportDocQuality";
 import { resolveGeminiGenerateEnvKey } from "@/lib/generateExplanationGeminiEnv";
-import { FINAL_EXPLANATION_DIR_NAME } from "@/lib/outputPaths";
+import { CROPPED_EXAMS_DIR_NAME, FINAL_EXPLANATION_DIR_NAME } from "@/lib/outputPaths";
 import { isCropOnlyUi } from "@/lib/uiMode";
 
 type ParsedExplanation = {
@@ -755,11 +755,11 @@ export default function Home() {
   const [noQuickAnswerPage, setNoQuickAnswerPage] = useState(false);
   const [noExplanationRefPage, setNoExplanationRefPage] = useState(false);
   const [isLoadingExams, setIsLoadingExams] = useState(false);
-  const [cropDriveUploadTarget, setCropDriveUploadTarget] = useState<
-    "idle" | "work-complete" | "final-explanation"
-  >("idle");
-  const isUploadingCropBundle = cropDriveUploadTarget !== "idle";
   const [isDownloadingCropBundle, setIsDownloadingCropBundle] = useState(false);
+  const [cropBundleBusy, setCropBundleBusy] = useState<"idle" | "work-complete" | "local-disk">(
+    "idle",
+  );
+  const isCropZipBusy = cropBundleBusy !== "idle" || isDownloadingCropBundle;
   const [isGenerating, setIsGenerating] = useState(false);
   const [queuedProblems, setQueuedProblems] = useState<QueuedProblem[]>([]);
   const [savedPageNumbers, setSavedPageNumbers] = useState<number[]>([]);
@@ -2375,32 +2375,63 @@ export default function Home() {
     return { blob, examLabel };
   }, [queuedProblems, selectedExam]);
 
-  const handleUploadCropBundleToDrive = useCallback(
-    async (target: "work-complete" | "final-explanation") => {
-      if (queuedProblems.length === 0) return;
-      setCropDriveUploadTarget(target);
-      setErrorMessage("");
-      try {
-        const { blob, examLabel } = await buildCropBundleZipBlob();
-        const form = new FormData();
-        form.append("file", blob, "bundle.zip");
-        form.append("examName", examLabel);
-        form.append("driveFolder", target);
-        const res = await fetch("/api/upload-crop-bundle", { method: "POST", body: form });
-        if (!res.ok) {
-          const msg = await parseApiErrorMessage(res, "Drive 업로드 실패");
-          throw new Error(msg);
-        }
-        const data = (await res.json()) as { message?: string };
-        setSuccessMessage(data.message || "Drive에 크롭 묶음을 올렸습니다.");
-      } catch (e) {
-        setErrorMessage(e instanceof Error ? e.message : "Drive 업로드 중 오류");
-      } finally {
-        setCropDriveUploadTarget("idle");
+  const handleSaveCropBundleToProjectFolder = useCallback(async () => {
+    if (queuedProblems.length === 0) return;
+    setCropBundleBusy("local-disk");
+    setErrorMessage("");
+    try {
+      const { blob, examLabel } = await buildCropBundleZipBlob();
+      const form = new FormData();
+      form.append("file", blob, "bundle.zip");
+      form.append("examName", examLabel);
+      const res = await fetch("/api/save-crop-bundle-zip", { method: "POST", body: form });
+      if (!res.ok) {
+        const msg = await parseApiErrorMessage(res, "ZIP 저장 실패");
+        throw new Error(msg);
       }
-    },
-    [buildCropBundleZipBlob],
-  );
+      const data = (await res.json()) as {
+        message?: string;
+        relativePath?: string;
+        serverCwd?: string;
+      };
+      let msg = data.message || `「${CROPPED_EXAMS_DIR_NAME}」에 저장했습니다.`;
+      if (
+        data.serverCwd &&
+        typeof window !== "undefined" &&
+        !window.location.hostname.includes("localhost")
+      ) {
+        msg += ` 서버 작업 경로: ${data.serverCwd} (원격이면 PC 폴더와 다릅니다.)`;
+      }
+      setSuccessMessage(msg);
+    } catch (e) {
+      setErrorMessage(e instanceof Error ? e.message : "ZIP 저장 중 오류");
+    } finally {
+      setCropBundleBusy("idle");
+    }
+  }, [buildCropBundleZipBlob]);
+
+  const handleUploadCropBundleToDrive = useCallback(async () => {
+    if (queuedProblems.length === 0) return;
+    setCropBundleBusy("work-complete");
+    setErrorMessage("");
+    try {
+      const { blob, examLabel } = await buildCropBundleZipBlob();
+      const form = new FormData();
+      form.append("file", blob, "bundle.zip");
+      form.append("examName", examLabel);
+      const res = await fetch("/api/upload-crop-bundle", { method: "POST", body: form });
+      if (!res.ok) {
+        const msg = await parseApiErrorMessage(res, "Drive 업로드 실패");
+        throw new Error(msg);
+      }
+      const data = (await res.json()) as { message?: string };
+      setSuccessMessage(data.message || "Drive에 크롭 묶음을 올렸습니다.");
+    } catch (e) {
+      setErrorMessage(e instanceof Error ? e.message : "Drive 업로드 중 오류");
+    } finally {
+      setCropBundleBusy("idle");
+    }
+  }, [buildCropBundleZipBlob]);
 
   const handleDownloadCropBundleZip = useCallback(async () => {
     if (queuedProblems.length === 0) return;
@@ -3528,9 +3559,8 @@ export default function Home() {
                       저장된 문항 ({queuedProblems.length}개)
                     </p>
                     <p className="mt-1 text-[11px] leading-snug text-emerald-900">
-                      ZIP PC 저장, Drive 「작업완료」, Drive 「{FINAL_EXPLANATION_DIR_NAME}」 중 선택하세요.
-                      (Drive는 OAuth·폴더 env 필요. 최종본 폴더는 부모 아래 「{FINAL_EXPLANATION_DIR_NAME}」 또는
-                      GOOGLE_DRIVE_FINAL_EXPLANATION_FOLDER_ID)
+                      ① 서버 디스크 「{CROPPED_EXAMS_DIR_NAME}」(프로젝트 루트 기준, 로컬 dev면 PC에 생성) ②
+                      브라우저 다운로드 ③ Drive 「작업완료」(OAuth·폴더 env). 원격 배포 시 ①은 컨테이너 안 경로입니다.
                     </p>
                     {queuedProblems.length === 0 ? (
                       <p className="mt-2 text-xs text-emerald-800">
@@ -3576,31 +3606,31 @@ export default function Home() {
                       <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-3">
                         <button
                           type="button"
-                          disabled={isDownloadingCropBundle || isUploadingCropBundle}
+                          disabled={isCropZipBusy}
+                          onClick={() => void handleSaveCropBundleToProjectFolder()}
+                          className="w-full rounded-md border border-emerald-800 bg-emerald-600 px-3 py-2 text-sm font-semibold text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-55"
+                        >
+                          {cropBundleBusy === "local-disk"
+                            ? "저장 중..."
+                            : `1) 「${CROPPED_EXAMS_DIR_NAME}」에 저장`}
+                        </button>
+                        <button
+                          type="button"
+                          disabled={isCropZipBusy}
                           onClick={() => void handleDownloadCropBundleZip()}
                           className="w-full rounded-md border border-emerald-700 bg-white px-3 py-2 text-sm font-semibold text-emerald-950 hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-55"
                         >
-                          {isDownloadingCropBundle ? "ZIP 만드는 중..." : "1) ZIP 파일로 내려받기"}
+                          {isDownloadingCropBundle ? "ZIP 만드는 중..." : "2) ZIP 브라우저로 내려받기"}
                         </button>
                         <button
                           type="button"
-                          disabled={isUploadingCropBundle || isDownloadingCropBundle}
-                          onClick={() => void handleUploadCropBundleToDrive("work-complete")}
+                          disabled={isCropZipBusy}
+                          onClick={() => void handleUploadCropBundleToDrive()}
                           className="w-full rounded-md bg-violet-700 px-3 py-2 text-sm font-semibold text-white hover:bg-violet-800 disabled:cursor-not-allowed disabled:opacity-55"
                         >
-                          {cropDriveUploadTarget === "work-complete"
+                          {cropBundleBusy === "work-complete"
                             ? "업로드 중..."
-                            : "2) Drive 「작업완료」에 업로드"}
-                        </button>
-                        <button
-                          type="button"
-                          disabled={isUploadingCropBundle || isDownloadingCropBundle}
-                          onClick={() => void handleUploadCropBundleToDrive("final-explanation")}
-                          className="w-full rounded-md bg-indigo-700 px-3 py-2 text-sm font-semibold text-white hover:bg-indigo-800 disabled:cursor-not-allowed disabled:opacity-55"
-                        >
-                          {cropDriveUploadTarget === "final-explanation"
-                            ? "업로드 중..."
-                            : `3) Drive 「${FINAL_EXPLANATION_DIR_NAME}」에 업로드`}
+                            : "3) Drive 「작업완료」에 업로드"}
                         </button>
                       </div>
                     )}
@@ -3668,37 +3698,31 @@ export default function Home() {
                 <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-3">
                   <button
                     type="button"
-                    disabled={
-                      isDownloadingCropBundle || isUploadingCropBundle || isBatchGenerating
-                    }
+                    disabled={isCropZipBusy || isBatchGenerating}
+                    onClick={() => void handleSaveCropBundleToProjectFolder()}
+                    className="w-full rounded-md border border-emerald-800 bg-emerald-600 px-3 py-2 text-sm font-semibold text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {cropBundleBusy === "local-disk"
+                      ? "저장 중..."
+                      : `1) 「${CROPPED_EXAMS_DIR_NAME}」에 저장`}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={isCropZipBusy || isBatchGenerating}
                     onClick={() => void handleDownloadCropBundleZip()}
                     className="w-full rounded-md border border-slate-400 bg-white px-3 py-2 text-sm font-semibold text-slate-900 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
                   >
-                    {isDownloadingCropBundle ? "ZIP 만드는 중..." : "1) ZIP 파일로 내려받기"}
+                    {isDownloadingCropBundle ? "ZIP 만드는 중..." : "2) ZIP 브라우저로 내려받기"}
                   </button>
                   <button
                     type="button"
-                    disabled={
-                      isUploadingCropBundle || isDownloadingCropBundle || isBatchGenerating
-                    }
-                    onClick={() => void handleUploadCropBundleToDrive("work-complete")}
+                    disabled={isCropZipBusy || isBatchGenerating}
+                    onClick={() => void handleUploadCropBundleToDrive()}
                     className="w-full rounded-md border border-violet-500 bg-white px-3 py-2 text-sm font-semibold text-violet-900 hover:bg-violet-50 disabled:cursor-not-allowed disabled:opacity-50"
                   >
-                    {cropDriveUploadTarget === "work-complete"
+                    {cropBundleBusy === "work-complete"
                       ? "업로드 중..."
-                      : "2) Drive 「작업완료」에 업로드"}
-                  </button>
-                  <button
-                    type="button"
-                    disabled={
-                      isUploadingCropBundle || isDownloadingCropBundle || isBatchGenerating
-                    }
-                    onClick={() => void handleUploadCropBundleToDrive("final-explanation")}
-                    className="w-full rounded-md border border-indigo-600 bg-indigo-50 px-3 py-2 text-sm font-semibold text-indigo-950 hover:bg-indigo-100 disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    {cropDriveUploadTarget === "final-explanation"
-                      ? "업로드 중..."
-                      : `3) Drive 「${FINAL_EXPLANATION_DIR_NAME}」에 업로드`}
+                      : "3) Drive 「작업완료」에 업로드"}
                   </button>
                 </div>
               )}
