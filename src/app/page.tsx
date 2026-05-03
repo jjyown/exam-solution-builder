@@ -25,25 +25,14 @@ type ParsedExplanation = {
   body: string;
 };
 
-type CroppedBundleEntry = {
-  name: string;
-  kind: "zip" | "folder";
-};
-
-type CroppedExamListResponse = {
-  bundles: CroppedBundleEntry[];
+type ExamListResponse = {
+  files: string[];
   error?: string;
+  sources?: { local?: boolean; googleDrive?: boolean };
+  warnings?: string[];
+  /** Next 서버가 읽는 작업 디렉터리 (원격 배포 시 사용자 PC 경로와 다름) */
   serverCwd?: string;
-  scanRoot?: string;
-};
-
-type BundleImportPayload = {
-  examLabel: string;
-  queuedItems: QueuedProblem[];
-};
-
-type LoadSourceFileOptions = {
-  bundleImport?: BundleImportPayload;
+  localScanRoots?: string[];
 };
 
 type QueuedProblem = {
@@ -57,8 +46,6 @@ type QueuedProblem = {
   diagramImages?: Array<{ imageBase64: string; mimeType: string }>;
   crop: PixelCrop;
   diagramCrops?: PixelCrop[];
-  /** 크롭 묶음 불러오기: 이미지 한 장이 곧 문항일 때 imageRef 대신 natural 크기로 사전검증 */
-  standaloneImageNatural?: { width: number; height: number };
 };
 
 function getPdfPageFromQueuedProblem(item: QueuedProblem): number | null {
@@ -713,9 +700,7 @@ export default function Home() {
   const pdfDocKeyRef = useRef("");
   const [currentStep, setCurrentStep] = useState<1 | 2 | 3>(1);
   const [isLoadingSelectedFile, setIsLoadingSelectedFile] = useState(false);
-  const [croppedBundles, setCroppedBundles] = useState<CroppedBundleEntry[]>([]);
-  const [examListHint, setExamListHint] = useState("");
-  const [selectedCroppedBundleKey, setSelectedCroppedBundleKey] = useState("");
+  const [examFiles, setExamFiles] = useState<string[]>([]);
   const [selectedExam, setSelectedExam] = useState("");
   const [originalFile, setOriginalFile] = useState<File | null>(null);
   const [isPdfSource, setIsPdfSource] = useState(false);
@@ -1127,16 +1112,13 @@ export default function Home() {
     setPdfPageInput(String(safePageNo));
   };
 
-  const loadSourceFile = async (file: File, options?: LoadSourceFileOptions) => {
+  const loadSourceFile = async (file: File) => {
     const sourceKind = getExamSourceKind(file.name);
     if (sourceKind === "hml" || sourceKind === "hwp") {
       throw new Error(
         "`.hml`/한글 문서는 이 화면에서 직접 열 수 없습니다. PDF 또는 이미지(png/jpg)로 변환한 뒤 선택해 주세요.",
       );
     }
-
-    const bundleImport = options?.bundleImport;
-    const preserveQueuedFromBundle = Boolean(bundleImport);
 
     setOriginalFile(file);
     setSelectedExam(file.name);
@@ -1149,19 +1131,12 @@ export default function Home() {
     setErrorMessage("");
     setSuccessMessage("");
     setDiagramAidRecommendation(null);
-    if (!preserveQueuedFromBundle) {
-      setSelectedCroppedBundleKey("");
-      setQueuedProblems([]);
-      setSavedPageNumbers([]);
-      setExcludedPageNumbers([]);
-      setKeepWorkPagesOnlyInput("");
-      setSavedPageWorks({});
-      setPageDrafts({});
-    } else {
-      setExcludedPageNumbers([]);
-      setKeepWorkPagesOnlyInput("");
-      setPageDrafts({});
-    }
+    setQueuedProblems([]);
+    setSavedPageNumbers([]);
+    setExcludedPageNumbers([]);
+    setKeepWorkPagesOnlyInput("");
+    setSavedPageWorks({});
+    setPageDrafts({});
     setQuestionNo("1");
     setBatchResults([]);
     setWorkflowStep("solve");
@@ -1182,39 +1157,33 @@ export default function Home() {
     const objectUrl = URL.createObjectURL(file);
     setSourceImage(objectUrl);
     setSourceFile(file);
-    if (bundleImport) {
-      setQueuedProblems(bundleImport.queuedItems);
-      setSavedPageWorks({ 1: bundleImport.queuedItems });
-      setSavedPageNumbers([1]);
-      setSelectedExam(bundleImport.examLabel);
-      setQuestionNo("1");
-      setQuestionVersionMap({});
-      setQuestionCardDraftMap({});
-    }
     setCurrentStep(2);
   };
 
-  const loadCroppedExamBundles = useCallback(async () => {
+  const [examListHint, setExamListHint] = useState("");
+
+  const loadExamFiles = useCallback(async () => {
     try {
       setIsLoadingExams(true);
       setErrorMessage("");
       setExamListHint("");
-      setSelectedCroppedBundleKey("");
-      const response = await fetch("/api/cropped-exams", { cache: "no-store" });
-      const data = (await response.json()) as CroppedExamListResponse;
+      const response = await fetch("/api/exams", { cache: "no-store" });
+      const data = (await response.json()) as ExamListResponse;
       if (!response.ok) {
-        throw new Error(data.error || "크롭된 시험지 목록 조회에 실패했습니다.");
+        throw new Error(data.error || "시험지 목록 조회에 실패했습니다.");
       }
-      setCroppedBundles(data.bundles ?? []);
+      setExamFiles(data.files);
       const parts: string[] = [];
-      if ((data.bundles ?? []).length === 0) {
+      if (data.warnings?.length) parts.push(...data.warnings);
+      if (data.files.length === 0) {
+        if (data.sources?.googleDrive === false) {
+          parts.push("Google Drive OAuth가 없어 Drive 쪽 시험지는 목록에 안 붙습니다(.env.local).");
+        }
         parts.push(
-          `서버 작업 경로(serverCwd): ${data.serverCwd ?? "(알 수 없음)"} — 프로젝트 루트의 「${
-            data.scanRoot ?? CROPPED_EXAMS_DIR_NAME
-          }」에 크롭 ZIP(.zip) 또는 압축 해제 폴더를 두세요.`,
+          `서버 작업 경로(serverCwd): ${data.serverCwd ?? "(알 수 없음)"} — 시험지·exams는 이 기준의 하위에 있어야 합니다.`,
         );
         parts.push(
-          "원격 배포(Railway)에서는 서버 컨테이너 디스크 기준이라, 로컬 PC의 `크롭된 시험지`와 목록이 다를 수 있습니다.",
+          "브라우저 주소가 localhost가 아니면(예: Railway), 내 PC의 `highroad-math-solution/시험지`와는 별개입니다. Drive OAuth를 쓰거나, 직접 이미지 업로드·로컬에서 `npm run dev`로 열어 주세요.",
         );
       }
       setExamListHint(parts.filter(Boolean).join(" "));
@@ -1223,7 +1192,7 @@ export default function Home() {
       const message =
         error instanceof Error
           ? error.message
-          : "크롭된 시험지 목록 조회 중 오류가 발생했습니다.";
+          : "시험지 목록 조회 중 오류가 발생했습니다.";
       setErrorMessage(message);
     } finally {
       setIsLoadingExams(false);
@@ -1232,8 +1201,8 @@ export default function Home() {
 
   useEffect(() => {
     if (currentStep !== 1) return;
-    void loadCroppedExamBundles();
-  }, [currentStep, loadCroppedExamBundles]);
+    void loadExamFiles();
+  }, [currentStep, loadExamFiles]);
 
   useEffect(() => {
     if (methodBlocks.methods.length === 0) return;
@@ -1432,49 +1401,42 @@ export default function Home() {
     workflowStep,
   ]);
 
-  const importCroppedBundle = async (entry: CroppedBundleEntry) => {
+  const loadExamImage = async (fileName: string) => {
     try {
-      setSelectedCroppedBundleKey(`${entry.kind}:${entry.name}`);
+      setSelectedExam(fileName);
+      const sourceKind = getExamSourceKind(fileName);
+      if (sourceKind === "hwp" || sourceKind === "hml") {
+        setErrorMessage(
+          "`.hml/.hwp/.hwpx`는 현재 이미지 편집 기반 처리에서 직접 열 수 없습니다. PDF 또는 이미지(png/jpg)로 변환한 뒤 진행해 주세요.",
+        );
+        setSuccessMessage("");
+        return;
+      }
       setIsLoadingSelectedFile(true);
       setErrorMessage("");
       setSuccessMessage("");
-      const response = await fetch("/api/cropped-exams/import", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: entry.name, kind: entry.kind }),
-      });
-      const data = (await response.json()) as {
-        error?: string;
-        examName?: string;
-        items?: QueuedProblem[];
-      };
-      if (!response.ok) {
-        throw new Error(data.error || "크롭 묶음을 불러오지 못했습니다.");
-      }
-      const items = data.items ?? [];
-      if (items.length === 0) {
-        throw new Error("묶음에 PNG/JPEG 문항 이미지가 없습니다.");
-      }
-      const first = items[0]!;
-      const raw = atob(first.imageBase64);
-      const arr = new Uint8Array(raw.length);
-      for (let i = 0; i < raw.length; i += 1) arr[i] = raw.charCodeAt(i);
-      const previewName = first.imageMimeType.includes("png") ? "preview.png" : "preview.jpg";
-      const firstFile = new File([arr], previewName, { type: first.imageMimeType });
-      await loadSourceFile(firstFile, {
-        bundleImport: {
-          examLabel: (data.examName || entry.name).trim() || entry.name,
-          queuedItems: items,
-        },
-      });
-      setSuccessMessage(
-        `「${(data.examName || entry.name).trim()}」 문항 ${items.length}개를 불러왔습니다. ③ 해설 제작으로 이동해 순차 생성하세요.`,
+      const response = await fetch(
+        `/api/exams/file?name=${encodeURIComponent(fileName)}`,
+        { cache: "no-store" },
       );
+      if (!response.ok) {
+        const data = (await response.json()) as { error?: string };
+        throw new Error(data.error || "시험지 이미지를 불러오지 못했습니다.");
+      }
+      const blob = await response.blob();
+      const file = new File([blob], fileName, {
+        type: blob.type || "application/octet-stream",
+      });
+      await loadSourceFile(file);
+      setSuccessMessage("시험지를 불러왔습니다. 다음 단계에서 영역을 지정하세요.");
     } catch (error) {
       const message =
-        error instanceof Error ? error.message : "크롭 묶음 불러오기 중 오류가 발생했습니다.";
+        error instanceof Error
+          ? error.message
+          : "시험지 선택 중 오류가 발생했습니다.";
       setErrorMessage(message);
-    } finally {
+    }
+    finally {
       setIsLoadingSelectedFile(false);
     }
   };
@@ -2547,13 +2509,7 @@ export default function Home() {
       for (let itemIndex = 0; itemIndex < queuedProblems.length; itemIndex += 1) {
         const item = queuedProblems[itemIndex];
         try {
-          const precheck = item.standaloneImageNatural
-            ? runExtractionPrecheck(
-                item.crop,
-                item.standaloneImageNatural.width,
-                item.standaloneImageNatural.height,
-              )
-            : runExtractionPrecheckForDisplayedCrop(item.crop, imageRef.current);
+          const precheck = runExtractionPrecheckForDisplayedCrop(item.crop, imageRef.current);
           if (!precheck.ok) {
             results.push({
               questionNo: item.questionNo,
@@ -2953,7 +2909,7 @@ export default function Home() {
               <button
                 onClick={() => {
                   setCurrentStep(1);
-                  void loadCroppedExamBundles();
+                  void loadExamFiles();
                 }}
                 className={`rounded border px-2 py-2 font-semibold ${
                   currentStep === 1
@@ -2961,7 +2917,7 @@ export default function Home() {
                     : "border-slate-200 bg-white text-slate-500"
                 }`}
               >
-                1) 크롭 묶음
+                1) 시험지 선택
               </button>
               <button
                 onClick={() => hasImage && setCurrentStep(2)}
@@ -2991,7 +2947,7 @@ export default function Home() {
 
             <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700">
               {currentStep === 1 &&
-                "현재 단계: 크롭된 시험지. 「크롭된 시험지」폴더의 ZIP·폴더를 선택하거나, 아래에서 PDF/이미지를 직접 올리세요."}
+                "현재 단계: 시험지 선택. 목록에서 파일을 선택하거나 직접 업로드하세요."}
               {currentStep === 2 &&
                 (isCropOnlyUi
                   ? "현재 단계: 크롭 전용. 한 박스에 한 문항만(선지·조건까지). 페이지마다 「현재 페이지 작업 저장」으로 대기열에 쌓입니다."
@@ -3004,27 +2960,27 @@ export default function Home() {
               <>
             <div>
               <label className="mb-2 block text-sm font-semibold text-slate-800">
-                1) 「{CROPPED_EXAMS_DIR_NAME}」목록 새로고침
+                1) 시험지 목록 불러오기
               </label>
               <button
-                onClick={loadCroppedExamBundles}
+                onClick={loadExamFiles}
                 disabled={isLoadingExams}
                 className="w-full rounded-md border border-slate-300 bg-slate-50 px-4 py-2 text-sm font-semibold text-slate-700 disabled:cursor-not-allowed disabled:opacity-70"
               >
-                {isLoadingExams ? "불러오는 중..." : "크롭된 시험지 폴더 새로고침"}
+                {isLoadingExams ? "불러오는 중..." : "시험지 폴더 새로고침"}
               </button>
             </div>
 
             <div>
               <label className="mb-2 block text-sm font-semibold text-slate-800">
-                2) ZIP 또는 압축 해제 폴더 클릭
+                2) 원하는 시험지 클릭 선택
               </label>
               <div className="h-44 overflow-y-auto rounded-md border border-slate-200">
-                {croppedBundles.length === 0 ? (
+                {examFiles.length === 0 ? (
                   <div className="p-3 text-sm text-slate-500">
                     <p>
-                      「{CROPPED_EXAMS_DIR_NAME}」에 크롭 묶음(.zip)이나 압축을 푼 폴더를 넣은 뒤 새로고침
-                      하세요. (ZIP 안에는 PNG/JPEG 문항 이미지와 선택 시 manifest.json)
+                      시험지 폴더에 파일이 없습니다. 앱 루트(서버)의 `시험지` 또는 `exams`에 png/jpg/pdf
+                      등을 넣은 뒤 새로고침 하세요.
                     </p>
                     {examListHint ? (
                       <p className="mt-2 rounded-md bg-amber-50 p-2 text-xs leading-snug text-amber-950">
@@ -3034,30 +2990,32 @@ export default function Home() {
                   </div>
                 ) : (
                   <ul className="divide-y divide-slate-200">
-                    {croppedBundles.map((entry) => {
-                      const rowKey = `${entry.kind}:${entry.name}`;
-                      return (
-                        <li key={rowKey}>
-                          <button
-                            type="button"
-                            onClick={() => void importCroppedBundle(entry)}
-                            disabled={isLoadingSelectedFile}
-                            className={`w-full px-3 py-2 text-left text-sm ${
-                              selectedCroppedBundleKey === rowKey
-                                ? "bg-blue-50 font-semibold text-blue-700"
-                                : "hover:bg-slate-50"
-                            } disabled:cursor-not-allowed disabled:opacity-70`}
-                          >
-                            <span className="flex items-center justify-between gap-2">
-                              <span className="truncate">{entry.name}</span>
-                              <span className="shrink-0 rounded border border-slate-300 px-2 py-0.5 text-[10px] font-semibold text-slate-600">
-                                {entry.kind === "zip" ? "ZIP" : "폴더"}
-                              </span>
+                    {examFiles.map((file) => (
+                      <li key={file}>
+                        <button
+                          onClick={() => loadExamImage(file)}
+                          disabled={isLoadingSelectedFile}
+                          className={`w-full px-3 py-2 text-left text-sm ${
+                            selectedExam === file
+                              ? "bg-blue-50 font-semibold text-blue-700"
+                              : "hover:bg-slate-50"
+                          } disabled:cursor-not-allowed disabled:opacity-70`}
+                        >
+                          <span className="flex items-center justify-between gap-2">
+                            <span className="truncate">{file}</span>
+                            <span className="rounded border border-slate-300 px-2 py-0.5 text-[10px] font-semibold text-slate-600">
+                              {(() => {
+                                const kind = getExamSourceKind(file);
+                                if (kind === "hml") return "HML";
+                                if (kind === "hwp") return "HWP/HWPX";
+                                if (kind === "pdf") return "PDF";
+                                return "IMG";
+                              })()}
                             </span>
-                          </button>
-                        </li>
-                      );
-                    })}
+                          </span>
+                        </button>
+                      </li>
+                    ))}
                   </ul>
                 )}
               </div>
@@ -3065,7 +3023,7 @@ export default function Home() {
 
             <div>
               <label className="mb-2 block text-sm font-semibold text-slate-800">
-                (선택) 원본 시험지 직접 업로드 (PDF/이미지)
+                (선택) 직접 이미지 업로드
               </label>
               <input
                 type="file"
@@ -3584,7 +3542,7 @@ export default function Home() {
                       isCropOnlyUi ? "w-full" : "w-1/2"
                     }`}
                   >
-                    이전: 크롭 묶음
+                    이전: 시험지 선택
                   </button>
                   {!isCropOnlyUi && (
                     <button

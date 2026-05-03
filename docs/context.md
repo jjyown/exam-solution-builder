@@ -11,7 +11,7 @@
 ## 현재 구조 요약
 
 - **프론트**: Next.js App Router, 메인 UI `src/app/page.tsx` (시험지·크롭·해설·내보내기)
-- **API**: `generate-explanation`, `precheck-extraction`, `repair-explanations`, `save-result`, `exams`(+file), `cropped-exams`(+import), 등 — `src/app/api/`
+- **API**: `generate-explanation`, `precheck-extraction`, `repair-explanations`, `save-result`, `exams`(+file), 등 — `src/app/api/`
 - **로컬 산출**: 프로젝트 루트 `해설지 최종본/` (`src/lib/outputPaths.ts` 의 `FINAL_EXPLANATION_DIR_NAME`)
 - **UI 모드**: `src/lib/uiMode.ts` — `NEXT_PUBLIC_UI_MODE=crop` 시 Railway 등에서 **크롭 전용**(해설·DOCX UI 숨김)
 
@@ -26,7 +26,7 @@
 | 2026-05-02 | Railway 배포에 `NEXT_PUBLIC_UI_MODE=crop` 옵션 | 크롭만 하는 환경에서 해설 UI 노이즈 제거 | `src/lib/uiMode.ts`, `src/app/page.tsx`, `.env.local.example` |
 | 2026-05-02 | 크롭 전용에서 필수 페이지 완료 시 **3단계로 자동 이동하지 않음** | 로컬 해설기와 역할 분리 | `page.tsx` `savePendingAsQueuedProblem` |
 | 2026-05-02 | 크롭 모드 우측 패널에 **전체 페이지 대형 미리보기** | 좌측 스크롤 영역과 역할 분리해 가독성 확보 | `page.tsx` |
-| 2026-05-02 | 로컬 앱 1단계 목록을 **`시험지` 원본이 아니라 `크롭된 시험지`의 ZIP·폴더**로 표시 | 크롭 묶음 재작업 동선과 일치, HML/PDF 목록 혼동 감소 | `GET/POST /api/cropped-exams/*`, `page.tsx`, `imageDimensionsFromBuffer.ts` |
+| 2026-05-02 | 1단계 UI를 다시 **`시험지`(원본·`/api/exams` 목록)** 로 롤백 | Railway 등에서 `크롭된 시험지`만 보면 목록이 비고 안내가 혼란 | `page.tsx` 복구, `api/cropped-exams`·`imageDimensionsFromBuffer` 제거 |
 | (이전 합의) | 로컬 최종 DOCX 폴더명 **`해설지 최종본`** | `작업 완료`와 혼동 방지·이름 통일 | `outputPaths.ts`, `save-result`, `.gitignore`, 문서 |
 | (이전 합의) | **DOCX는 Drive 업로드하지 않음** | Gemini API가 Drive에 쓰지 않음; 최종물은 로컬 책임 | `googleDrive.ts`, 파이프라인 문서 |
 

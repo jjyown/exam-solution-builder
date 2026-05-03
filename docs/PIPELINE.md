@@ -71,7 +71,7 @@ flowchart TB
 |------|------|------|
 | **Drive · 입력 폴더** | 시험지 PDF 등 **읽기** | **`GOOGLE_DRIVE_EXAMS_FOLDER_ID`** (또는 부모 아래 `시험지`) |
 | **Drive · 작업완료** | 크롭 문항을 **ZIP 한 개**로 업로드 | **`GOOGLE_DRIVE_WORK_COMPLETE_FOLDER_ID`** 또는 부모 아래 **`작업완료`**. API: **`POST /api/upload-crop-bundle`** |
-| **로컬(서버 디스크) · `크롭된 시험지`** | 크롭 ZIP을 **프로젝트 루트 기준** 폴더에 저장 (`npm run dev` 시 PC 프로젝트에 생성) | API: **`POST /api/save-crop-bundle-zip`**, 목록·불러오기: **`GET /api/cropped-exams`**, **`POST /api/cropped-exams/import`**. 로컬 **일반 모드** 앱 1단계 UI도 이 폴더의 **ZIP·압축 해제 폴더**를 목록으로 씀. 상수: `CROPPED_EXAMS_DIR_NAME`. 원격 배포 시에는 컨테이너 내부 경로임 |
+| **로컬(서버 디스크) · `크롭된 시험지`** | 크롭 ZIP을 **프로젝트 루트 기준** 폴더에 저장 (`npm run dev` 시 PC 프로젝트에 생성) | API: **`POST /api/save-crop-bundle-zip`**. 상수: `CROPPED_EXAMS_DIR_NAME`. 원격 배포 시에는 컨테이너 내부 경로임 |
 | **로컬 · `해설지 최종본`** | **최종 해설 DOCX만** 저장 | **`npm run write-final-docx`** 또는 API `/api/save-result`(동일 빌더). 상수: `FINAL_EXPLANATION_DIR_NAME` |
 
 **원칙:** 최종 **DOCX**는 Drive API로 올리지 않음. **크롭 ZIP**은 **로컬 `크롭된 시험지`** 저장, **브라우저 다운로드**, 또는 Drive **`작업완료`** 중 선택(UI).
