@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useState } from "react";
+import { useCallback, useDeferredValue, useState } from "react";
 import { ExplanationMarkdownMath } from "@/components/ExplanationMarkdownMath";
 import { useExamSolutionReview } from "./ExamSolutionReviewContext";
 
@@ -149,6 +149,9 @@ export function ExamSolutionReviewDetailBlock() {
     deleteSelectionInEditor,
   } = useExamSolutionReview();
   const [previewActionHint, setPreviewActionHint] = useState<string | null>(null);
+  const deferredBodyDraft = useDeferredValue(bodyDraft);
+  const previewMarkdownSource =
+    selected?.question_no === "합본" ? deferredBodyDraft : bodyDraft;
 
   const deletePreviewSelectionFromBody = useCallback(() => {
     setPreviewActionHint(null);
@@ -199,7 +202,7 @@ export function ExamSolutionReviewDetailBlock() {
               미리보기 — DB 본문 (Markdown · LaTeX)
             </p>
             <div className="max-h-[min(50vh,480px)] overflow-y-auto rounded border border-slate-200 bg-white p-3">
-              <ExplanationMarkdownMath source={bodyDraft} />
+              <ExplanationMarkdownMath source={previewMarkdownSource} />
             </div>
           </div>
 

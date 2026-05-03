@@ -1,0 +1,148 @@
+/**
+ * 합본(또는 단일) 해설 마크다운이 DOCX 파이프라인과 맞는지 내보내기 전 검사한다.
+ * 문제(발문) + [정답] + [해설] 구조를 전제로 한다.
+ */
+import { splitLabeledQuestionChunks } from "@/lib/explanationBlocks";
+
+const MD_IMAGE_LINE = /^\s*!\[[^\]]*]\([^)]+\)\s*$/;
+const MIN_EXPL_BODY_LEN = 20;
+const MIN_PROBLEM_HINT_LEN = 8;
+
+function stripLeadingMdImages(text: string): string {
+  const lines = text.split("\n");
+  let i = 0;
+  while (i < lines.length && MD_IMAGE_LINE.test(lines[i] ?? "")) i += 1;
+  return lines.slice(i).join("\n").trim();
+}
+
+function checkQuestionChunk(chunk: string, displayLabel: string) {
+  const errors: string[] = [];
+  const warnings: string[] = [];
+
+  const idxAns = chunk.search(/\[정답\]/i);
+  const idxExpl = chunk.search(/\[해설\]/i);
+
+  if (idxAns < 0) errors.push(`${displayLabel}: [정답] 블록이 없습니다.`);
+  if (idxExpl < 0) errors.push(`${displayLabel}: [해설] 블록이 없습니다.`);
+
+  if (idxAns >= 0 && idxExpl >= 0 && idxExpl < idxAns) {
+    warnings.push(
+      `${displayLabel}: [해설]이 [정답]보다 앞에 있습니다. 권장 순서: 발문 → [정답] → [해설].`,
+    );
+  }
+
+  const answerLineMatch = chunk.match(/\[정답\]\s*\n\s*([^\n\r]+)/i);
+  const answerSameLine = chunk.match(/\[정답\]\s*([^\n\r]+)/i);
+  const answerText =
+    (answerLineMatch?.[1] ?? answerSameLine?.[1] ?? "").trim() ||
+    (idxAns >= 0 ? "" : "-");
+  if (idxAns >= 0 && !answerText) {
+    errors.push(`${displayLabel}: [정답] 다음에 정답(한 줄)이 비어 있습니다.`);
+  }
+  if (/\\[a-z]+/i.test(answerText) || /\$[^$]+\$/.test(answerText)) {
+    warnings.push(
+      `${displayLabel}: [정답]에 LaTeX·$…$가 있습니다. Word 빠른정답 줄은 평문(①~⑤ 등)만 권장합니다.`,
+    );
+  }
+
+  const explM = chunk.match(/\[해설\]\s*([\s\S]*)/i);
+  const explBody = (explM?.[1] ?? "").trim();
+  if (idxExpl >= 0) {
+    if (explBody.length < MIN_EXPL_BODY_LEN) {
+      errors.push(`${displayLabel}: [해설] 본문이 너무 짧거나 비어 있습니다.`);
+    }
+    if (/해설 생성 버튼을 누르면|이 영역에 결과가 표시됩니다/i.test(explBody)) {
+      errors.push(`${displayLabel}: [해설]에 UI 안내 문구가 남아 있습니다. 실제 풀이로 바꿔 주세요.`);
+    }
+  }
+
+  if (idxAns >= 0) {
+    const before = chunk.slice(0, idxAns);
+    const problemHint = stripLeadingMdImages(before).replace(/^\[문제(?:\s+\d+)?\]\s*/i, "").trim();
+    const hasProblemHeader = /^\s*\[문제(?:\s+\d+)?\]/im.test(before);
+    if (problemHint.length < MIN_PROBLEM_HINT_LEN && !hasProblemHeader) {
+      warnings.push(
+        `${displayLabel}: [정답] 앞에 발문·선지 텍스트가 거의 없습니다. DOCX 「문제」 단락이 비어 보일 수 있습니다. (또는 [문제] 헤더 아래에 발문을 두세요.)`,
+      );
+    }
+  }
+
+  return { errors, warnings };
+}
+
+export type MergedStructureCheckResult = {
+  ok: boolean;
+  errors: string[];
+  warnings: string[];
+};
+
+/**
+ * @param rawInput 합본_편집용.md 전체 문자열
+ */
+export function validateMergedExplanationMarkdown(rawInput: string): MergedStructureCheckResult {
+  const raw = rawInput.replace(/\r\n/g, "\n").trim();
+  const errors: string[] = [];
+  const warnings: string[] = [];
+
+  if (!raw) {
+    return { ok: false, errors: ["본문이 비어 있습니다."], warnings: [] };
+  }
+
+  const dollarCount = (raw.match(/\$/g) ?? []).length;
+  if (dollarCount % 2 !== 0) {
+    warnings.push("`$` 개수가 홀수입니다. 인라인 수식 `…$…$…` 짝이 맞는지 확인하세요.");
+  }
+
+  const firstLabelM = raw.match(/\[문항\s*\d+\]/i);
+  const firstLabelIdx = firstLabelM?.index ?? -1;
+  if (firstLabelIdx > 0) {
+    const intro = raw.slice(0, firstLabelIdx).trim();
+    if (intro.length > 40) {
+      warnings.push(
+        "첫 `[문항 n]` 앞에 긴 텍스트가 있습니다. 합본이면 보통 문항별로 `[문항 1]`부터 시작하는지 확인하세요.",
+      );
+    }
+  }
+
+  const items = splitLabeledQuestionChunks(raw);
+  if (items.length > 0) {
+    const seen = new Set<string>();
+    for (const { label, chunk } of items) {
+      if (seen.has(label)) {
+        warnings.push(`문항 번호 ${label}이(가) 두 번 이상 나옵니다. 중복 헤더를 정리하세요.`);
+      }
+      seen.add(label);
+      const r = checkQuestionChunk(chunk, `문항 ${label}`);
+      errors.push(...r.errors);
+      warnings.push(...r.warnings);
+    }
+  } else {
+    if (/\[문항\s*\d+\]/i.test(raw)) {
+      errors.push("[문항 n] 헤더는 있으나 본문 chunk가 비어 있습니다.");
+    } else {
+      const r = checkQuestionChunk(raw, "본문");
+      errors.push(...r.errors);
+      warnings.push(...r.warnings);
+    }
+  }
+
+  return { ok: errors.length === 0, errors, warnings };
+}
+
+export function formatStructureCheckReport(result: MergedStructureCheckResult): string {
+  const lines: string[] = [];
+  if (result.errors.length > 0) {
+    lines.push("■ 오류(수정 후 다시 내보내기)");
+    result.errors.forEach((e, i) => lines.push(`  ${i + 1}. ${e}`));
+  }
+  if (result.warnings.length > 0) {
+    lines.push("■ 경고(가능하면 반영)");
+    result.warnings.forEach((w, i) => lines.push(`  ${i + 1}. ${w}`));
+  }
+  if (result.ok && result.warnings.length === 0) {
+    lines.push("■ 구성 검사: 통과(문제·[정답]·[해설] 흐름 확인됨).");
+  } else if (result.ok) {
+    lines.push("■ 구성 검사: 오류 없음 — 경고만 확인하세요.");
+  }
+  return lines.join("\n");
+}

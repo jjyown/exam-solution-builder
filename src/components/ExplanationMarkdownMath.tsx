@@ -1,11 +1,12 @@
 "use client";
 
+import { useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
 
-import { splitMethodBlocks } from "@/lib/explanationBlocks";
+import { splitLabeledQuestionMarkdownChunks, splitMethodBlocks } from "@/lib/explanationBlocks";
 
 const markdownShell =
   "max-w-none text-[15px] leading-7 text-slate-800 [&_p]:my-2 [&_ul]:my-2 [&_ol]:my-2 [&_li]:my-0.5 [&_.katex]:text-[1em] [&_.katex-display]:my-3";
@@ -15,8 +16,9 @@ type Props = {
   className?: string;
 };
 
-/** react-markdown + remark-math + rehype-katex: $...$ / $$...$$ LaTeX 렌더링 */
-export function ExplanationMarkdownMath({ source, className = "" }: Props) {
+const katexOptions = { strict: false, throwOnError: false, errorColor: "#b91c1c" } as const;
+
+function MarkdownBlock({ source, className = "" }: Props) {
   if (!source.trim()) {
     return <p className="text-sm text-slate-500">(내용 없음)</p>;
   }
@@ -24,9 +26,8 @@ export function ExplanationMarkdownMath({ source, className = "" }: Props) {
     <div className={`${markdownShell} ${className}`.trim()}>
       <ReactMarkdown
         remarkPlugins={[remarkMath]}
-        rehypePlugins={[[rehypeKatex, { strict: false, throwOnError: false, errorColor: "#b91c1c" }]]}
+        rehypePlugins={[[rehypeKatex, katexOptions]]}
         components={{
-          // 인라인 코드가 $와 충돌하지 않게
           code: ({ className: codeClass, children, ...props }) => {
             const isBlock = String(codeClass ?? "").includes("language-");
             if (isBlock) {
@@ -46,6 +47,80 @@ export function ExplanationMarkdownMath({ source, className = "" }: Props) {
       >
         {source}
       </ReactMarkdown>
+    </div>
+  );
+}
+
+/** 첫 두 구간은 바로 렌더(인트로+첫 문항 등), 나머지는 스크롤 근처에서 마운트해 메인 스레드 피크를 줄인다. */
+function LazyLabeledChunk({
+  chunk,
+  className,
+  index,
+}: {
+  chunk: string;
+  className: string;
+  index: number;
+}) {
+  const eager = index < 2;
+  const holderRef = useRef<HTMLDivElement>(null);
+  const [show, setShow] = useState(eager);
+
+  useEffect(() => {
+    if (eager || show) return;
+    const el = holderRef.current;
+    if (!el) return;
+    const obs = new IntersectionObserver(
+      (entries) => {
+        for (const e of entries) {
+          if (e.isIntersecting) {
+            setShow(true);
+            obs.disconnect();
+            break;
+          }
+        }
+      },
+      { root: null, rootMargin: "280px 0px 120px 0px", threshold: 0 },
+    );
+    obs.observe(el);
+    return () => obs.disconnect();
+  }, [eager, show]);
+
+  return (
+    <div ref={holderRef} className="min-h-[48px] scroll-mt-2 [&:not(:last-child)]:mb-5">
+      {show ? (
+        <MarkdownBlock source={chunk} className={className} />
+      ) : (
+        <div className="rounded border border-dashed border-slate-200/90 bg-slate-50 py-8 text-center text-[11px] leading-snug text-slate-500">
+          아래로 스크롤하면 이 문항 구간의 수식이 렌더링됩니다.
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** react-markdown + remark-math + rehype-katex: $...$ / $$...$$ LaTeX 렌더링 */
+export function ExplanationMarkdownMath({ source, className = "" }: Props) {
+  const chunks = useMemo(() => splitLabeledQuestionMarkdownChunks(source), [source]);
+  if (!source.trim()) {
+    return <p className="text-sm text-slate-500">(내용 없음)</p>;
+  }
+
+  const multiLabeled = chunks.length >= 2;
+
+  if (!multiLabeled) {
+    return <MarkdownBlock source={source} className={className} />;
+  }
+
+  return (
+    <div className={`${className}`.trim()}>
+      {chunks.map((chunk, idx) => (
+        <LazyLabeledChunk
+          key={`labeled-md-${idx}-${chunk.length}-${chunk.slice(0, 32)}`}
+          chunk={chunk}
+          className={className}
+          index={idx}
+        />
+      ))}
     </div>
   );
 }

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useDeferredValue, useEffect, useMemo, useState } from "react";
 
 import { MethodBlocksMarkdown } from "@/components/ExplanationMarkdownMath";
 
@@ -102,6 +102,9 @@ export function CropExamSolutionsPreviewPanel({ examName }: { examName: string }
     () => (selectedId ? items.find((i) => i.id === selectedId) : undefined),
     [items, selectedId],
   );
+  const deferredSelectedBody = useDeferredValue(selected?.body ?? "");
+  const previewBody =
+    selected?.question_no === "합본" ? deferredSelectedBody : (selected?.body ?? "");
 
   return (
     <div className="sticky top-4 flex max-h-[min(92vh,960px)] flex-col gap-3">
@@ -200,7 +203,7 @@ export function CropExamSolutionsPreviewPanel({ examName }: { examName: string }
                   {selected.status ? ` · ${selected.status}` : ""}
                 </p>
                 <MethodBlocksMarkdown
-                  source={selected.body}
+                  source={previewBody}
                   className="text-[13px] leading-6 [&_.katex]:text-[0.95em]"
                 />
               </>

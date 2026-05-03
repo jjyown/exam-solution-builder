@@ -19,7 +19,8 @@
     "db-push": "tsx scripts/upload-to-supabase.mts",
     "upload-solutions": "tsx scripts/upload-to-supabase.mts",
     "graph:for-md": "tsx scripts/orchestrate-question-graph.mts",
-    "build:md": "tsx scripts/build-markdown-assembly.mts"
+    "build:md": "tsx scripts/build-markdown-assembly.mts",
+    "batch:payloads": "tsx scripts/batch-explanations-from-payloads.mts"
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.1",

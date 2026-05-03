@@ -156,19 +156,30 @@ async function collectDraftFiles(workdir: string): Promise<string[]> {
   return files.map((x) => x.full);
 }
 
-/** 해당 문항 번호의 [문항 …] 헤더 직후에 본문 이미지 한 줄 삽입 */
+/** [문항 n] / [문제 n] / 단독 [문제] 직후에 본문 이미지 한 줄 삽입 */
 function injectMainImage(
   lines: string[],
   questionNum: number,
   mdRelPath: string,
 ): string[] {
   const out = [...lines];
-  const header = new RegExp(`^\\[문항\\s*0*${questionNum}\\s*\\]\\s*$`, "i");
+  const candidates = [
+    new RegExp(`^\\[문항\\s*0*${questionNum}\\s*\\]\\s*$`, "i"),
+    new RegExp(`^\\[문제\\s*0*${questionNum}\\s*\\]\\s*$`, "i"),
+  ];
   for (let i = 0; i < out.length; i += 1) {
-    if (!header.test(out[i].trim())) continue;
+    const row = out[i].trim();
+    if (!candidates.some((re) => re.test(row))) continue;
     const next = out[i + 1]?.trim() ?? "";
     if (next.includes("![문제 원본]")) return out;
     out.splice(i + 1, 0, `![문제 원본](${mdRelPath})`);
+    return out;
+  }
+  if (/^\[문제\]\s*$/i.test((out[0] ?? "").trim())) {
+    const next = out[1]?.trim() ?? "";
+    if (!next.includes("![문제 원본]")) {
+      out.splice(1, 0, `![문제 원본](${mdRelPath})`);
+    }
     return out;
   }
   console.warn(`  [문항 ${questionNum}] 헤더를 찾지 못해 본문 이미지를 넣지 않았습니다.`);

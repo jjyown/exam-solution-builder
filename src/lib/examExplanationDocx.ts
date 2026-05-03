@@ -3,12 +3,18 @@ import {
   Document,
   Packer,
   Paragraph,
+  ParagraphChild,
   TextRun,
   AlignmentType,
   SectionType,
   TabStopType,
 } from "docx";
 import { explanationLineToParagraphChildren } from "@/lib/docxOmmlBuilder";
+import {
+  imageRunFromBuffer,
+  parseMarkdownImageLine,
+  readImageRelativeToBase,
+} from "@/lib/docxMarkdownImage";
 import {
   EXAM_DOCX_BODY_PARAGRAPH_SPACING,
   EXAM_DOCX_BODY_SIZE_HALF_PT,
@@ -17,6 +23,7 @@ import {
 } from "@/lib/examDocxTheme";
 import { explanationLatexToPlain, quickAnswerToPlainLine } from "@/lib/latexToPlainText";
 import { normalizeLatexSourceText } from "@/lib/latexSourceNormalize";
+import { splitLabeledQuestionChunks } from "@/lib/explanationBlocks";
 
 function bodyTextRun(opts: { text: string; bold?: boolean; size?: number }) {
   return new TextRun({
@@ -25,21 +32,6 @@ function bodyTextRun(opts: { text: string; bold?: boolean; size?: number }) {
     size: opts.size ?? EXAM_DOCX_BODY_SIZE_HALF_PT,
     font: EXAM_DOCX_FONT,
   });
-}
-
-function splitLabeledQuestionChunks(raw: string): Array<{ label: string; chunk: string }> {
-  const re = /\[문항\s*(\d+)\]\s*/gi;
-  const matches = [...raw.matchAll(re)];
-  if (matches.length === 0) return [];
-  const out: Array<{ label: string; chunk: string }> = [];
-  for (let i = 0; i < matches.length; i += 1) {
-    const label = matches[i][1] ?? String(i + 1);
-    const start = (matches[i].index ?? 0) + matches[i][0].length;
-    const end = i + 1 < matches.length ? (matches[i + 1].index ?? raw.length) : raw.length;
-    const chunk = raw.slice(start, end).trim();
-    if (chunk) out.push({ label, chunk });
-  }
-  return out;
 }
 
 export function safeExamFileName(value: string) {
@@ -55,17 +47,46 @@ type ExplanationBlock = {
   explanationLinesRaw: string[];
 };
 
-/** `[문제]…[정답]` 선행이 있으면 분리한다. */
+/** 마크다운 이미지 줄(문제 원본·도형) */
+const MD_IMAGE_LINE = /^\s*!\[[^\]]*]\([^)]+\)\s*$/;
+
+/** `[문제]…[정답]` 선행이 있으면 분리한다. `[문항 n]` 직후에 주입된 `![](...)` 줄은 문제 블록 앞에 붙인다. `[문제]`가 없으면 `[정답]` 직전까지를 발문+선지로 본다. */
 function extractLeadingProblemBlock(chunk: string): { problemLinesRaw: string[]; rest: string } {
-  const t = chunk.trim();
-  const m = t.match(/^\[문제\]\s*([\s\S]*?)(?=\n\s*\[정답\]|\[정답\])/i);
-  if (!m) return { problemLinesRaw: [], rest: t };
-  const problemLinesRaw = m[1]
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean);
-  const rest = t.slice((m.index ?? 0) + m[0].length).trim();
-  return { problemLinesRaw, rest };
+  const raw = chunk.trim();
+  const lines = raw.split("\n");
+  let i = 0;
+  const leadingImages: string[] = [];
+  while (i < lines.length && MD_IMAGE_LINE.test(lines[i] ?? "")) {
+    leadingImages.push((lines[i] ?? "").trim());
+    i += 1;
+  }
+  const t = lines.slice(i).join("\n").trim();
+  const m = t.match(/^\[문제(?:\s+\d+)?\]\s*([\s\S]*?)(?=\n\s*\[정답\]|\[정답\])/i);
+  if (m) {
+    const problemLinesRaw = [
+      ...leadingImages,
+      ...m[1]
+        .split("\n")
+        .map((line) => line.trim())
+        .filter(Boolean),
+    ];
+    const rest = t.slice((m.index ?? 0) + m[0].length).trim();
+    return { problemLinesRaw, rest };
+  }
+
+  const splitAtAnswer = t.split(/(?=\n\s*\[정답\])/i);
+  if (splitAtAnswer.length >= 2) {
+    const problemBody = splitAtAnswer[0]?.trim() ?? "";
+    const rest = splitAtAnswer.slice(1).join("").trim();
+    const problemLines = problemBody
+      ? problemBody.split("\n").map((line) => line.trim()).filter(Boolean)
+      : [];
+    return { problemLinesRaw: [...leadingImages, ...problemLines], rest };
+  }
+  if (/^\[정답\]/i.test(t)) {
+    return { problemLinesRaw: leadingImages, rest: t };
+  }
+  return { problemLinesRaw: [...leadingImages, ...t.split("\n").map((l) => l.trim()).filter(Boolean)], rest: "" };
 }
 
 type QuickAnswerKind = "objective" | "short" | "essay";
@@ -82,15 +103,16 @@ function parseExplanationBlocks(explanationBody: string, fallbackQuickAnswer: st
       const { label, chunk } = item;
       const { problemLinesRaw, rest: chunkRest } = extractLeadingProblemBlock(chunk);
       const answerMatch = chunkRest.match(/\[정답\]\s*([^\n\r]*)/i);
-      const answer = answerMatch?.[1]?.trim() || fallbackQuickAnswer || "-";
-      const explanationText = chunkRest
-        .replace(/\[정답\]\s*[^\n\r]*/i, "")
-        .replace(/\[해설\]/gi, "")
-        .trim();
-      const explanationLinesRaw = explanationText
-        .split("\n")
-        .map((line) => line.trim())
-        .filter(Boolean);
+      const answerLineMatch = chunkRest.match(/\[정답\]\s*\n\s*([^\n\r]+)/i);
+      const answer =
+        answerLineMatch?.[1]?.trim() || answerMatch?.[1]?.trim() || fallbackQuickAnswer || "-";
+      const explMatch = chunkRest.match(/\[해설\]\s*([\s\S]*)/i);
+      const explanationLinesRaw = explMatch
+        ? explMatch[1]
+            .split("\n")
+            .map((line) => line.trim())
+            .filter(Boolean)
+        : [];
       const explanationLines = explanationLinesRaw.map((line) => explanationLatexToPlain(line));
       blocks.push({
         questionLabel: label,
@@ -181,10 +203,42 @@ function classifyQuickAnswerKind(answer: string, explanationLines: string[]): Qu
   return "short";
 }
 
-function buildExplanationParagraphs(blocks: ExplanationBlock[]) {
+async function paragraphChildrenForDocxLine(
+  line: string,
+  assetBaseDir: string | undefined,
+): Promise<ParagraphChild[]> {
+  const img = parseMarkdownImageLine(line);
+  if (img && assetBaseDir) {
+    const buf = await readImageRelativeToBase(assetBaseDir, img.src);
+    if (buf) {
+      const run = imageRunFromBuffer(buf, img.alt);
+      if (run) return [run];
+      return [
+        new TextRun({
+          text: `〔DOCX에 넣을 수 없는 이미지 형식〕 ${img.src}`,
+          italics: true,
+          font: EXAM_DOCX_FONT,
+          size: EXAM_DOCX_BODY_SIZE_HALF_PT,
+        }),
+      ];
+    }
+    return [
+      new TextRun({
+        text: `〔그림 파일 없음〕 ${img.src}`,
+        italics: true,
+        font: EXAM_DOCX_FONT,
+        size: EXAM_DOCX_BODY_SIZE_HALF_PT,
+      }),
+    ];
+  }
+  return explanationLineToParagraphChildren(line);
+}
+
+async function buildExplanationParagraphs(blocks: ExplanationBlock[], assetBaseDir?: string) {
   const paragraphs: Paragraph[] = [];
 
-  blocks.forEach((block, idx) => {
+  for (let idx = 0; idx < blocks.length; idx += 1) {
+    const block = blocks[idx]!;
     const answerKind = classifyQuickAnswerKind(block.answer, block.explanationLines);
     const objective = normalizeObjectiveAnswer(block.answer);
     const rawAnswer = block.answer.trim();
@@ -214,14 +268,15 @@ function buildExplanationParagraphs(blocks: ExplanationBlock[]) {
           },
         }),
       );
-      block.problemLinesRaw.forEach((line) => {
+      for (const line of block.problemLinesRaw) {
+        const children = await paragraphChildrenForDocxLine(line, assetBaseDir);
         paragraphs.push(
           new Paragraph({
-            children: explanationLineToParagraphChildren(line),
+            children,
             spacing: { ...EXAM_DOCX_BODY_PARAGRAPH_SPACING, after: 100 },
           }),
         );
-      });
+      }
     }
     paragraphs.push(
       new Paragraph({
@@ -251,17 +306,18 @@ function buildExplanationParagraphs(blocks: ExplanationBlock[]) {
           spacing: { ...EXAM_DOCX_BODY_PARAGRAPH_SPACING, after: 140 },
         }),
       );
-      return;
+      continue;
     }
-    block.explanationLinesRaw.forEach((line) => {
+    for (const line of block.explanationLinesRaw) {
+      const children = await paragraphChildrenForDocxLine(line, assetBaseDir);
       paragraphs.push(
         new Paragraph({
-          children: explanationLineToParagraphChildren(line),
+          children,
           spacing: EXAM_DOCX_BODY_PARAGRAPH_SPACING,
         }),
       );
-    });
-  });
+    }
+  }
 
   return paragraphs;
 }
@@ -270,6 +326,8 @@ export type BuildExamExplanationDocxParams = {
   examName: string;
   explanationBody: string;
   quickAnswer?: string;
+  /** `![](상대경로.png)` 를 DOCX에 삽입할 때 기준 디렉터리(보통 `합본_편집용.md` 가 있는 폴더) */
+  assetBaseDir?: string;
   now?: Date;
 };
 
@@ -287,7 +345,10 @@ export async function buildExamExplanationDocxBuffer(params: BuildExamExplanatio
   const docxFileName = `${baseName}.docx`;
 
   const blocks = parseExplanationBlocks(params.explanationBody, quickAnswer);
-  const explanationParagraphs = buildExplanationParagraphs(blocks);
+  const explanationParagraphs = await buildExplanationParagraphs(
+    blocks,
+    params.assetBaseDir?.trim() || undefined,
+  );
   const headerTitle = `${path.parse(examName).name}(해설)`;
   const docDate = `${now.getFullYear()}.${String(now.getMonth() + 1).padStart(2, "0")}.${String(
     now.getDate(),
@@ -328,7 +389,7 @@ export async function buildExamExplanationDocxBuffer(params: BuildExamExplanatio
             alignment: AlignmentType.CENTER,
             children: [
               new TextRun({
-                text: "※ 본문(2단): 문항별 [문제]·[빠른 정답]·[해설] 순 · 가운데 구분선 · 수식은 Word 수식(OMML). 문제 그림은 시험지 크롭 이미지를 붙여 사용.",
+                text: "※ 본문(2단): 문항별 [문제]·[빠른 정답]·[해설] 순 · 가운데 구분선 · 수식은 Word 수식(OMML). 마크다운 그림 경로는 본문 md와 같은 폴더를 기준으로 넣으면 DOCX에 삽입됩니다.",
                 italics: true,
                 size: EXAM_DOCX_BODY_SIZE_HALF_PT,
                 font: EXAM_DOCX_FONT,

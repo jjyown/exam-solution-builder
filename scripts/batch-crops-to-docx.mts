@@ -577,7 +577,7 @@ async function main() {
           "1) 단계별_진행상황.txt 에서 1차·자동검사·2차 요약을 확인한 뒤, Cursor에서 수정 요청하세요.",
           "2) 문항##_API초안.md 또는 합본_편집용.md 를 열고 수식·표현을 손짜세요.",
           "3) 확정한 전체 본문을 합본_편집용.md 에 반영 ([문항 n] 헤더 유지).",
-          "4) npm run write-final-docx -- --exam-name \"시험명\" --quick-answer \"...\" --body-file \"./해설 작업중/<이폴더>/합본_편집용.md\"",
+          "4) npm run write-final-docx -- --workdir \"./해설 작업중/<이폴더>\"   (또는 --latest)",
           "",
           "※ 초안은 /api/generate-explanation 과 동일 백엔드일 수 있습니다. 최종 품질 책임은 중재 후 단계에 있습니다.",
         ].join("\n"),
@@ -605,6 +605,7 @@ async function main() {
         examName: bundleExamName,
         explanationBody: merged,
         quickAnswer,
+        assetBaseDir: dir,
       });
       const docxPath = path.join(outDir, docxFileName);
       await fs.writeFile(docxPath, buffer);
@@ -668,6 +669,7 @@ async function main() {
         examName,
         explanationBody,
         quickAnswer,
+        assetBaseDir: dir,
       });
       const docxPath = path.join(outDir, docxFileName);
       await fs.writeFile(docxPath, buffer);

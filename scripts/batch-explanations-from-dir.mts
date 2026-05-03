@@ -158,6 +158,7 @@ async function main() {
         examName,
         explanationBody,
         quickAnswer,
+        assetBaseDir: path.dirname(filePath),
       });
       const docxPath = path.join(outDir, docxFileName);
       await fs.writeFile(docxPath, buffer);
