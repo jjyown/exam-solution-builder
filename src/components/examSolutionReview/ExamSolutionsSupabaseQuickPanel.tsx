@@ -28,9 +28,15 @@ export function ExamSolutionsSupabaseQuickPanel({ examName }: { examName: string
         ? `?examName=${encodeURIComponent(examName.trim())}`
         : "";
       const res = await fetch(`/api/exam-solutions${q}`);
-      const data = (await res.json()) as { items?: Item[]; error?: string };
+      const data = (await res.json()) as { items?: Item[]; error?: string; configured?: boolean };
       if (!res.ok) {
-        throw new Error(data.error || "목록을 불러오지 못했습니다.");
+        const base = data.error || "목록을 불러오지 못했습니다.";
+        if (res.status === 503 && data.configured === false) {
+          throw new Error(
+            `${base} — 서버에 NEXT_PUBLIC_SUPABASE_URL(또는 SUPABASE_URL)과 SUPABASE_SERVICE_ROLE_KEY가 없습니다.`,
+          );
+        }
+        throw new Error(base);
       }
       setItems(data.items ?? []);
     } catch (e) {
@@ -96,7 +102,22 @@ export function ExamSolutionsSupabaseQuickPanel({ examName }: { examName: string
         </button>
       </div>
       {err ? (
-        <p className="rounded bg-rose-100 px-2 py-1 text-xs text-rose-800">{err}</p>
+        <div className="rounded bg-rose-100 px-2 py-2 text-xs text-rose-900">
+          <p className="font-medium">{err}</p>
+          {err.includes("설정") || err.includes("SERVICE_ROLE") ? (
+            <ul className="mt-2 list-disc space-y-1 pl-4 text-[11px] leading-snug text-rose-950">
+              <li>
+                <strong>로컬</strong>: `highroad-math-solution/.env.local`에 두 변수 저장 후{" "}
+                <code className="rounded bg-white/80 px-0.5">npm run dev</code> 재시작.
+              </li>
+              <li>
+                <strong>Railway·배포</strong>: 대시보드 Variables에 동일 이름으로 값 추가 →{" "}
+                <strong>Redeploy</strong>(빌드 시점에 넣는 `NEXT_PUBLIC_*`는 변수 추가 후 재배포 필요).
+              </li>
+              <li>키는 Supabase Settings → API의 <strong>service_role</strong>(anon 아님).</li>
+            </ul>
+          ) : null}
+        </div>
       ) : null}
       <div className="max-h-[min(70vh,560px)] overflow-y-auto rounded-md border border-slate-200 bg-white">
         {loading ? (

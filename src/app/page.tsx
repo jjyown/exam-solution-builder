@@ -22,6 +22,7 @@ import { buildSelectedExplanationBody, splitMethodBlocks } from "@/lib/explanati
 import { CROPPED_EXAMS_DIR_NAME, FINAL_EXPLANATION_DIR_NAME } from "@/lib/outputPaths";
 import { isCropOnlyUi } from "@/lib/uiMode";
 import { ExamSolutionReviewProvider } from "@/components/examSolutionReview/ExamSolutionReviewContext";
+import { CropExamSolutionsPreviewPanel } from "@/components/examSolutionReview/CropExamSolutionsPreviewPanel";
 import { ExamSolutionsSupabaseQuickPanel } from "@/components/examSolutionReview/ExamSolutionsSupabaseQuickPanel";
 import {
   ExamSolutionReviewDetailBlock,
@@ -4271,24 +4272,8 @@ export default function Home() {
         </section>
 
         <section className="rounded-xl border border-slate-300 bg-[#fdfcf8] p-4 shadow-sm md:p-6">
-          {isCropOnlyUi && currentStep === 2 && sourceImage ? (
-            <div className="sticky top-4 space-y-3">
-              <p className="text-sm font-semibold text-slate-800">전체 페이지 보기</p>
-              <p className="text-xs text-slate-600">
-                좌측 패널에서 박스 크롭을 지정합니다. 여기서는 레이아웃·작은 글씨 확인용입니다.
-              </p>
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img
-                src={sourceImage}
-                alt="현재 시험지 페이지"
-                className="max-h-[min(85vh,900px)] w-full rounded-md border border-slate-200 bg-white object-contain shadow-sm"
-              />
-            </div>
-          ) : isCropOnlyUi && currentStep === 1 ? (
-            <div className="rounded-md border border-dashed border-slate-300 bg-white p-8 text-center text-slate-500">
-              <p className="text-sm">시험지를 선택한 뒤 「영역 지정」으로 넘어가면</p>
-              <p className="mt-2 text-xs">이쪽에 페이지 전체가 크게 표시되어 크롭 작업을 보조합니다.</p>
-            </div>
+          {isCropOnlyUi ? (
+            <CropExamSolutionsPreviewPanel examName={selectedExam ?? ""} />
           ) : !isCropOnlyUi && currentStep !== 3 ? (
             <ExamSolutionsSupabaseQuickPanel examName={selectedExam ?? ""} />
           ) : !isCropOnlyUi && currentStep === 3 ? (

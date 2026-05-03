@@ -84,9 +84,19 @@ export function ExamSolutionReviewProvider({
         ? `?examName=${encodeURIComponent(examNameFilter.trim())}`
         : "";
       const res = await fetch(`/api/exam-solutions${q}`);
-      const data = (await res.json()) as { items?: ExamSolutionListItem[]; error?: string };
+      const data = (await res.json()) as {
+        items?: ExamSolutionListItem[];
+        error?: string;
+        configured?: boolean;
+      };
       if (!res.ok) {
-        throw new Error(data.error || "목록을 불러오지 못했습니다.");
+        const base = data.error || "목록을 불러오지 못했습니다.";
+        if (res.status === 503 && data.configured === false) {
+          throw new Error(
+            `${base} 배포 중이면 Railway 등에 NEXT_PUBLIC_SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY 를 넣고 재배포하세요.`,
+          );
+        }
+        throw new Error(base);
       }
       setItems(data.items ?? []);
     } catch (e) {
