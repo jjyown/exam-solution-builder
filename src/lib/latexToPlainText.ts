@@ -1,4 +1,5 @@
 import { loosenExplanationParagraphs } from "./explanationParagraphBreaks";
+import { normalizeLatexSourceText } from "./latexSourceNormalize";
 
 /**
  * KaTeX/LaTeX 스타일 수식을 DOCX·검증용 한 줄 평문으로 변환한다.
@@ -40,7 +41,7 @@ function normalizeIntegerScripts(text: string): string {
 }
 
 export function simplifyLatexContent(value: string): string {
-  return value
+  return normalizeLatexSourceText(value)
     .replace(/\$\$?/g, "")
     .replace(/\\left|\\right/g, "")
     .replace(/\\binom\{([^}]+)\}\{([^}]+)\}/g, "$1C$2")
@@ -76,7 +77,7 @@ export function simplifyLatexContent(value: string): string {
 
 /** $...$ / $$...$$ 구간을 먼저 풀어쓴 뒤, 남은 LaTeX 명령을 정리한다. */
 export function explanationLatexToPlain(value: string): string {
-  let s = value.replace(/\r\n/g, "\n");
+  let s = normalizeLatexSourceText(value).replace(/\r\n/g, "\n");
   s = s.replace(/\$\$([\s\S]*?)\$\$/g, (_, inner) => simplifyLatexContent(inner));
   s = s.replace(/\$([^$\n]+)\$/g, (_, inner) => simplifyLatexContent(inner));
   s = simplifyLatexContent(s);

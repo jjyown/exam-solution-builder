@@ -10,13 +10,16 @@
     "write-final-docx": "tsx write-final-docx.mts",
     "batch:from-dir": "tsx scripts/batch-explanations-from-dir.mts",
     "batch:crops-to-docx": "tsx scripts/batch-crops-to-docx.mts",
+    "batch:crops-drafts": "tsx scripts/batch-crops-to-docx.mts --drafts-only",
     "mcp:gemini-explanation": "tsx mcp/gemini-explanation.mts",
     "check-api": "tsx scripts/check-api-connection.mts",
     "mcp:smoke": "node scripts/mcp-stdio-smoke.mjs",
-    "mcp:test-llm": "node scripts/mcp-llm-smoke.mjs"
+    "mcp:test-llm": "node scripts/mcp-llm-smoke.mjs",
+    "db-push": "tsx scripts/upload-to-supabase.mts"
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
+    "@supabase/supabase-js": "^2.105.1",
     "docx": "^9.6.1",
     "googleapis": "^171.4.0",
     "html2canvas": "^1.4.1",
@@ -28,7 +31,10 @@
     "react": "19.2.4",
     "react-dom": "19.2.4",
     "react-image-crop": "^11.0.10",
-    "react-katex": "^3.1.0"
+    "react-katex": "^3.1.0",
+    "react-markdown": "^10.1.0",
+    "rehype-katex": "^7.0.1",
+    "remark-math": "^6.0.0"
   },
   "devDependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
@@ -37,6 +43,7 @@
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "@types/react-katex": "^3.0.4",
+    "dotenv": "^17.4.2",
     "eslint": "^9",
     "eslint-config-next": "16.2.4",
     "tailwindcss": "^4",

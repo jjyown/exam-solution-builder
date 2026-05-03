@@ -43,6 +43,10 @@ yarn-error.log*
 *.pdf
 *.docx
 *.txt
+# 참고 족보를 `참고용 문제/`에 두고 깃허브에 같이 올릴 때만 아래 예외로 추적(.txt/.pdf 전역 무시 해제)
+!참고용 문제/
+!참고용 문제/**/*.txt
+!참고용 문제/**/*.pdf
 
 # local helper scripts (not needed for hosting)
 *.bat

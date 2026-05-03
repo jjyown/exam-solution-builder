@@ -3,7 +3,7 @@
  * Cursor가 MCP로 받은 해설을 정리한 뒤 이 스크립트로 내보낼 때 사용합니다.
  *
  * 사용 예:
- *   npm run write-final-docx -- --exam-name "2026 모의고사" --quick-answer "1~5 전부 ③" --body-file ./해설.txt
+ *   npm run write-final-docx -- --exam-name "2026 모의고사" --quick-answer "1~5 전부 ③" --body-file ./합본_편집용.md
  *
  * `buildExamExplanationDocxBuffer` 는 동적 import 로 불러옵니다(tsx 엔트리 번들 시 named export 깨짐 방지).
  */

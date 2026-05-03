@@ -2,6 +2,8 @@
 
 로컬 Next.js 앱으로 **Gemini / OpenAI** 해설을 만들고 **`해설지 최종본` 폴더에 DOCX**를 저장합니다.
 
+**해설집 품질을 최우선으로 할 때:** 먼저 [docs/BEST_QUALITY_WORKFLOW.md](docs/BEST_QUALITY_WORKFLOW.md)만 읽고 동선을 잡는 것을 권장합니다. (자동화·배치는 그 다음입니다.)
+
 ## 전체 동선(권장)
 
 1. **Railway** — PDF에서 영역 지정·**크롭** → 묶음 생성 (`NEXT_PUBLIC_UI_MODE=crop` 이면 **크롭 전용 UI**)  

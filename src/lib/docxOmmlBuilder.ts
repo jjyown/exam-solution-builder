@@ -4,20 +4,25 @@ import {
   MathCurlyBrackets,
   MathFraction,
   MathFunction,
+  MathIntegral,
+  MathPreSubSuperScript,
   MathRadical,
   MathRoundBrackets,
   MathRun,
   MathSubScript,
+  MathSum,
   MathSuperScript,
   ParagraphChild,
   TextRun,
 } from "docx";
 import { EXAM_DOCX_BODY_SIZE_HALF_PT, EXAM_DOCX_FONT } from "./examDocxTheme";
 import { explanationLatexToPlain } from "./latexToPlainText";
+import { normalizeLatexSourceText } from "./latexSourceNormalize";
 
 /** `\left`/`\right` 등은 단순 괄호로만 취급 */
 function preprocessInlineMath(inner: string): string {
   return inner
+    .replace(/\\dfrac\b|\\tfrac\b/g, "\\frac")
     .replace(/\\left\s*\\\{/g, "{")
     .replace(/\\right\s*\\\}/g, "}")
     .replace(/\\left\s*\(/g, "(")
@@ -59,6 +64,75 @@ function takeParenContent(s: string): [string, string] | null {
   return null;
 }
 
+/** `_` 또는 `^` 직후 `{…}` / 한 글자 스크립트 본문만 추출한다 */
+function extractScriptAfterMarker(
+  s: string,
+  marker: "^" | "_",
+): [MathComponent[], string] | null {
+  if (!s.startsWith(marker)) return null;
+  const r = s.slice(1).trimStart();
+  if (r.startsWith("{")) {
+    const tb = takeBalancedBrace(r);
+    if (!tb) return null;
+    return [parseConcat(tb[0]), tb[1]];
+  }
+  if (r.length) {
+    return [[new MathRun(r[0]!)], r.slice(1)];
+  }
+  return null;
+}
+
+/**
+ * `\\sum` / `\\int` 뒤에 오는 (선택) 밑·윗첨자를 읽고, 남은 문자열을 본문(적분·급수 식)으로 쓴다.
+ */
+function parseNaryOperator(
+  kind: "sum" | "int",
+  afterCmd: string,
+): [MathComponent, string] {
+  let rest = afterCmd.trimStart();
+  let sub: MathComponent[] | undefined;
+  let sup: MathComponent[] | undefined;
+  for (let pass = 0; pass < 2; pass += 1) {
+    rest = rest.trimStart();
+    if (!sub) {
+      const e = extractScriptAfterMarker(rest, "_");
+      if (e) {
+        [sub, rest] = e;
+        rest = rest.trimStart();
+      }
+    }
+    if (!sup) {
+      const e2 = extractScriptAfterMarker(rest, "^");
+      if (e2) {
+        [sup, rest] = e2;
+        rest = rest.trimStart();
+      }
+    }
+  }
+  const children = parseConcat(rest.trimStart());
+  if (kind === "sum") {
+    return [new MathSum({ children, subScript: sub, superScript: sup }), ""];
+  }
+  return [new MathIntegral({ children, subScript: sub, superScript: sup }), ""];
+}
+
+function parseBinom(afterCmd: string): [MathComponent, string] | null {
+  const r = afterCmd.trimStart();
+  const a = takeBalancedBrace(r);
+  if (!a) return null;
+  const b = takeBalancedBrace(a[1].trimStart());
+  if (!b) return null;
+  const top = [new MathRoundBrackets({ children: parseConcat(a[0].trim()) })];
+  const bot = [new MathRoundBrackets({ children: parseConcat(b[0].trim()) })];
+  return [
+    new MathFraction({
+      numerator: top,
+      denominator: bot,
+    }),
+    b[1],
+  ];
+}
+
 const SYMBOL_CMD: Record<string, string> = {
   cdot: "\u22C5",
   times: "×",
@@ -89,6 +163,12 @@ const SYMBOL_CMD: Record<string, string> = {
   ne: "≠",
   approx: "≈",
   equiv: "≡",
+  to: "→",
+  rightarrow: "→",
+  Rightarrow: "⇒",
+  Leftarrow: "⇐",
+  leftrightarrow: "↔",
+  mapsto: "↦",
   parallel: "∥",
   perp: "⊥",
   angle: "∠",
@@ -100,9 +180,7 @@ const SYMBOL_CMD: Record<string, string> = {
   mid: "|",
   nabla: "∇",
   partial: "∂",
-  sum: "∑",
-  prod: "∏",
-  int: "∫",
+  /** ∑ ∫ ∏ 는 OMML n·각 요소로 처리(SYMBOL_CMD 에 두면 위·아래 첨자 결합이 깨짐) */
   otimes: "⊗",
   oplus: "⊕",
 };
@@ -142,7 +220,7 @@ function wrapCurlyGroup(children: MathComponent[]): MathComponent {
 }
 
 function parseFrac(afterCmd: string): [MathFraction, string] | null {
-  let r = afterCmd.trimStart();
+  const r = afterCmd.trimStart();
   const num = takeBalancedBrace(r);
   if (!num) return null;
   const den = takeBalancedBrace(num[1].trimStart());
@@ -195,15 +273,31 @@ function parseBackslashCommand(s: string): [MathComponent, string] | null {
     return null;
   }
   const cmd = m[1];
-  let afterCmd = s.slice(m[0].length);
+  const afterCmd = s.slice(m[0].length);
 
-  if (cmd === "frac") {
+  if (cmd === "frac" || cmd === "dfrac" || cmd === "tfrac") {
     const f = parseFrac(afterCmd);
     return f;
+  }
+  if (cmd === "binom") {
+    const b = parseBinom(afterCmd);
+    return b;
   }
   if (cmd === "sqrt") {
     const q = parseSqrt(afterCmd);
     return q;
+  }
+  if (cmd === "sum") {
+    return parseNaryOperator("sum", afterCmd);
+  }
+  if (cmd === "int") {
+    return parseNaryOperator("int", afterCmd);
+  }
+  if (cmd === "oint") {
+    return [new MathRun("∮"), afterCmd];
+  }
+  if (cmd === "prod") {
+    return [new MathRun("∏"), afterCmd];
   }
   if (cmd === "text" || cmd === "mathrm" || cmd === "textrm") {
     const t = parseTextArg(afterCmd);
@@ -269,54 +363,37 @@ function parseBase(s: string): [MathComponent, string] | null {
   return [new MathRun(t.slice(0, i)), t.slice(i)];
 }
 
-function parseSuperscript(base: MathComponent, s: string): [MathComponent, string] | null {
-  if (!s.startsWith("^")) return null;
-  let r = s.slice(1).trimStart();
-  let script: MathComponent[];
-  if (r.startsWith("{")) {
-    const tb = takeBalancedBrace(r);
-    if (!tb) return null;
-    script = parseConcat(tb[0]);
-    r = tb[1];
-  } else if (r.length) {
-    script = [new MathRun(r[0]!)];
-    r = r.slice(1);
-  } else return null;
-  return [new MathSuperScript({ children: [base], superScript: script }), r];
-}
-
-function parseSubscript(base: MathComponent, s: string): [MathComponent, string] | null {
-  if (!s.startsWith("_")) return null;
-  let r = s.slice(1).trimStart();
-  let script: MathComponent[];
-  if (r.startsWith("{")) {
-    const tb = takeBalancedBrace(r);
-    if (!tb) return null;
-    script = parseConcat(tb[0]);
-    r = tb[1];
-  } else if (r.length) {
-    script = [new MathRun(r[0]!)];
-    r = r.slice(1);
-  } else return null;
-  return [new MathSubScript({ children: [base], subScript: script }), r];
-}
-
+/**
+ * 밑·윗첨자를 한 턴에 읽는다(위를 먼저 붙이면 `\\prod_{a}^{b}` 가 잘못 겹쳐지는 docx-js OMML 이슈 방지).
+ * `^` / `_` 가 모두 있으면 `MathPreSubSuperScript` 를 쓴다.
+ */
 function applyScripts(base: MathComponent, s: string): [MathComponent, string] {
-  let cur = base;
-  let r = s;
-  for (;;) {
+  let r = s.trimStart();
+  let sub: MathComponent[] | undefined;
+  let sup: MathComponent[] | undefined;
+  for (let pass = 0; pass < 2; pass += 1) {
     r = r.trimStart();
-    const sup = parseSuperscript(cur, r);
-    if (sup) {
-      [cur, r] = sup;
-      continue;
+    if (!sub) {
+      const e = extractScriptAfterMarker(r, "_");
+      if (e) {
+        [sub, r] = e;
+      }
     }
-    const sub = parseSubscript(cur, r);
-    if (sub) {
-      [cur, r] = sub;
-      continue;
+    r = r.trimStart();
+    if (!sup) {
+      const e2 = extractScriptAfterMarker(r, "^");
+      if (e2) {
+        [sup, r] = e2;
+      }
     }
-    break;
+  }
+  let cur = base;
+  if (sub && sup) {
+    cur = new MathPreSubSuperScript({ children: [base], subScript: sub, superScript: sup });
+  } else if (sub) {
+    cur = new MathSubScript({ children: [base], subScript: sub });
+  } else if (sup) {
+    cur = new MathSuperScript({ children: [base], superScript: sup });
   }
   return [cur, r];
 }
@@ -381,7 +458,7 @@ export function normalizeDisplayMathDelimitersForDocx(line: string): string {
 }
 
 function lineLooksLikeBareLatexCommand(line: string): boolean {
-  return /\\(?:frac|sqrt|sum|int|cdot|times|leq|geq|neq|approx|equiv|pi|sin|cos|tan|log|ln|alpha|beta|gamma|theta|infty|partial|lim|to|Rightarrow|Leftarrow|ldots|cdots|vec|overline|underline|text|binom|left|right|bigl|bigr|Bigl|Bigr)\b/i.test(
+  return /\\(?:frac|dfrac|tfrac|sqrt|binom|sum|prod|int|oint|cdot|times|leq|geq|neq|approx|equiv|pi|sin|cos|tan|log|ln|alpha|beta|gamma|theta|infty|partial|lim|to|rightarrow|Rightarrow|Leftarrow|ldots|cdots|vec|overline|underline|text|left|right|bigl|bigr|Bigl|Bigr|begin|end)\b/i.test(
     line,
   );
 }
@@ -422,7 +499,7 @@ function segmentLineByDollars(line: string): LineSeg[] {
  * `$...$` / `$$...$$` 는 OMML(Math), 그 외는 본문 텍스트(수식 없는 줄은 평문화).
  */
 export function explanationLineToParagraphChildren(line: string): ParagraphChild[] {
-  const normalizedLine = normalizeDisplayMathDelimitersForDocx(line);
+  const normalizedLine = normalizeDisplayMathDelimitersForDocx(normalizeLatexSourceText(line));
   const segs = segmentLineByDollars(normalizedLine);
   const hasMath = segs.some((s) => s.kind === "math" && s.value.trim().length > 0);
   if (!hasMath) {
@@ -458,9 +535,17 @@ export function explanationLineToParagraphChildren(line: string): ParagraphChild
       children.push(mathZoneToParagraphChild(seg.value));
     }
   }
-  if (children.length === 0)
+  if (children.length === 0) {
+    const plain =
+      explanationLatexToPlain(normalizedLine).trim() ||
+      "〔이 줄은 수식 변환에 실패했습니다. 원본 텍스트 또는 에디터에서 확인하세요.〕";
     children.push(
-      new TextRun({ text: "", font: EXAM_DOCX_FONT, size: EXAM_DOCX_BODY_SIZE_HALF_PT }),
+      new TextRun({
+        text: plain,
+        font: EXAM_DOCX_FONT,
+        size: EXAM_DOCX_BODY_SIZE_HALF_PT,
+      }),
     );
+  }
   return children;
 }

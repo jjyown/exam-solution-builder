@@ -1,15 +1,19 @@
 import { LineRuleType } from "docx";
 
 /**
- * 수학비서 HML 참고: `Downloads/[TEST] TEST 2.hml`
- * - 본문: CharShape Id=0, Height=1150(HWP 단위 → 약 11.5pt), Face Hangul Id=0 → **한양신명조**
- * - 단락: ParaShape Id=1, LineSpacing=165%, LineSpacingType=Percent
- * 문제 안 그림은 크롭 이미지로 별도 처리(본 DOCX는 텍스트·수식 위주).
+ * 시험지 HML `FACENAMELIST`와 동일한 기본 글꼴 (예: `[TEST] TEST1.hml` → FONT Id=0 **한양신명조**).
+ * CharShape Id=0 Height≈1150(HWP 단위 → 약 11.5pt), ParaShape 줄간격 165%는 아래 상수와 대응.
+ * OMML 수식 기호는 Word가 보통 Cambria Math로 그리므로, 한글 본문·라틴 문자만 여기서 통일한다.
  */
+export const EXAM_DOCX_FACE_PRIMARY = "한양신명조";
+
+/** OOXML `w:rFonts`: ascii/hAnsi/cs/eastAsia + hint로 한글 문서에서 글꼴 치환을 줄인다. */
 export const EXAM_DOCX_FONT = {
-  ascii: "한양신명조",
-  eastAsia: "한양신명조",
-  hAnsi: "한양신명조",
+  ascii: EXAM_DOCX_FACE_PRIMARY,
+  eastAsia: EXAM_DOCX_FACE_PRIMARY,
+  hAnsi: EXAM_DOCX_FACE_PRIMARY,
+  cs: EXAM_DOCX_FACE_PRIMARY,
+  hint: "eastAsia",
 } as const;
 
 /** half-points (docx `size`): 11.5pt */

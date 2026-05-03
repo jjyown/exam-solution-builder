@@ -7,15 +7,31 @@ import { GoogleGenerativeAI } from "@google/generative-ai";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-
-const DEFAULT_GEMINI_MODELS = ["gemini-2.5-flash-lite", "gemini-2.0-flash-lite"] as const;
+/** `src/lib/geminiDefaultModels.ts` 와 동일한 값. tsx MCP 엔트리 번들 시 `../src/lib/...` import 가 실패하므로 여기서 복제. */
+const DEFAULT_GEMINI_COST_MODELS: readonly string[] = [
+  "gemini-2.5-flash-lite",
+  "gemini-2.5-flash",
+];
 
 type OpenAiChatResponse = {
   choices?: Array<{ message?: { content?: string | null } }>;
   error?: { message?: string };
 };
 
-async function generateWithGemini(prompt: string, modelOverride?: string): Promise<string> {
+/** data:image/png;base64,... 또는 순수 base64 */
+function normalizeImageBase64(raw: string): string {
+  const t = raw.trim();
+  const m = t.match(/^data:[^;]+;base64,(.+)$/i);
+  return (m?.[1] ?? t).replace(/\s/g, "");
+}
+
+type VisionPart = { base64: string; mimeType: string };
+
+async function generateWithGemini(
+  prompt: string,
+  modelOverride: string | undefined,
+  image: VisionPart | undefined,
+): Promise<string> {
   const key = process.env.GEMINI_API_KEY?.trim();
   if (!key) {
     throw new Error(
@@ -26,23 +42,45 @@ async function generateWithGemini(prompt: string, modelOverride?: string): Promi
   const genAI = new GoogleGenerativeAI(key);
   const candidates = modelOverride?.trim()
     ? [modelOverride.trim()]
-    : [...DEFAULT_GEMINI_MODELS];
+    : [...DEFAULT_GEMINI_COST_MODELS];
 
+  const parts: unknown[] = image
+    ? [
+        prompt,
+        {
+          inlineData: {
+            mimeType: image.mimeType || "image/png",
+            data: image.base64,
+          },
+        },
+      ]
+    : [prompt];
+
+  const failures: string[] = [];
   let lastErr: Error | null = null;
   for (const model of candidates) {
     try {
       const m = genAI.getGenerativeModel({ model });
-      const res = await m.generateContent(prompt);
+      const res = await m.generateContent(parts as never);
       const text = res.response.text();
       if (text?.trim()) return text.trim();
+      failures.push(`${model}: 빈 응답`);
     } catch (e) {
       lastErr = e instanceof Error ? e : new Error(String(e));
+      failures.push(`${model}: ${lastErr.message.slice(0, 240)}`);
     }
   }
-  throw lastErr ?? new Error("Gemini 응답이 비었습니다.");
+  const summary = failures.length ? `\n시도 내역:\n${failures.join("\n")}` : "";
+  throw new Error(
+    (lastErr?.message ?? "Gemini 응답이 비었습니다.") + summary,
+  );
 }
 
-async function generateWithOpenAI(task: string, modelOverride?: string): Promise<string> {
+async function generateWithOpenAI(
+  task: string,
+  modelOverride: string | undefined,
+  image: VisionPart | undefined,
+): Promise<string> {
   const key = process.env.OPENAI_API_KEY?.trim();
   if (!key) {
     throw new Error(
@@ -54,6 +92,18 @@ async function generateWithOpenAI(task: string, modelOverride?: string): Promise
     process.env.OPENAI_MODEL_GENERATE_FALLBACK?.trim() ||
     "gpt-4o-mini";
 
+  const userContent = image
+    ? [
+        { type: "text" as const, text: task },
+        {
+          type: "image_url" as const,
+          image_url: {
+            url: `data:${image.mimeType || "image/png"};base64,${image.base64}`,
+          },
+        },
+      ]
+    : task;
+
   const res = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
@@ -62,7 +112,7 @@ async function generateWithOpenAI(task: string, modelOverride?: string): Promise
     },
     body: JSON.stringify({
       model,
-      messages: [{ role: "user", content: task }],
+      messages: [{ role: "user", content: userContent }],
       temperature: 0.35,
     }),
   });
@@ -86,27 +136,55 @@ async function generateWithOpenAI(task: string, modelOverride?: string): Promise
 }
 
 const server = new McpServer(
-  { name: "highroad-gemini-explanation", version: "1.1.0" },
+  { name: "highroad-gemini-explanation", version: "1.4.0" },
   {
     instructions:
-      "하이로드 수학 시험 해설 초안 생성(Gemini·OpenAI). 출력은 DOCX 빌더와 맞추려면 [문항 n], [정답], [해설] 블록 형식을 task에 요청하세요. 각 도구에 맞는 API 키가 MCP 환경에 있어야 합니다.",
+      "하이로드 수학 시험 해설 초안(Gemini·OpenAI). 이미지는 imageBase64+imageMimeType(순수 Base64 또는 data URL). 출력: [문항 n], [정답], [해설]. 객관식(①~⑤ 보기): [정답]은 1~5 한 자리만(계산 숫자 넣지 말 것). DOCX는 프로젝트 write-final-docx /api/generate-explanation과 동일 규칙.",
   },
 );
+
+const visionFields = {
+  imageBase64: z
+    .string()
+    .optional()
+    .describe(
+      "선택. 크롭 시험지 이미지 — base64 순수 문자열 또는 data:image/png;base64,... 형식. 있으면 Gemini 비전으로 해당 이미지의 문항을 풀이합니다.",
+    ),
+  imageMimeType: z
+    .string()
+    .optional()
+    .describe("imageBase64 사용 시 MIME (예 image/png, image/jpeg). 생략 시 image/png"),
+};
 
 server.registerTool(
   "generate_math_explanation",
   {
     description:
-      "한국 고등 수학·미적분 등 시험 문항용 해설 텍스트를 Gemini로 생성합니다. 반환값은 원문 그대로 두고, Cursor가 형식·오타를 다듬은 뒤 로컬에 저장합니다.",
+      "한국 고등 수학 해설을 Gemini로 생성합니다. imageBase64를 주면 비전(크롭 이미지)으로 문항을 읽고 풀이합니다. 비우면 task 텍스트만으로 생성합니다.",
     inputSchema: z.object({
       task: z
         .string()
-        .describe("문항 전체 지시: 문제 텍스트, 출력 형식([문항]/[정답]/[해설]), 난이도·톤"),
-      model: z.string().optional().describe("Gemini 모델 ID. 비우면 flash-lite 후보를 순차 시도"),
+        .describe(
+          "지시: 출력 형식([정답]/[해설]), 난이도. 이미지가 있으면 '이미지의 단일 문항만 풀어라' 등을 포함.",
+        ),
+      model: z
+        .string()
+        .optional()
+        .describe(
+          "Gemini 모델 ID. 비우면 앱과 동일하게 gemini-2.5-flash-lite → gemini-2.5-flash 순 시도",
+        ),
+      ...visionFields,
     }),
   },
-  async ({ task, model }) => {
-    const text = await generateWithGemini(task, model);
+  async ({ task, model, imageBase64, imageMimeType }) => {
+    const image =
+      imageBase64?.trim() ?
+        {
+          base64: normalizeImageBase64(imageBase64),
+          mimeType: (imageMimeType?.trim() || "image/png").toLowerCase(),
+        }
+      : undefined;
+    const text = await generateWithGemini(task, model, image);
     return { content: [{ type: "text" as const, text }] };
   },
 );
@@ -115,19 +193,27 @@ server.registerTool(
   "generate_math_explanation_openai",
   {
     description:
-      "한국 고등 수학·미적분 등 시험 문항용 해설 텍스트를 OpenAI(Chat Completions)로 생성합니다. 모델을 비우면 OPENAI_MODEL_GENERATE_FALLBACK(없으면 gpt-4o-mini)을 씁니다.",
+      "한국 고등 수학 해설을 OpenAI(Chat Completions)로 생성합니다. imageBase64를 주면 비전으로 이미지 문항을 풀이합니다(gpt-4o 등 비전 모델 권장).",
     inputSchema: z.object({
       task: z
         .string()
-        .describe("문항 전체 지시: 문제 텍스트, 출력 형식([문항]/[정답]/[해설]), 난이도·톤"),
+        .describe("지시 및 출력 형식([정답]/[해설]). 이미지 있으면 단일 문항만 풀 것을 명시."),
       model: z
         .string()
         .optional()
-        .describe("OpenAI 채팅 모델 ID(예: gpt-4o-mini). 비우면 env 폴백 또는 gpt-4o-mini"),
+        .describe("OpenAI 모델(비전: gpt-4o-mini/gpt-4o 등). 비우면 env 폴백 또는 gpt-4o-mini"),
+      ...visionFields,
     }),
   },
-  async ({ task, model }) => {
-    const text = await generateWithOpenAI(task, model);
+  async ({ task, model, imageBase64, imageMimeType }) => {
+    const image =
+      imageBase64?.trim() ?
+        {
+          base64: normalizeImageBase64(imageBase64),
+          mimeType: (imageMimeType?.trim() || "image/png").toLowerCase(),
+        }
+      : undefined;
+    const text = await generateWithOpenAI(task, model, image);
     return { content: [{ type: "text" as const, text }] };
   },
 );

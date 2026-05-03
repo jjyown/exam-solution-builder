@@ -16,6 +16,7 @@ import {
   EXAM_DOCX_SECTION_TITLE_HALF_PT,
 } from "@/lib/examDocxTheme";
 import { explanationLatexToPlain } from "@/lib/latexToPlainText";
+import { normalizeLatexSourceText } from "@/lib/latexSourceNormalize";
 
 function bodyTextRun(opts: { text: string; bold?: boolean; size?: number }) {
   return new TextRun({
@@ -70,7 +71,7 @@ function extractLeadingProblemBlock(chunk: string): { problemLinesRaw: string[];
 type QuickAnswerKind = "objective" | "short" | "essay";
 
 function parseExplanationBlocks(explanationBody: string, fallbackQuickAnswer: string) {
-  const raw = explanationBody.replace(/\r\n/g, "\n");
+  const raw = normalizeLatexSourceText(explanationBody).replace(/\r\n/g, "\n");
   const hasLabeledQuestions = /\[문항\s*\d+\]/.test(raw);
 
   const blocks: ExplanationBlock[] = [];

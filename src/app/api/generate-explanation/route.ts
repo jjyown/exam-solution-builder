@@ -5,6 +5,38 @@ import { buildSystemInstruction } from "./prompts";
 import { getRuntimePromptRules } from "@/lib/runtimePromptRules";
 import { isGeminiRateLimitedMessage } from "@/lib/geminiRateLimit";
 import { DEFAULT_GEMINI_COST_MODELS } from "@/lib/geminiDefaultModels";
+import {
+  normalizeChoice,
+  sliceFromFirstAnswerHeader,
+  validateObjectiveMcAnswer,
+} from "@/lib/explanationAnswerValidators";
+import {
+  buildExplanationProgressReport,
+  type SolverProfile,
+} from "@/lib/explanationProgressReport";
+
+/** data URL 접두사 제거 + 순수 Base64 + MIME 정규화 (Gemini inlineData 호환) */
+function parseInlineImage(
+  raw: string,
+  mimeFallback: string,
+): { base64: string; mimeType: string } {
+  const fallback =
+    mimeFallback.trim().toLowerCase() === "image/jpg" ? "image/jpeg" : mimeFallback.trim() || "image/png";
+
+  const t = raw.trim();
+  const dataUrlMatch = t.match(/^data:\s*([^;]+)\s*;\s*base64\s*,\s*([\s\S]+)$/i);
+  if (dataUrlMatch) {
+    let mime = (dataUrlMatch[1] ?? "").trim().split(";")[0]?.trim().toLowerCase() || fallback;
+    if (mime === "image/jpg") mime = "image/jpeg";
+    const base64 = (dataUrlMatch[2] ?? "").replace(/\s/g, "");
+    return { base64, mimeType: mime || fallback };
+  }
+
+  const base64 = t.replace(/\s/g, "");
+  let mime = fallback;
+  if (mime === "image/jpg") mime = "image/jpeg";
+  return { base64, mimeType: mime };
+}
 
 type GenerateRequestBody = {
   questionText?: string;
@@ -63,6 +95,14 @@ const KILLER_MODEL_CANDIDATES = parseModelCandidatesFromEnv("GEMINI_MODELS_GENER
   ...DEFAULT_GEMINI_COST_MODELS,
 ]);
 
+/** 해설 본문이 중간에 잘리지 않도록 상한을 넉넉히(환경변수로 조절). */
+function resolveGeminiExplanationMaxOutputTokens() {
+  const raw = process.env.GEMINI_MAX_OUTPUT_TOKENS_EXPLANATION?.trim();
+  const n = raw ? Number(raw) : NaN;
+  if (!Number.isFinite(n)) return 6144;
+  return Math.min(8192, Math.max(2048, Math.floor(n)));
+}
+
 function pickModelCandidates(params: {
   generationMode: "test" | "final";
   solverModelProfile: "easy" | "balanced" | "killer";
@@ -74,14 +114,6 @@ function pickModelCandidates(params: {
   if (key === "GEMINI_MODELS_GENERATE_BALANCED") return [...BALANCED_MODEL_CANDIDATES];
   if (key === "GEMINI_MODELS_GENERATE_KILLER") return [...KILLER_MODEL_CANDIDATES];
   return [...FINAL_MODEL_CANDIDATES];
-}
-
-/** 선택 `[문제]` 블록이 앞에 있으면 `[정답]`부터 검증한다. */
-function sliceFromFirstAnswerHeader(text: string): string {
-  const t = text.trim();
-  const idx = t.search(/\[정답\]/i);
-  if (idx < 0) return t;
-  return t.slice(idx).trim();
 }
 
 function validateExplanationFormat(text: string) {
@@ -120,16 +152,6 @@ function isLikelyTruncatedResult(text: string) {
   const openParen = (explanation.match(/[({\[]/g) ?? []).length;
   const closeParen = (explanation.match(/[)}\]]/g) ?? []).length;
   return openParen > closeParen;
-}
-
-function normalizeChoice(value: string) {
-  return value
-    .trim()
-    .replace("①", "1")
-    .replace("②", "2")
-    .replace("③", "3")
-    .replace("④", "4")
-    .replace("⑤", "5");
 }
 
 function validateExplanationConsistency(text: string) {
@@ -254,12 +276,53 @@ function validateNoMetaUndermining(text: string) {
 
 function mergeConsistencyIssues(text: string) {
   const consistencyCheck = validateExplanationConsistency(text);
+  const mcCheck = validateObjectiveMcAnswer(text);
   const bleedCheck = validateCrossProblemBleed(text);
   const metaCheck = validateNoMetaUndermining(text);
   return {
-    ok: consistencyCheck.ok && bleedCheck.ok && metaCheck.ok,
-    issues: [...consistencyCheck.issues, ...bleedCheck.issues, ...metaCheck.issues],
+    ok:
+      consistencyCheck.ok &&
+      mcCheck.ok &&
+      bleedCheck.ok &&
+      metaCheck.ok,
+    issues: [
+      ...consistencyCheck.issues,
+      ...mcCheck.issues,
+      ...bleedCheck.issues,
+      ...metaCheck.issues,
+    ],
   };
+}
+
+/** 성공 응답에 단계별 progressReport(JSON)를 붙여 Cursor·UI·배치 로그에서 활용한다. */
+function jsonSuccessWithProgress(
+  body: {
+    result: string;
+    model: string;
+    qualityWarnings: string[];
+    diagramAidRecommendation: unknown;
+    crossVerified?: boolean;
+    retriedForFormat?: boolean;
+  },
+  profile: SolverProfile,
+  verifyWarning?: string,
+) {
+  return NextResponse.json(
+    {
+      ...body,
+      crossVerified: body.crossVerified ?? false,
+      progressReport: buildExplanationProgressReport({
+        finalText: body.result,
+        model: body.model,
+        qualityWarnings: body.qualityWarnings ?? [],
+        crossVerified: body.crossVerified ?? false,
+        verifyWarning,
+        retriedForFormat: body.retriedForFormat,
+        solverModelProfile: profile,
+      }),
+    },
+    { status: 200 },
+  );
 }
 
 function validateCurriculumScope(text: string) {
@@ -567,6 +630,8 @@ function buildCrossVerifyUserPrompt(
     "- 삼각방정식 초안에서 cosθ 등을 같은 단계에 두 번 곱해 항이 비정상적으로 바뀌었는지 확인한다.",
     "- '가장 가까운 정수·보기' 유형이면 중간 계산값과 객관식 번호·수치 답이 문제 규칙(반올림 등) 하에서 일치하는지 확인한다. 19.2인데 15번을 고른 식의 억지 선택이면 전면 수정한다.",
     "- 「문제 오류」「추가 조건 필요」「답은 ○이 아니라 △」「기존 풀이 오류」 같은 메타 문장과 근사(≈)만으로 결론 내리기 금지. 교과서형 단일 결론만.",
+    "- 보기 ①~⑤가 보이는 객관식이면 [정답]은 1~5 한 자리만. 계산값만 [정답]에 넣는 오류를 고친다.",
+    "- [정답]과 [해설] 결론의 보기 번호가 다르면 이미지 기준으로 맞는 쪽으로 통일한다.",
     "",
     "[초안]",
     draft,
@@ -641,17 +706,19 @@ export async function POST(request: Request) {
 
     const body = (await request.json()) as GenerateRequestBody;
     const questionText = body.questionText?.trim() ?? "";
-    const imageBase64 = body.imageBase64?.trim();
-    const mimeType =
+    const imageBase64Raw = body.imageBase64?.trim();
+    const mimeHint =
       body.imageMimeType?.trim() || body.mimeType?.trim() || "image/png";
-    const diagramImageBase64 = body.diagramImageBase64?.trim();
-    const diagramMimeType = body.diagramMimeType?.trim() || "image/png";
+    const diagramImageBase64Raw = body.diagramImageBase64?.trim();
+    const diagramMimeHint = body.diagramMimeType?.trim() || "image/png";
     const diagramImages = (body.diagramImages || [])
-      .map((item) => ({
-        imageBase64: item.imageBase64?.trim() || "",
-        mimeType: item.mimeType?.trim() || "image/png",
-      }))
-      .filter((item) => item.imageBase64);
+      .map((item) => {
+        const raw = item.imageBase64?.trim() || "";
+        if (!raw) return null;
+        const parsed = parseInlineImage(raw, item.mimeType?.trim() || "image/png");
+        return { imageBase64: parsed.base64, mimeType: parsed.mimeType };
+      })
+      .filter((item): item is { imageBase64: string; mimeType: string } => item !== null);
     const includeDiagramExplanation = body.includeDiagramExplanation !== false;
     const explanationSelectionMode = body.explanationSelectionMode || "core";
     const showAllMethods = body.showAllMethods === true;
@@ -678,12 +745,24 @@ export async function POST(request: Request) {
           "gpt-5.2"
         : process.env.OPENAI_MODEL_GENERATE_FALLBACK?.trim() || "gpt-4o-mini";
 
-    if (!imageBase64) {
+    if (!imageBase64Raw) {
       return NextResponse.json(
         { error: "문제 이미지 데이터가 없습니다." },
         { status: 400 },
       );
     }
+
+    const questionImage = parseInlineImage(imageBase64Raw, mimeHint);
+    if (!questionImage.base64) {
+      return NextResponse.json(
+        { error: "문제 이미지(Base64)가 비어 있거나 올바르지 않습니다." },
+        { status: 400 },
+      );
+    }
+
+    const diagramInline = diagramImageBase64Raw
+      ? parseInlineImage(diagramImageBase64Raw, diagramMimeHint)
+      : undefined;
 
     const client = new GoogleGenerativeAI(apiKey);
 
@@ -721,8 +800,9 @@ export async function POST(request: Request) {
       "- [해설] 본문 첫 줄에 문제 번호(예: 17.)를 다시 쓰지 마.",
       "- [해설] 스타일: 수식·등호 연쇄를 본문 축으로 쓴다. '먼저/다음으로/이제'로 문장을 늘리지 말 것. 1.2.3. 줄번호 금지(예외: 복잡한 분기만 최소). 객관식은 보기를 일일이 검토하며 늘리지 말고 필요한 비교만.",
       "- [정답], [해설] 형식을 엄격히 유지해.",
-      "- 이미지에서 선택지 ①~⑤ 또는 1~5 보기 형식이 보이면 객관식으로 판단해.",
-      "- 객관식이면 [정답]에 정답 번호만 1~5 중 하나로 출력해.",
+      "- 이미지에서 선택지 ①~⑤ 또는 (1)~(5) 보기가 보이면 객관식으로 판단해.",
+      "- 객관식이면 [정답]에는 **계산으로 나온 수치가 아니라** 선택한 **보기 번호만** 1~5 한 자리로 출력해. 산술 결과는 [해설]에만 쓴다.",
+      "- [해설] 마지막 결론의 보기 번호와 [정답] 한 줄이 반드시 같아야 한다.",
       "- 단답형이면 [정답]에 최종 식/값만 간단히 출력해.",
       "- 서술형(예: 서술하시오/증명하시오/과정을 쓰시오 지시가 명시된 경우)일 때만 [정답]은 '해설참고'로 출력하고, 실제 답안은 [해설]에 작성해.",
       "- 문제 유형이 애매하면 서술형으로 가정하지 말고 객관식/단답형 기준으로 정답을 출력해.",
@@ -765,20 +845,20 @@ export async function POST(request: Request) {
       },
       {
         inlineData: {
-          data: imageBase64,
-          mimeType,
+          data: questionImage.base64,
+          mimeType: questionImage.mimeType,
         },
       },
     ];
 
-    if (diagramImageBase64) {
+    if (diagramInline?.base64) {
       contents.push({
         text: "추가 그림(도형/그래프) 참고 이미지",
       });
       contents.push({
         inlineData: {
-          data: diagramImageBase64,
-          mimeType: diagramMimeType,
+          data: diagramInline.base64,
+          mimeType: diagramInline.mimeType,
         },
       });
     }
@@ -804,7 +884,7 @@ export async function POST(request: Request) {
           model: modelName,
           generationConfig: {
             temperature: 0.2,
-            maxOutputTokens: 3000,
+            maxOutputTokens: resolveGeminiExplanationMaxOutputTokens(),
           },
           systemInstruction,
         });
@@ -828,10 +908,10 @@ export async function POST(request: Request) {
           const cross = await runOpenAiCrossVerify({
             draft: generatedText,
             openAiApiKey,
-            imageBase64,
-            mimeType,
-            diagramImageBase64,
-            diagramMimeType,
+            imageBase64: questionImage.base64,
+            mimeType: questionImage.mimeType,
+            diagramImageBase64: diagramInline?.base64,
+            diagramMimeType: diagramInline?.mimeType,
             diagramImages: diagramImages.map((item) => ({
               imageBase64: item.imageBase64,
               mimeType: item.mimeType,
@@ -841,7 +921,7 @@ export async function POST(request: Request) {
           });
           const verifyModelTag = resolveCrossVerifyModel(solverModelProfile);
           const qualityWarningsCross = cross.verifyWarning ? [cross.verifyWarning] : [];
-          return NextResponse.json(
+          return jsonSuccessWithProgress(
             {
               result: cross.text,
               model: cross.crossVerified
@@ -851,7 +931,8 @@ export async function POST(request: Request) {
               diagramAidRecommendation: diagramAid,
               crossVerified: cross.crossVerified,
             },
-            { status: 200 },
+            solverModelProfile,
+            cross.verifyWarning,
           );
         }
 
@@ -922,10 +1003,10 @@ export async function POST(request: Request) {
         const crossRetry = await runOpenAiCrossVerify({
           draft: retryText,
           openAiApiKey,
-          imageBase64,
-          mimeType,
-          diagramImageBase64,
-          diagramMimeType,
+          imageBase64: questionImage.base64,
+          mimeType: questionImage.mimeType,
+          diagramImageBase64: diagramInline?.base64,
+          diagramMimeType: diagramInline?.mimeType,
           diagramImages: diagramImages.map((item) => ({
             imageBase64: item.imageBase64,
             mimeType: item.mimeType,
@@ -936,7 +1017,7 @@ export async function POST(request: Request) {
         const verifyModelTagRetry = resolveCrossVerifyModel(solverModelProfile);
         const qualityWarningsMerged = [...qualityWarnings];
         if (crossRetry.verifyWarning) qualityWarningsMerged.push(crossRetry.verifyWarning);
-        return NextResponse.json(
+        return jsonSuccessWithProgress(
           {
             result: crossRetry.text,
             model: crossRetry.crossVerified
@@ -947,7 +1028,8 @@ export async function POST(request: Request) {
             diagramAidRecommendation: diagramAid,
             crossVerified: crossRetry.crossVerified,
           },
-          { status: 200 },
+          solverModelProfile,
+          crossRetry.verifyWarning,
         );
       } catch (error) {
         const message =
@@ -968,10 +1050,10 @@ export async function POST(request: Request) {
           apiKey: openAiApiKey,
           model: openAiModel,
           prompt,
-          imageBase64,
-          mimeType,
-          diagramImageBase64,
-          diagramMimeType,
+          imageBase64: questionImage.base64,
+          mimeType: questionImage.mimeType,
+          diagramImageBase64: diagramInline?.base64,
+          diagramMimeType: diagramInline?.mimeType,
           diagramImages: diagramImages.map((item) => ({
             imageBase64: item.imageBase64,
             mimeType: item.mimeType,
@@ -992,14 +1074,15 @@ export async function POST(request: Request) {
             !truncated &&
             pedagogySplit.critical.length === 0
           ) {
-            return NextResponse.json(
+            return jsonSuccessWithProgress(
               {
                 result: openAiText,
                 model: `${openAiModel} (openai-fallback)`,
                 qualityWarnings: pedagogySplit.warnings,
                 diagramAidRecommendation: diagramAid,
+                crossVerified: false,
               },
-              { status: 200 },
+              solverModelProfile,
             );
           }
 
@@ -1028,10 +1111,10 @@ export async function POST(request: Request) {
               apiKey: openAiApiKey,
               model: openAiModel,
               prompt: `${prompt}\n\n${retryInstruction}`,
-              imageBase64,
-              mimeType,
-              diagramImageBase64,
-              diagramMimeType,
+              imageBase64: questionImage.base64,
+              mimeType: questionImage.mimeType,
+              diagramImageBase64: diagramInline?.base64,
+              diagramMimeType: diagramInline?.mimeType,
               diagramImages: diagramImages.map((item) => ({
                 imageBase64: item.imageBase64,
                 mimeType: item.mimeType,
@@ -1052,15 +1135,16 @@ export async function POST(request: Request) {
                 !retryTruncated &&
                 retryPedagogySplit.critical.length === 0
               ) {
-                return NextResponse.json(
+                return jsonSuccessWithProgress(
                   {
                     result: retryText,
                     model: `${openAiModel} (openai-fallback)`,
                     retriedForFormat: true,
                     qualityWarnings: retryPedagogySplit.warnings,
                     diagramAidRecommendation: diagramAid,
+                    crossVerified: false,
                   },
-                  { status: 200 },
+                  solverModelProfile,
                 );
               }
               failures.push(

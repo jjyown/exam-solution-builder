@@ -27,7 +27,7 @@ function parseDotEnv(filePath: string): Record<string, string> {
 async function checkGemini(apiKey: string): Promise<{ ok: boolean; detail: string }> {
   const genAI = new GoogleGenerativeAI(apiKey);
   const errors: string[] = [];
-  for (const model of ["gemini-2.5-flash-lite", "gemini-2.0-flash-lite"] as const) {
+  for (const model of ["gemini-2.5-flash-lite", "gemini-2.5-flash"] as const) {
     try {
       const m = genAI.getGenerativeModel({ model });
       const res = await m.generateContent('Reply with exactly one word: "pong"');

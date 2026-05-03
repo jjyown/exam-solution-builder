@@ -17,6 +17,8 @@ import {
   validateExportDocEntries,
 } from "@/lib/exportDocQuality";
 import { resolveGeminiGenerateEnvKey } from "@/lib/generateExplanationGeminiEnv";
+import { MethodBlocksMarkdown } from "@/components/ExplanationMarkdownMath";
+import { buildSelectedExplanationBody, splitMethodBlocks } from "@/lib/explanationBlocks";
 import { CROPPED_EXAMS_DIR_NAME, FINAL_EXPLANATION_DIR_NAME } from "@/lib/outputPaths";
 import { isCropOnlyUi } from "@/lib/uiMode";
 
@@ -485,64 +487,6 @@ function renderWithMath(text: string) {
   });
 }
 
-function renderMethodBlocks(text: string) {
-  const methodRegex = /(\[방법\s*\d+\][\s\S]*?)(?=\n\s*\[방법\s*\d+\]|$)/g;
-  const methods = text.match(methodRegex);
-  if (!methods || methods.length === 0) {
-    return <div className="whitespace-pre-wrap">{renderWithMath(text)}</div>;
-  }
-
-  return (
-    <div className="space-y-3">
-      {methods.map((methodText, idx) => (
-        <section
-          key={`method-${idx}`}
-          className="break-inside-avoid rounded-md border border-slate-200 bg-slate-50 p-3"
-        >
-          {renderWithMath(methodText.trim())}
-        </section>
-      ))}
-    </div>
-  );
-}
-
-function splitMethodBlocks(text: string) {
-  const methodRegex = /(\[방법\s*\d+\][\s\S]*?)(?=\n\s*\[방법\s*\d+\]|$)/g;
-  const methods = text.match(methodRegex) ?? [];
-  if (methods.length === 0) {
-    return { intro: text.trim(), methods: [] as string[] };
-  }
-
-  const firstMethodIndex = text.search(/\[방법\s*\d+\]/);
-  const intro = firstMethodIndex > 0 ? text.slice(0, firstMethodIndex).trim() : "";
-  return { intro, methods: methods.map((item) => item.trim()) };
-}
-
-function buildSelectedExplanationBody(
-  text: string,
-  selectedMethodIndexes: number[],
-  representativeMethodIndex: number | null,
-) {
-  const blocks = splitMethodBlocks(text);
-  if (blocks.methods.length === 0) {
-    return text;
-  }
-
-  const selectedIndexes =
-    selectedMethodIndexes.length > 0 ? selectedMethodIndexes : [0];
-  const orderedIndexes = [...selectedIndexes];
-  if (
-    representativeMethodIndex !== null &&
-    selectedIndexes.includes(representativeMethodIndex)
-  ) {
-    const others = orderedIndexes.filter((idx) => idx !== representativeMethodIndex);
-    orderedIndexes.splice(0, orderedIndexes.length, representativeMethodIndex, ...others);
-  }
-
-  const safeSelected = orderedIndexes.map((index) => blocks.methods[index]);
-  return [blocks.intro, ...safeSelected].filter(Boolean).join("\n\n");
-}
-
 function toBase64(file: File) {
   return new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
@@ -736,6 +680,10 @@ export default function Home() {
   const [explanationBody, setExplanationBody] = useState(DEFAULT_BODY);
   const [rawResponse, setRawResponse] = useState("");
   const [qualityWarnings, setQualityWarnings] = useState<string[]>([]);
+  const [explanationProgressReport, setExplanationProgressReport] = useState<{
+    phases?: unknown;
+    cursorManualChecklist?: string[];
+  } | null>(null);
   const [diagramAidRecommendation, setDiagramAidRecommendation] =
     useState<DiagramAidRecommendation | null>(null);
   const [questionVersionMap, setQuestionVersionMap] = useState<
@@ -786,6 +734,9 @@ export default function Home() {
   );
   const [errorMessage, setErrorMessage] = useState("");
   const [successMessage, setSuccessMessage] = useState("");
+  const [mathReviewEditMode, setMathReviewEditMode] = useState(false);
+  const [reviewSaveBusy, setReviewSaveBusy] = useState(false);
+  const [reviewSaveMessage, setReviewSaveMessage] = useState("");
 
   const appendQualityWarningUnique = useCallback((message: string) => {
     const normalized = message.trim();
@@ -800,6 +751,7 @@ export default function Home() {
       setCurrentStep(2);
     }
   }, [isCropOnlyUi, currentStep]);
+
   const selectedExamKind = selectedExam ? getExamSourceKind(selectedExam) : "unknown";
   const questionNoOptions = useMemo(
     () => [...new Set(queuedProblems.map((item) => item.questionNo))].sort((a, b) => Number(a) - Number(b)),
@@ -1006,6 +958,8 @@ export default function Home() {
   const openQuestionCard = useCallback(
     (targetQuestionNo: string) => {
       setQuestionNo(targetQuestionNo);
+      setMathReviewEditMode(false);
+      setReviewSaveMessage("");
     },
     [],
   );
@@ -1138,6 +1092,8 @@ export default function Home() {
     setSavedPageWorks({});
     setPageDrafts({});
     setQuestionNo("1");
+    setMathReviewEditMode(false);
+    setReviewSaveMessage("");
     setBatchResults([]);
     setWorkflowStep("solve");
     setMethodSelectionPolicy("all");
@@ -1492,6 +1448,7 @@ export default function Home() {
       setErrorMessage("");
       setSuccessMessage("");
       setQualityWarnings([]);
+      setExplanationProgressReport(null);
 
       const mimeType = sourceFile.type || "image/png";
       let selectedProblemCrop: PixelCrop | null = null;
@@ -1638,10 +1595,16 @@ export default function Home() {
         qualityWarnings?: string[];
         diagramAidRecommendation?: DiagramAidRecommendation;
         model?: string;
+        progressReport?: {
+          phases?: unknown;
+          cursorManualChecklist?: string[];
+          rawQualityWarnings?: string[];
+        };
       };
       const parsed = parseExplanation(data.result);
       setRawResponse(data.result);
       setQualityWarnings(data.qualityWarnings ?? []);
+      setExplanationProgressReport(data.progressReport ?? null);
       setDiagramAidRecommendation(data.diagramAidRecommendation ?? null);
       setQuickAnswer(parsed.quickAnswer);
       setExplanationBody(parsed.body);
@@ -1682,6 +1645,7 @@ export default function Home() {
           : "알 수 없는 오류가 발생했습니다.";
       setErrorMessage(message);
       setDiagramAidRecommendation(null);
+      setExplanationProgressReport(null);
     } finally {
       explanationRunGuardRef.current = false;
       setIsGenerating(false);
@@ -1726,6 +1690,8 @@ export default function Home() {
     };
     setPendingLineCrop(lineCrop);
     setQuestionNo(String(pairStartIndex + 1));
+    setMathReviewEditMode(false);
+    setReviewSaveMessage("");
   };
 
   const addDividerMarkerAt = (x: number, y: number) => {
@@ -2654,6 +2620,7 @@ export default function Home() {
             qualityWarnings?: string[];
             diagramAidRecommendation?: DiagramAidRecommendation;
             model?: string;
+            progressReport?: { cursorManualChecklist?: string[] };
           };
           const rawResult = data.result;
           const parsed = parseExplanation(rawResult);
@@ -2690,6 +2657,7 @@ export default function Home() {
               workflowStep: nextWorkflowStep,
             },
           }));
+          const prN = data.progressReport?.cursorManualChecklist?.length ?? 0;
           results.push({
             questionNo: item.questionNo,
             quickAnswer: parsed.quickAnswer,
@@ -2699,7 +2667,7 @@ export default function Home() {
                   data.diagramAidRecommendation?.recommended
                     ? ` / 도형보조 추천(score ${data.diagramAidRecommendation.score})`
                     : ""
-                }`,
+                }${prN > 0 ? ` / 단계검토·수동확인 권장 ${prN}건` : ""}`,
           });
           successfulQuestionNos.push(item.questionNo);
           relaxBackpressureDelay();
@@ -2800,6 +2768,35 @@ export default function Home() {
       setErrorMessage(message);
     }
   };
+
+  const handleReviewSaveToDb = useCallback(async () => {
+    setReviewSaveBusy(true);
+    setReviewSaveMessage("");
+    setErrorMessage("");
+    try {
+      const res = await fetch("/api/explanation-review", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          examName: selectedExam || "미지정",
+          questionNo,
+          explanationBody,
+          quickAnswer,
+        }),
+      });
+      const data = (await res.json()) as { error?: string };
+      if (!res.ok) {
+        throw new Error(data.error || "DB 저장에 실패했습니다.");
+      }
+      setReviewSaveMessage("검수본이 Supabase에 저장되었습니다.");
+      setMathReviewEditMode(false);
+      setSuccessMessage("검수본 DB 저장을 완료했습니다.");
+    } catch (e) {
+      setErrorMessage(e instanceof Error ? e.message : "DB 저장 오류");
+    } finally {
+      setReviewSaveBusy(false);
+    }
+  }, [selectedExam, questionNo, explanationBody, quickAnswer]);
 
   const handleSaveCurrentDocx = async () => {
     if (cardQuestionNos.length === 0) {
@@ -4204,6 +4201,25 @@ export default function Home() {
               </div>
             )}
 
+            {explanationProgressReport &&
+              explanationProgressReport.cursorManualChecklist &&
+              explanationProgressReport.cursorManualChecklist.length > 0 && (
+                <div className="rounded-md border border-sky-300 bg-sky-50 p-3 text-xs text-sky-950">
+                  <p className="font-semibold">
+                    단계별 진행 — Cursor에서 수정 요청 시 참고 (1차 풀이 후 자동 검사)
+                  </p>
+                  <ul className="mt-1 list-disc space-y-1 pl-4">
+                    {explanationProgressReport.cursorManualChecklist.map((item, idx) => (
+                      <li key={`progress-check-${idx}`}>{item}</li>
+                    ))}
+                  </ul>
+                  <p className="mt-2 text-[11px] text-sky-800">
+                    2차(OpenAI 교차검증) 적용 여부는 응답의 progressReport.phases.phase2_crossVerify 에서 확인할 수
+                    있습니다.
+                  </p>
+                </div>
+              )}
+
             {diagramAidRecommendation && (
               <div
                 className={`rounded-md border p-3 text-xs ${
@@ -4375,12 +4391,65 @@ export default function Home() {
                         </p>
                       </div>
 
-                      <article
-                        key={`explanation-preview-${questionNo}`}
-                        className="newspaper-columns text-[15px] leading-7 text-slate-800"
-                      >
-                        {renderMethodBlocks(selectedExplanationBody)}
-                      </article>
+                      <div className="mb-4 rounded-md border border-violet-200 bg-violet-50 p-3 text-xs text-violet-950">
+                        <p className="font-semibold text-violet-900">해설 검수 (Markdown + KaTeX)</p>
+                        <p className="mt-1 text-[11px] leading-snug">
+                          인라인·블록 수식은 $ ... $, $$ ... $$ 를 워드 수준으로 렌더링합니다. 「수정하기」는 이 문항의{" "}
+                          <strong>전체 해설 원문</strong>을 고치며, 카드·DOCX 내보내기와 동일 데이터입니다.
+                        </p>
+                        <div className="mt-3 flex flex-wrap items-center gap-2">
+                          <button
+                            type="button"
+                            disabled={explanationGenerationBusy}
+                            onClick={() => {
+                              setMathReviewEditMode(true);
+                              setReviewSaveMessage("");
+                            }}
+                            className="rounded-md bg-white px-3 py-1.5 text-[12px] font-semibold text-violet-900 shadow-sm ring-1 ring-violet-300 hover:bg-violet-100 disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            수정하기
+                          </button>
+                          <button
+                            type="button"
+                            disabled={explanationGenerationBusy || reviewSaveBusy}
+                            onClick={() => void handleReviewSaveToDb()}
+                            className="rounded-md bg-violet-700 px-3 py-1.5 text-[12px] font-semibold text-white hover:bg-violet-800 disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            {reviewSaveBusy ? "저장 중…" : "검수 완료 및 DB 저장"}
+                          </button>
+                          {reviewSaveMessage ? (
+                            <span className="text-[11px] text-emerald-700">{reviewSaveMessage}</span>
+                          ) : null}
+                        </div>
+                      </div>
+
+                      {mathReviewEditMode ? (
+                        <div className="space-y-2">
+                          <p className="text-xs font-semibold text-slate-700">
+                            원문 편집 (저장 시 현재 문항 카드·DOCX 규칙에 반영됩니다)
+                          </p>
+                          <textarea
+                            className="min-h-[min(70vh,560px)] w-full rounded-md border border-slate-300 bg-white p-3 font-mono text-[13px] leading-relaxed text-slate-900 shadow-inner"
+                            value={explanationBody}
+                            onChange={(e) => setExplanationBody(e.target.value)}
+                            spellCheck={false}
+                          />
+                          <button
+                            type="button"
+                            className="rounded border border-slate-300 bg-white px-2 py-1 text-xs text-slate-700 hover:bg-slate-50"
+                            onClick={() => setMathReviewEditMode(false)}
+                          >
+                            미리보기로 돌아가기
+                          </button>
+                        </div>
+                      ) : (
+                        <article
+                          key={`explanation-preview-${questionNo}`}
+                          className="newspaper-columns text-[15px] leading-7 text-slate-800"
+                        >
+                          <MethodBlocksMarkdown source={selectedExplanationBody} />
+                        </article>
+                      )}
                     </>
                   ) : explanationGenerationBusy ? (
                     <div className="rounded-md border border-sky-300 bg-sky-50 p-10 text-center text-sky-900">
