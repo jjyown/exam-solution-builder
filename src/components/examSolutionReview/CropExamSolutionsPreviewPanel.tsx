@@ -14,6 +14,10 @@ type Item = {
   status: string;
 };
 
+function labelForQuestion(row: Pick<Item, "question_no">) {
+  return row.question_no === "합본" ? "합본" : `${row.question_no}번`;
+}
+
 /**
  * 크롭 전용 UI 우측: Supabase `exam_solutions` 본문을 Markdown+KaTeX로 미리보기 (md 파일 열람 대체)
  */
@@ -22,6 +26,7 @@ export function CropExamSolutionsPreviewPanel({ examName }: { examName: string }
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     if (!examName.trim()) {
@@ -58,6 +63,33 @@ export function CropExamSolutionsPreviewPanel({ examName }: { examName: string }
     void load();
   }, [load]);
 
+  const remove = async (row: Item) => {
+    const label = labelForQuestion(row);
+    if (
+      !window.confirm(
+        `Supabase에서 이 해설 행을 삭제할까요?\n${row.exam_name} · ${label}\n삭제 후 복구할 수 없습니다.`,
+      )
+    ) {
+      return;
+    }
+    setDeletingId(row.id);
+    setErr(null);
+    try {
+      const res = await fetch(`/api/exam-solutions?id=${encodeURIComponent(row.id)}`, {
+        method: "DELETE",
+      });
+      const data = (await res.json()) as { error?: string };
+      if (!res.ok) {
+        throw new Error(data.error || "삭제에 실패했습니다.");
+      }
+      await load();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setDeletingId(null);
+    }
+  };
+
   useEffect(() => {
     if (items.length === 0) {
       setSelectedId(null);
@@ -71,15 +103,14 @@ export function CropExamSolutionsPreviewPanel({ examName }: { examName: string }
     [items, selectedId],
   );
 
-  const labelFor = (row: Item) => (row.question_no === "합본" ? "합본" : `${row.question_no}번`);
-
   return (
     <div className="sticky top-4 flex max-h-[min(92vh,960px)] flex-col gap-3">
       <div>
         <p className="text-sm font-semibold text-slate-900">Supabase · 해설 미리보기</p>
         <p className="mt-1 text-[11px] leading-snug text-slate-600">
           좌측에서 고른 시험지 이름과 DB의 <code className="rounded bg-slate-100 px-0.5">exam_name</code>이 같으면,
-          여기서 본문을 수식까지 렌더링해 확인합니다. 개별 md 파일을 열지 않아도 됩니다.
+          여기서 본문을 수식까지 렌더링해 확인합니다. 완료한 문항은 칩 오른쪽{" "}
+          <strong className="font-semibold">삭제</strong>로 Supabase에서 제거해 목록을 정리할 수 있습니다.
         </p>
       </div>
 
@@ -130,25 +161,42 @@ export function CropExamSolutionsPreviewPanel({ examName }: { examName: string }
         <div className="flex min-h-0 flex-1 flex-col gap-2">
           <div className="flex flex-wrap gap-1.5">
             {items.map((row) => (
-              <button
+              <div
                 key={row.id}
-                type="button"
-                onClick={() => setSelectedId(row.id)}
-                className={`rounded-md border px-2 py-1 text-[11px] font-semibold ${
+                role="group"
+                aria-label={`${labelForQuestion(row)} 미리보기 및 삭제`}
+                className={`inline-flex overflow-hidden rounded-md border text-[11px] font-semibold shadow-sm ${
                   row.id === selectedId
                     ? "border-indigo-500 bg-indigo-50 text-indigo-950"
-                    : "border-slate-200 bg-white text-slate-800 hover:bg-slate-50"
+                    : "border-slate-200 bg-white text-slate-800"
                 }`}
               >
-                {labelFor(row)}
-              </button>
+                <button
+                  type="button"
+                  onClick={() => setSelectedId(row.id)}
+                  className={`px-2 py-1 hover:opacity-90 ${
+                    row.id === selectedId ? "bg-indigo-50" : "bg-white hover:bg-slate-50"
+                  }`}
+                >
+                  {labelForQuestion(row)}
+                </button>
+                <button
+                  type="button"
+                  disabled={deletingId !== null}
+                  title="Supabase exam_solutions에서 이 행 삭제"
+                  onClick={() => void remove(row)}
+                  className="border-l border-slate-200/80 bg-white px-1.5 py-1 text-[10px] font-semibold text-rose-700 hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {deletingId === row.id ? "…" : "삭제"}
+                </button>
+              </div>
             ))}
           </div>
           <div className="min-h-[200px] flex-1 overflow-y-auto rounded-md border border-slate-200 bg-white p-3 shadow-sm">
             {selected ? (
               <>
                 <p className="mb-2 border-b border-slate-100 pb-2 text-[11px] text-slate-500">
-                  {selected.exam_name} · {labelFor(selected)}
+                  {selected.exam_name} · {labelForQuestion(selected)}
                   {selected.status ? ` · ${selected.status}` : ""}
                 </p>
                 <MethodBlocksMarkdown
