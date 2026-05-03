@@ -22,6 +22,7 @@ import { buildSelectedExplanationBody, splitMethodBlocks } from "@/lib/explanati
 import { CROPPED_EXAMS_DIR_NAME, FINAL_EXPLANATION_DIR_NAME } from "@/lib/outputPaths";
 import { isCropOnlyUi } from "@/lib/uiMode";
 import { ExamSolutionReviewProvider } from "@/components/examSolutionReview/ExamSolutionReviewContext";
+import { ExamSolutionsSupabaseQuickPanel } from "@/components/examSolutionReview/ExamSolutionsSupabaseQuickPanel";
 import {
   ExamSolutionReviewDetailBlock,
   ExamSolutionReviewListBlock,
@@ -2959,14 +2960,8 @@ export default function Home() {
                   ? "현재 단계: 크롭 전용. 한 박스에 한 문항만(선지·조건까지). 페이지마다 「현재 페이지 작업 저장」으로 대기열에 쌓입니다."
                   : "현재 단계: 수동 영역 지정. 한 박스에는 한 문항만(선지·조건까지). 여러 문항이 보이면 박스를 나눕니다. 저장 후 「해설 검토 및 저장」으로 넘어가세요.")}
               {!isCropOnlyUi && currentStep === 3 &&
-                "현재 단계: 해설 검토 및 저장. 왼쪽에서 DB 문항을 고르고 오른쪽에서 수식 미리보기·수정·검증을 마칩니다. 웹 AI 생성·DOCX는 아래 「고급」에서 열 수 있습니다."}
+                "현재 단계: 해설 검토 및 저장. 오른쪽에서 DB 문항을 고르고 미리보기·수정·검증을 마칩니다. 웹 AI 생성·DOCX는 아래 「고급」에서 열 수 있습니다."}
             </div>
-
-            {!isCropOnlyUi && currentStep === 3 && (
-              <div className="mt-4">
-                <ExamSolutionReviewListBlock />
-              </div>
-            )}
 
             {currentStep === 1 && (
               <>
@@ -4295,14 +4290,10 @@ export default function Home() {
               <p className="mt-2 text-xs">이쪽에 페이지 전체가 크게 표시되어 크롭 작업을 보조합니다.</p>
             </div>
           ) : !isCropOnlyUi && currentStep !== 3 ? (
-            <div className="rounded-md border border-dashed border-slate-300 bg-white p-8 text-center text-slate-500">
-              <p className="text-sm">3단계(해설 검토 및 저장)에서 Supabase 동기화 해설 미리보기가 표시됩니다.</p>
-              <p className="mt-2 text-xs">
-                지금은 좌측에서 시험지 선택과 문제 영역 지정을 먼저 진행하세요.
-              </p>
-            </div>
+            <ExamSolutionsSupabaseQuickPanel examName={selectedExam ?? ""} />
           ) : !isCropOnlyUi && currentStep === 3 ? (
             <div className="sticky top-4 space-y-4">
+              <ExamSolutionReviewListBlock />
               <ExamSolutionReviewDetailBlock />
               <details className="rounded-md border border-dashed border-slate-300 bg-slate-50/90 p-2">
                 <summary className="cursor-pointer text-sm font-semibold text-slate-700">

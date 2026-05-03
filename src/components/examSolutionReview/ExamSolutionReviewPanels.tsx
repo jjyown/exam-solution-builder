@@ -4,7 +4,7 @@ import { useCallback, useState } from "react";
 import { ExplanationMarkdownMath } from "@/components/ExplanationMarkdownMath";
 import { useExamSolutionReview } from "./ExamSolutionReviewContext";
 
-/** 좌측: DB 문항 목록 (3단계 검토 전용) */
+/** 우측 상단: DB 문항 목록 · 선택 · 삭제 (3단계) */
 export function ExamSolutionReviewListBlock() {
   const {
     active,
@@ -17,6 +17,32 @@ export function ExamSolutionReviewListBlock() {
     selected,
     selectById,
   } = useExamSolutionReview();
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+
+  const removeRow = async (row: { id: string; question_no: string; exam_name: string }) => {
+    const label = row.question_no === "합본" ? "합본" : `${row.question_no}번`;
+    if (!window.confirm(`Supabase에서 삭제할까요?\n${row.exam_name} · ${label}`)) {
+      return;
+    }
+    setDeletingId(row.id);
+    try {
+      const res = await fetch(`/api/exam-solutions?id=${encodeURIComponent(row.id)}`, {
+        method: "DELETE",
+      });
+      const data = (await res.json()) as { error?: string };
+      if (!res.ok) {
+        throw new Error(data.error || "삭제에 실패했습니다.");
+      }
+      if (selected?.id === row.id) {
+        await selectById(null);
+      }
+      await reloadList();
+    } catch (e) {
+      window.alert(e instanceof Error ? e.message : String(e));
+    } finally {
+      setDeletingId(null);
+    }
+  };
 
   if (!active) return null;
 
@@ -60,11 +86,11 @@ export function ExamSolutionReviewListBlock() {
             {items.map((row) => {
               const on = selected?.id === row.id;
               return (
-                <li key={row.id}>
+                <li key={row.id} className="flex items-stretch gap-1">
                   <button
                     type="button"
                     onClick={() => void selectById(row.id)}
-                    className={`w-full px-3 py-2 text-left text-xs ${
+                    className={`min-w-0 flex-1 px-3 py-2 text-left text-xs ${
                       on ? "bg-indigo-100 font-semibold text-indigo-950" : "hover:bg-slate-50"
                     }`}
                   >
@@ -85,6 +111,17 @@ export function ExamSolutionReviewListBlock() {
                         {row.status === "verified" ? "검증됨" : "초안"}
                       </span>
                     </span>
+                  </button>
+                  <button
+                    type="button"
+                    disabled={deletingId === row.id}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void removeRow(row);
+                    }}
+                    className="shrink-0 self-center rounded border border-rose-300 bg-rose-50 px-2 py-1 text-[10px] font-semibold text-rose-900 hover:bg-rose-100 disabled:opacity-50"
+                  >
+                    {deletingId === row.id ? "…" : "삭제"}
                   </button>
                 </li>
               );

@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getSupabaseServiceClient } from "@/lib/supabaseServiceClient";
+import { sortExamSolutionItemsByQuestionNo } from "@/lib/sortExamSolutions";
 
 export const runtime = "nodejs";
 
@@ -60,23 +61,27 @@ export async function GET(request: Request) {
   }
   const raw = (data ?? []) as Record<string, unknown>[];
   const items: Row[] | ListRow[] = listOnly
-    ? raw.map((r) => ({
-        id: String(r.id),
-        exam_name: String(r.exam_name),
-        question_no: String(r.question_no),
-        source_filename: (r.source_filename as string | null) ?? null,
-        updated_at: String(r.updated_at),
-        status: typeof r.status === "string" ? r.status : "draft",
-      }))
-    : raw.map((r) => ({
-        id: String(r.id),
-        exam_name: String(r.exam_name),
-        question_no: String(r.question_no),
-        body: String(r.body ?? ""),
-        source_filename: (r.source_filename as string | null) ?? null,
-        updated_at: String(r.updated_at),
-        status: typeof r.status === "string" ? r.status : "draft",
-      }));
+    ? sortExamSolutionItemsByQuestionNo(
+        raw.map((r) => ({
+          id: String(r.id),
+          exam_name: String(r.exam_name),
+          question_no: String(r.question_no),
+          source_filename: (r.source_filename as string | null) ?? null,
+          updated_at: String(r.updated_at),
+          status: typeof r.status === "string" ? r.status : "draft",
+        })),
+      )
+    : sortExamSolutionItemsByQuestionNo(
+        raw.map((r) => ({
+          id: String(r.id),
+          exam_name: String(r.exam_name),
+          question_no: String(r.question_no),
+          body: String(r.body ?? ""),
+          source_filename: (r.source_filename as string | null) ?? null,
+          updated_at: String(r.updated_at),
+          status: typeof r.status === "string" ? r.status : "draft",
+        })),
+      );
   return NextResponse.json({ items });
 }
 
@@ -130,4 +135,33 @@ export async function PATCH(request: Request) {
   }
 
   return NextResponse.json({ ok: true, item: data as Row });
+}
+
+/**
+ * DELETE ?id=<uuid> — 해당 행을 Supabase에서 제거
+ */
+export async function DELETE(request: Request) {
+  const supabase = getSupabaseServiceClient();
+  if (!supabase) {
+    return NextResponse.json(
+      { error: "Supabase 서버 설정이 없습니다.", configured: false },
+      { status: 503 },
+    );
+  }
+
+  const url = new URL(request.url);
+  const id = (url.searchParams.get("id") || "").trim();
+  if (!id) {
+    return NextResponse.json({ error: "id 쿼리가 필요합니다." }, { status: 400 });
+  }
+
+  const { data, error } = await supabase.from("exam_solutions").delete().eq("id", id).select("id").maybeSingle();
+  if (error) {
+    return NextResponse.json({ error: error.message }, { status: 500 });
+  }
+  if (!data) {
+    return NextResponse.json({ error: "not_found" }, { status: 404 });
+  }
+
+  return NextResponse.json({ ok: true, deleted: id });
 }
