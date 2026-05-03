@@ -12,13 +12,8 @@ import {
   ParagraphChild,
   TextRun,
 } from "docx";
+import { EXAM_DOCX_BODY_SIZE_HALF_PT, EXAM_DOCX_FONT } from "./examDocxTheme";
 import { explanationLatexToPlain } from "./latexToPlainText";
-
-const DOC_BODY_FONT = {
-  ascii: "Malgun Gothic",
-  eastAsia: "Malgun Gothic",
-  hAnsi: "Malgun Gothic",
-} as const;
 
 /** `\left`/`\right` 등은 단순 괄호로만 취급 */
 function preprocessInlineMath(inner: string): string {
@@ -360,17 +355,36 @@ function mathFromInner(inner: string): MathComponent[] {
 
 function mathZoneToParagraphChild(inner: string): ParagraphChild {
   const trimmed = inner.trim();
-  if (!trimmed.length) return new TextRun({ text: "", font: DOC_BODY_FONT });
+  if (!trimmed.length)
+    return new TextRun({ text: "", font: EXAM_DOCX_FONT, size: EXAM_DOCX_BODY_SIZE_HALF_PT });
   try {
     const comps = mathFromInner(trimmed);
     if (comps.length) return new Math({ children: comps });
   } catch {
     /* fall through */
   }
-  return new TextRun({ text: explanationLatexToPlain(`$${trimmed}$`), font: DOC_BODY_FONT });
+  return new TextRun({
+    text: explanationLatexToPlain(`$${trimmed}$`),
+    font: EXAM_DOCX_FONT,
+    size: EXAM_DOCX_BODY_SIZE_HALF_PT,
+  });
 }
 
 type LineSeg = { kind: "text" | "math"; value: string };
+
+/** Word OMML용: `\\(...\\)`·`\\[...\\]` 를 `$...$` / `$$...$$` 로 바꾼 뒤 분할한다. */
+export function normalizeDisplayMathDelimitersForDocx(line: string): string {
+  let s = line;
+  s = s.replace(/\\\(([\s\S]*?)\\\)/g, (_, inner: string) => `$${inner}$`);
+  s = s.replace(/\\\[([\s\S]*?)\\\]/g, (_, inner: string) => `$$${inner}$$`);
+  return s;
+}
+
+function lineLooksLikeBareLatexCommand(line: string): boolean {
+  return /\\(?:frac|sqrt|sum|int|cdot|times|leq|geq|neq|approx|equiv|pi|sin|cos|tan|log|ln|alpha|beta|gamma|theta|infty|partial|lim|to|Rightarrow|Leftarrow|ldots|cdots|vec|overline|underline|text|binom|left|right|bigl|bigr|Bigl|Bigr)\b/i.test(
+    line,
+  );
+}
 
 function segmentLineByDollars(line: string): LineSeg[] {
   const out: LineSeg[] = [];
@@ -408,19 +422,45 @@ function segmentLineByDollars(line: string): LineSeg[] {
  * `$...$` / `$$...$$` 는 OMML(Math), 그 외는 본문 텍스트(수식 없는 줄은 평문화).
  */
 export function explanationLineToParagraphChildren(line: string): ParagraphChild[] {
-  const segs = segmentLineByDollars(line);
+  const normalizedLine = normalizeDisplayMathDelimitersForDocx(line);
+  const segs = segmentLineByDollars(normalizedLine);
   const hasMath = segs.some((s) => s.kind === "math" && s.value.trim().length > 0);
   if (!hasMath) {
-    return [new TextRun({ text: explanationLatexToPlain(line), font: DOC_BODY_FONT })];
+    const t = normalizedLine.trim();
+    if (t && lineLooksLikeBareLatexCommand(t)) {
+      try {
+        const child = mathZoneToParagraphChild(t);
+        if (child instanceof Math) return [child];
+      } catch {
+        /* OMML 실패 시 아래 평문 폴백 */
+      }
+    }
+    return [
+      new TextRun({
+        text: explanationLatexToPlain(normalizedLine),
+        font: EXAM_DOCX_FONT,
+        size: EXAM_DOCX_BODY_SIZE_HALF_PT,
+      }),
+    ];
   }
   const children: ParagraphChild[] = [];
   for (const seg of segs) {
     if (seg.kind === "text") {
-      if (seg.value.length) children.push(new TextRun({ text: seg.value, font: DOC_BODY_FONT }));
+      if (seg.value.length)
+        children.push(
+          new TextRun({
+            text: seg.value,
+            font: EXAM_DOCX_FONT,
+            size: EXAM_DOCX_BODY_SIZE_HALF_PT,
+          }),
+        );
     } else if (seg.value.trim().length) {
       children.push(mathZoneToParagraphChild(seg.value));
     }
   }
-  if (children.length === 0) children.push(new TextRun({ text: "", font: DOC_BODY_FONT }));
+  if (children.length === 0)
+    children.push(
+      new TextRun({ text: "", font: EXAM_DOCX_FONT, size: EXAM_DOCX_BODY_SIZE_HALF_PT }),
+    );
   return children;
 }

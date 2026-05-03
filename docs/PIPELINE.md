@@ -71,10 +71,39 @@ flowchart TB
 |------|------|------|
 | **Drive · 입력 폴더** | 시험지 PDF 등 **읽기** | **`GOOGLE_DRIVE_EXAMS_FOLDER_ID`** (또는 부모 아래 `시험지`) |
 | **Drive · 작업완료** | 크롭 문항을 **ZIP 한 개**로 업로드 | **`GOOGLE_DRIVE_WORK_COMPLETE_FOLDER_ID`** 또는 부모 아래 **`작업완료`**. API: **`POST /api/upload-crop-bundle`** |
-| **로컬(서버 디스크) · `크롭된 시험지`** | 크롭 ZIP을 **프로젝트 루트 기준** 폴더에 저장 (`npm run dev` 시 PC 프로젝트에 생성) | API: **`POST /api/save-crop-bundle-zip`**. 상수: `CROPPED_EXAMS_DIR_NAME`. 원격 배포 시에는 컨테이너 내부 경로임 |
+| **로컬(서버 디스크) · `크롭된 시험지`** | 크롭 ZIP을 **프로젝트 루트 기준** 폴더에 저장 (`npm run dev` 시 PC 프로젝트에 생성) | API: **`POST /api/save-crop-bundle-zip`**, 목록·불러오기: **`GET /api/cropped-exams`**, **`POST /api/cropped-exams/import`**. 로컬 **일반 모드** 앱 1단계 UI도 이 폴더의 **ZIP·압축 해제 폴더**를 목록으로 씀. 상수: `CROPPED_EXAMS_DIR_NAME`. 원격 배포 시에는 컨테이너 내부 경로임 |
 | **로컬 · `해설지 최종본`** | **최종 해설 DOCX만** 저장 | **`npm run write-final-docx`** 또는 API `/api/save-result`(동일 빌더). 상수: `FINAL_EXPLANATION_DIR_NAME` |
 
 **원칙:** 최종 **DOCX**는 Drive API로 올리지 않음. **크롭 ZIP**은 **로컬 `크롭된 시험지`** 저장, **브라우저 다운로드**, 또는 Drive **`작업완료`** 중 선택(UI).
+
+---
+
+## 폴더 일괄 → 해설 DOCX (자동화 1단계)
+
+한 폴더 안에 **이미 작성된** 해설 본문(`.md` / `.txt`)이 여러 개 있을 때, **한 번에** `해설지 최종본`에 DOCX를 만든다. (**Gemini 호출 없음** — MCP·앱·Cursor로 본문을 만든 뒤 파일로 저장해 두고 실행.)
+
+```bash
+npm run batch:from-dir -- --input ./입력해설
+npm run batch:from-dir -- --input ./입력해설 --recursive
+npm run batch:from-dir -- --input ./입력해설 --dry-run
+```
+
+- **파일명(확장자 제외)** → 시험지 이름(`examName`).
+- 각 파일은 **맨 앞이 `[문제]` 또는 `[정답]`**으로 시작하고, **`[해설]`** 본문이 충분히 있어야 한다(일반 문서는 자동 건너뜀).
+- 스크립트: `scripts/batch-explanations-from-dir.mts`.
+
+**크롭 이미지 폴더 → 해설 DOCX(자동화 2단계):** `npm run dev`로 로컬 Next를 띄운 뒤, 크롭이 모인 폴더를 지정하면 이미지마다 `POST /api/generate-explanation`을 호출하고 `해설지 최종본`에 DOCX를 만든다.
+
+```bash
+npm run batch:crops-to-docx
+npm run batch:crops-to-docx -- --input ./크롭된 시험지
+npm run batch:crops-to-docx -- --base-url http://127.0.0.1:3000 --dry-run
+npm run batch:crops-to-docx -- --delay-ms 1200 --generation-mode final --solver-profile balanced
+```
+
+- 기본 `--input`은 프로젝트 루트의 **`크롭된 시험지`**(없으면 오류). `.png` / `.jpg` / `.jpeg` / `.webp` 만 대상(`.zip` 등은 건너뜀 — 압축은 먼저 풀기).
+- **비용·429**: `--delay-ms`(기본 800)로 요청 간격을 늘릴 것. 모델은 서버의 `.env.local`·`generate-explanation` 라우트와 동일.
+- 스크립트: `scripts/batch-crops-to-docx.mts`.
 
 ---
 

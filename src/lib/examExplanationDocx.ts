@@ -5,25 +5,24 @@ import {
   Paragraph,
   TextRun,
   AlignmentType,
-  HeadingLevel,
   SectionType,
   TabStopType,
 } from "docx";
 import { explanationLineToParagraphChildren } from "@/lib/docxOmmlBuilder";
+import {
+  EXAM_DOCX_BODY_PARAGRAPH_SPACING,
+  EXAM_DOCX_BODY_SIZE_HALF_PT,
+  EXAM_DOCX_FONT,
+  EXAM_DOCX_SECTION_TITLE_HALF_PT,
+} from "@/lib/examDocxTheme";
 import { explanationLatexToPlain } from "@/lib/latexToPlainText";
-
-const DOC_BODY_FONT = {
-  ascii: "Malgun Gothic",
-  eastAsia: "Malgun Gothic",
-  hAnsi: "Malgun Gothic",
-} as const;
 
 function bodyTextRun(opts: { text: string; bold?: boolean; size?: number }) {
   return new TextRun({
     text: opts.text,
     bold: opts.bold,
-    size: opts.size,
-    font: DOC_BODY_FONT,
+    size: opts.size ?? EXAM_DOCX_BODY_SIZE_HALF_PT,
+    font: EXAM_DOCX_FONT,
   });
 }
 
@@ -48,10 +47,25 @@ export function safeExamFileName(value: string) {
 
 type ExplanationBlock = {
   questionLabel: string;
+  /** 선택 `[문제]` 블록(읽은 식·조건). DOCX에서 OMML 수식으로 출력 */
+  problemLinesRaw: string[];
   answer: string;
   explanationLines: string[];
   explanationLinesRaw: string[];
 };
+
+/** `[문제]…[정답]` 선행이 있으면 분리한다. */
+function extractLeadingProblemBlock(chunk: string): { problemLinesRaw: string[]; rest: string } {
+  const t = chunk.trim();
+  const m = t.match(/^\[문제\]\s*([\s\S]*?)(?=\n\s*\[정답\]|\[정답\])/i);
+  if (!m) return { problemLinesRaw: [], rest: t };
+  const problemLinesRaw = m[1]
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const rest = t.slice((m.index ?? 0) + m[0].length).trim();
+  return { problemLinesRaw, rest };
+}
 
 type QuickAnswerKind = "objective" | "short" | "essay";
 
@@ -65,9 +79,10 @@ function parseExplanationBlocks(explanationBody: string, fallbackQuickAnswer: st
     const labeled = splitLabeledQuestionChunks(raw);
     labeled.forEach((item) => {
       const { label, chunk } = item;
-      const answerMatch = chunk.match(/\[정답\]\s*([^\n\r]*)/i);
+      const { problemLinesRaw, rest: chunkRest } = extractLeadingProblemBlock(chunk);
+      const answerMatch = chunkRest.match(/\[정답\]\s*([^\n\r]*)/i);
       const answer = answerMatch?.[1]?.trim() || fallbackQuickAnswer || "-";
-      const explanationText = chunk
+      const explanationText = chunkRest
         .replace(/\[정답\]\s*[^\n\r]*/i, "")
         .replace(/\[해설\]/gi, "")
         .trim();
@@ -78,6 +93,7 @@ function parseExplanationBlocks(explanationBody: string, fallbackQuickAnswer: st
       const explanationLines = explanationLinesRaw.map((line) => explanationLatexToPlain(line));
       blocks.push({
         questionLabel: label,
+        problemLinesRaw,
         answer,
         explanationLines,
         explanationLinesRaw,
@@ -86,21 +102,24 @@ function parseExplanationBlocks(explanationBody: string, fallbackQuickAnswer: st
     if (blocks.length > 0) return blocks;
   }
 
-  const answers = [...raw.matchAll(/\[정답\]\s*([^\n\r]*)/gi)].map(
+  const { problemLinesRaw: leadingProblem, rest: rawRest } = extractLeadingProblemBlock(raw);
+  const answers = [...rawRest.matchAll(/\[정답\]\s*([^\n\r]*)/gi)].map(
     (item) => item[1]?.trim() || "-",
   );
-  const explanationsRaw = [...raw.matchAll(/\[해설\]\s*([\s\S]*?)(?=\n\s*\[정답\]|\s*$)/gi)].map(
-    (item) =>
-      item[1]
-        .split("\n")
-        .map((line) => line.trim())
-        .filter(Boolean),
+  const explanationsRaw = [
+    ...rawRest.matchAll(/\[해설\]\s*([\s\S]*?)(?=\n\s*\[정답\]|\s*$)/gi),
+  ].map((item) =>
+    item[1]
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean),
   );
   const maxLen = Math.max(answers.length, explanationsRaw.length, 1);
   for (let i = 0; i < maxLen; i += 1) {
     const explanationLinesRaw = explanationsRaw[i] || [];
     blocks.push({
       questionLabel: String(i + 1),
+      problemLinesRaw: i === 0 ? leadingProblem : [],
       answer: answers[i] || (i === 0 ? fallbackQuickAnswer || "-" : "-"),
       explanationLines: explanationLinesRaw.map((line) => explanationLatexToPlain(line)),
       explanationLinesRaw,
@@ -167,28 +186,55 @@ function buildExplanationParagraphs(blocks: ExplanationBlock[]) {
         : objective
           ? toCircledObjectiveAnswer(objective)
           : block.answer || "-";
+    if (block.problemLinesRaw.length > 0) {
+      paragraphs.push(
+        new Paragraph({
+          children: [
+            bodyTextRun({ text: `${block.questionLabel}) `, bold: true }),
+            bodyTextRun({ text: "[문제]", bold: true }),
+          ],
+          spacing: {
+            ...EXAM_DOCX_BODY_PARAGRAPH_SPACING,
+            before: idx === 0 ? 0 : 220,
+            after: 70,
+          },
+        }),
+      );
+      block.problemLinesRaw.forEach((line) => {
+        paragraphs.push(
+          new Paragraph({
+            children: explanationLineToParagraphChildren(line),
+            spacing: { ...EXAM_DOCX_BODY_PARAGRAPH_SPACING, after: 100 },
+          }),
+        );
+      });
+    }
     paragraphs.push(
       new Paragraph({
         tabStops: [{ type: TabStopType.LEFT, position: 1800 }],
         children: [
           bodyTextRun({ text: `${block.questionLabel})`, bold: true }),
-          bodyTextRun({ text: "\t[정답] ", bold: true }),
+          bodyTextRun({ text: "\t[빠른 정답] ", bold: true }),
           bodyTextRun({ text: quickAnswerText, bold: true }),
         ],
-        spacing: { before: idx === 0 ? 0 : 220, after: 80 },
+        spacing: {
+          ...EXAM_DOCX_BODY_PARAGRAPH_SPACING,
+          before: idx === 0 && block.problemLinesRaw.length === 0 ? 0 : 120,
+          after: 80,
+        },
       }),
     );
     paragraphs.push(
       new Paragraph({
         children: [bodyTextRun({ text: "[해설]", bold: true })],
-        spacing: { after: 120 },
+        spacing: { ...EXAM_DOCX_BODY_PARAGRAPH_SPACING, after: 120 },
       }),
     );
     if (block.explanationLinesRaw.length === 0) {
       paragraphs.push(
         new Paragraph({
           children: [bodyTextRun({ text: "해설 본문이 제공되지 않았습니다." })],
-          spacing: { after: 140 },
+          spacing: { ...EXAM_DOCX_BODY_PARAGRAPH_SPACING, after: 140 },
         }),
       );
       return;
@@ -197,34 +243,13 @@ function buildExplanationParagraphs(blocks: ExplanationBlock[]) {
       paragraphs.push(
         new Paragraph({
           children: explanationLineToParagraphChildren(line),
-          spacing: { after: 140 },
+          spacing: EXAM_DOCX_BODY_PARAGRAPH_SPACING,
         }),
       );
     });
   });
 
   return paragraphs;
-}
-
-function buildQuickAnswerRows(blocks: ExplanationBlock[]) {
-  const entries = blocks.map((block) => {
-    const answerKind = classifyQuickAnswerKind(block.answer, block.explanationLines);
-    const objective = normalizeObjectiveAnswer(block.answer);
-    const displayAnswer =
-      answerKind === "essay"
-        ? "해설참고"
-        : objective
-          ? toCircledObjectiveAnswer(objective)
-          : block.answer || "-";
-    return `${block.questionLabel}) ${displayAnswer}`;
-  });
-  return entries.map(
-    (entry) =>
-      new Paragraph({
-        children: [bodyTextRun({ text: entry, bold: true })],
-        spacing: { after: 110 },
-      }),
-  );
 }
 
 export type BuildExamExplanationDocxParams = {
@@ -253,15 +278,13 @@ export async function buildExamExplanationDocxBuffer(params: BuildExamExplanatio
   const docDate = `${now.getFullYear()}.${String(now.getMonth() + 1).padStart(2, "0")}.${String(
     now.getDate(),
   ).padStart(2, "0")}`;
-  const quickAnswerRows = buildQuickAnswerRows(blocks);
-
   const doc = new Document({
     styles: {
       default: {
         document: {
           run: {
-            font: DOC_BODY_FONT,
-            size: 22,
+            font: EXAM_DOCX_FONT,
+            size: EXAM_DOCX_BODY_SIZE_HALF_PT,
           },
         },
       },
@@ -272,33 +295,33 @@ export async function buildExamExplanationDocxBuffer(params: BuildExamExplanatio
         children: [
           new Paragraph({
             alignment: AlignmentType.CENTER,
-            children: [bodyTextRun({ text: "수학영역", bold: true, size: 40 })],
+            children: [
+              bodyTextRun({ text: "수학영역", bold: true, size: EXAM_DOCX_SECTION_TITLE_HALF_PT }),
+            ],
             spacing: { after: 100 },
           }),
           new Paragraph({
             alignment: AlignmentType.CENTER,
-            heading: HeadingLevel.HEADING_1,
-            children: [
-              bodyTextRun({
-                text: headerTitle,
-                bold: true,
-              }),
-            ],
+            children: [bodyTextRun({ text: headerTitle, bold: true, size: EXAM_DOCX_SECTION_TITLE_HALF_PT })],
             spacing: { after: 60 },
           }),
           new Paragraph({
             alignment: AlignmentType.CENTER,
             children: [bodyTextRun({ text: docDate })],
-            spacing: { after: 180 },
+            spacing: { after: 120 },
           }),
           new Paragraph({
-            alignment: AlignmentType.LEFT,
-            children: [bodyTextRun({ text: "[빠른 정답]", bold: true })],
-            spacing: { after: 90 },
+            alignment: AlignmentType.CENTER,
+            children: [
+              new TextRun({
+                text: "※ 본문(2단): 문항별 [문제]·[빠른 정답]·[해설] 순 · 가운데 구분선 · 수식은 Word 수식(OMML). 문제 그림은 시험지 크롭 이미지를 붙여 사용.",
+                italics: true,
+                size: EXAM_DOCX_BODY_SIZE_HALF_PT,
+                font: EXAM_DOCX_FONT,
+              }),
+            ],
+            spacing: { after: 180 },
           }),
-          ...(quickAnswerRows.length > 0
-            ? quickAnswerRows
-            : [new Paragraph({ children: [bodyTextRun({ text: "추출/생성된 정답 없음" })] })]),
         ],
       },
       {
@@ -311,16 +334,12 @@ export async function buildExamExplanationDocxBuffer(params: BuildExamExplanatio
           },
         },
         children: [
-          new Paragraph({
-            heading: HeadingLevel.HEADING_2,
-            children: [bodyTextRun({ text: "[해설]", bold: true })],
-            spacing: { before: 180, after: 180 },
-          }),
           ...(explanationParagraphs.length > 0
             ? explanationParagraphs
             : [
                 new Paragraph({
                   children: [bodyTextRun({ text: "해설 본문이 제공되지 않았습니다." })],
+                  spacing: EXAM_DOCX_BODY_PARAGRAPH_SPACING,
                 }),
               ]),
         ],

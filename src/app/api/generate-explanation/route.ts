@@ -76,8 +76,16 @@ function pickModelCandidates(params: {
   return [...FINAL_MODEL_CANDIDATES];
 }
 
+/** 선택 `[문제]` 블록이 앞에 있으면 `[정답]`부터 검증한다. */
+function sliceFromFirstAnswerHeader(text: string): string {
+  const t = text.trim();
+  const idx = t.search(/\[정답\]/i);
+  if (idx < 0) return t;
+  return t.slice(idx).trim();
+}
+
 function validateExplanationFormat(text: string) {
-  const normalized = text.trim();
+  const normalized = sliceFromFirstAnswerHeader(text).trim();
   const missing: string[] = [];
 
   if (!/^\s*\[정답\]/i.test(normalized)) {

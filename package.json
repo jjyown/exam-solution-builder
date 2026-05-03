@@ -8,6 +8,8 @@
     "start": "next start",
     "lint": "eslint",
     "write-final-docx": "tsx write-final-docx.mts",
+    "batch:from-dir": "tsx scripts/batch-explanations-from-dir.mts",
+    "batch:crops-to-docx": "tsx scripts/batch-crops-to-docx.mts",
     "mcp:gemini-explanation": "tsx mcp/gemini-explanation.mts",
     "check-api": "tsx scripts/check-api-connection.mts",
     "mcp:smoke": "node scripts/mcp-stdio-smoke.mjs",
