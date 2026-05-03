@@ -274,22 +274,46 @@ function validateNoMetaUndermining(text: string) {
   return { ok: issues.length === 0, issues };
 }
 
+/** =1 직후 4\\log, 1\\log_ 등으로 14·1log 오인되는 조판 */
+function validateMathTypesettingLegibility(text: string) {
+  const issues: string[] = [];
+  const explanation = text.match(/\[해설\]\s*([\s\S]+)/i)?.[1]?.trim() ?? "";
+  if (!explanation) return { ok: true, issues };
+
+  if (/=\s*1\s+\d\s*\\log/i.test(explanation)) {
+    issues.push(
+      "[해설] 로그 전개에서 '= 1' 직후 같은 흐름에 '4\\\\log' 등 숫자+\\\\log가 붙어 '14'로 읽힐 수 있습니다. 단계별 줄바꿈·별도 $...$ 또는 계수에 \\\\cdot(\\\\,)를 넣어 구분하세요.",
+    );
+  }
+  // \\frac{...}{...}\\log 처럼 } 바로 앞의 1은 제외(오탐 방지). 줄 시작·연산자 뒤의 1\\log_ 만 금지
+  if (/(?:^|[^0-9}\\])1\\log_/m.test(explanation)) {
+    issues.push(
+      "[해설] '1\\\\log_{...}'처럼 계수 1과 \\\\log를 붙이지 마세요(1과 l이 붙어 읽힘). 곱셈 1은 생략하거나 '1\\\\cdot\\\\log_{...}'로 쓰세요. '=1'로 끝난 직후 다음 단계는 새 줄·새 $...$로 나누세요.",
+    );
+  }
+
+  return { ok: issues.length === 0, issues };
+}
+
 function mergeConsistencyIssues(text: string) {
   const consistencyCheck = validateExplanationConsistency(text);
   const mcCheck = validateObjectiveMcAnswer(text);
   const bleedCheck = validateCrossProblemBleed(text);
   const metaCheck = validateNoMetaUndermining(text);
+  const typesetCheck = validateMathTypesettingLegibility(text);
   return {
     ok:
       consistencyCheck.ok &&
       mcCheck.ok &&
       bleedCheck.ok &&
-      metaCheck.ok,
+      metaCheck.ok &&
+      typesetCheck.ok,
     issues: [
       ...consistencyCheck.issues,
       ...mcCheck.issues,
       ...bleedCheck.issues,
       ...metaCheck.issues,
+      ...typesetCheck.issues,
     ],
   };
 }
@@ -365,9 +389,9 @@ function validatePedagogicalPolicy(
   const stepHeavy =
     lines.length >= 3 && numberedLines >= 2 && numberedLines / lines.length >= 0.35;
   const maxChars =
-    solverModelProfile === "killer" ? 5500 : solverModelProfile === "easy" ? 2000 : 3200;
+    solverModelProfile === "killer" ? 5500 : solverModelProfile === "easy" ? 1800 : 2800;
   const maxLines =
-    solverModelProfile === "killer" ? 26 : solverModelProfile === "easy" ? 14 : 18;
+    solverModelProfile === "killer" ? 26 : solverModelProfile === "easy" ? 12 : 16;
   if (methodCount <= 1) {
     const tooLongByChars = explanation.length > maxChars;
     const tooLongBySteps = stepHeavy && lines.length > maxLines;
@@ -448,8 +472,30 @@ function inferDiagramAidNeed(questionText: string) {
     };
   }
 
+  /**
+   * 그래프·도형 보조 추천(휴리스틱) — 전문가 기준 요약:
+   * - 곡선(삼각·이차·일반 함수)과 직선 y=k·x=k 의 교점·좌표 합 등: 그림 없이 말로만 보면 오해 소지
+   * - x의 구간·반개구간·주기 안에서 해의 개수: 축 위 상황이 본질
+   * - 문제/해설에 그래프·그림 지시 또는 기하 도형이 중심
+   * - 순수 대수·근호만으로 축과 무관하면 점수 낮음
+   */
   const rules: Array<{ label: string; regex: RegExp; score: number }> = [
     { label: "도형/기하 키워드", regex: /(도형|기하|삼각형|사각형|원|부채꼴|현|접선|닮음|합동)/, score: 3 },
+    {
+      label: "삼각·이차함수·그래프 필수 신호",
+      regex: /(삼각함수|사인|코사인|탄젠트|\\sin|\\cos|\\tan|주기|위상|이차함수|꼭짓점|포물선의\s*그래프|함수\s*y\s*=)/,
+      score: 3,
+    },
+    {
+      label: "함수·수평(수직)선 교점·좌표",
+      regex: /(교점|만나는\s*점|서로\s*만나|x좌표|y좌표|좌표의\s*합|y\s*=\s*[0-9]|수평선|직선\s*y)/,
+      score: 3,
+    },
+    {
+      label: "x범위·반개구간·해의 개수(그래프 맥락)",
+      regex: /(\d\s*≤\s*x|x\s*≤\s*\d|x\s*<\s*\d|0\s*≤\s*x|몇\s*개의|서로\s*다른\s*실근)/,
+      score: 2,
+    },
     { label: "좌표/그래프 키워드", regex: /(좌표평면|그래프|함수의 그래프|포물선|직선의 기울기|절편)/, score: 2 },
     { label: "작도/보조선 지시", regex: /(그림을 그려|도형을 그려|작도|보조선|연장선|수선의 발)/, score: 3 },
     { label: "각/길이 표기", regex: /(∠|각\s*[A-Z가-힣]|길이|넓이|둘레|반지름|지름)/, score: 2 },
@@ -620,6 +666,8 @@ function buildCrossVerifyUserPrompt(
     "[출력 규칙]",
     "- 출력은 [정답] 한 줄, [해설] 본문만. 인사·머리말·메타 설명 금지.",
     "- [해설]은 말로 장황하게 풀지 말고 수식·등식 연쇄 위주로 짧게 유지할 것.",
+    "- 단순 근호·지수 정리형인데 초안이 지수법칙만 열 줄 이상 나열했다면, **동일 결론을 근호 성질 등으로 더 짧게** 압축해 다시 써라(원고는 길이가 아니라 밀도가 기준).",
+    "- 로그 전개: '= 1'로 끝난 직후 같은 줄·한 덩어리에 '4\\\\log'가 붙으면 **14**로 읽힌다. 단계를 나누고, 필요하면 '4\\\\cdot\\\\log' 형태로 고친다. '1\\\\log' 붙임도 금지(1\\\\cdot\\\\log 또는 생략).",
     "- 수식은 인라인 $ ... $ 안에 KaTeX로 쓴다. 초안이 캐럿(^)만으로 지수를 쌓았으면 달러 블록 안 표기로 고친다.",
     "- 중고등 교육과정 범위를 벗어난 전공 수학 용어·기호 금지.",
     "- 초안이 완전히 옳으면 내용을 바꾸지 말고 동일 결론을 형식에 맞게 재출력.",
@@ -811,6 +859,8 @@ export async function POST(request: Request) {
       "- 영문 수학 용어 대신 한국어 용어를 사용해.",
       "- 정석 풀이가 가능한 문제에서 근삿값/추정/어림 계산으로 답을 내지 마.",
       "- 쉬운·중간 난이도는 [해설]을 짧게 끝낸다. 같은 내용을 말과 식에 중복 쓰지 마라.",
+      "- 단순 계산·근호 정리형은 **자명한 지수 중간단계를 한 줄씩만 길게 늘리지 마라.** $(\\sqrt\\cdot)^n$, $(\\sqrt[3]\\cdot)^3$ 등으로 줄일 수 있으면 그 경로를 우선하고, 부등·보기 비교는 필요한 한 블록만.",
+      "- 로그: 이전 식이 $...=1$로 끝나면 다음 단계를 **새 줄·새 $...$**로 쓰고, `=1` 바로 옆에 `4\\\\log`를 붙이지 마라(14로 오인). `1\\\\log` 대신 계수 1 생략 또는 `1\\\\cdot\\\\log`.",
       "- 문제 텍스트가 없으면 이미지의 문제를 직접 해석해 풀이해.",
       includeDiagramExplanation
         ? "- 그림/도형/그래프가 있으면 해설에 의미와 해석 포인트를 반드시 포함해."

@@ -209,14 +209,62 @@ type DividerMarker = {
   segmentIndex: number;
 };
 
+type DiagramBoxKind = "problem" | "diagram";
+
 type DiagramBox = {
   id: string;
   labelNo: number;
+  /** 문항 본문 크롭 vs 같은 문항에 붙는 그래프·도형만 크롭 */
+  kind?: DiagramBoxKind;
   crop: PixelCrop;
   cropRatio: { x: number; y: number; width: number; height: number };
   imageBase64: string;
   mimeType: string;
 };
+
+function diagramBoxKind(box: DiagramBox): DiagramBoxKind {
+  return box.kind ?? "problem";
+}
+
+/** 저장·API용: 순서대로 문항 그룹(본문 + 도형들)으로 접기 */
+function foldPendingBoxesToQuestionGroups(boxes: DiagramBox[]): Array<{
+  problem: DiagramBox;
+  diagrams: DiagramBox[];
+}> {
+  const groups: Array<{ problem: DiagramBox; diagrams: DiagramBox[] }> = [];
+  for (const box of boxes) {
+    if (diagramBoxKind(box) === "problem") {
+      groups.push({ problem: box, diagrams: [] });
+    } else if (groups.length > 0) {
+      groups[groups.length - 1]!.diagrams.push(box);
+    }
+  }
+  return groups;
+}
+
+/** 미저장 상태에서 단일 실행: 첫 문항 본문과 그 뒤에 이어지는 도형 크롭만 */
+function getFirstPendingProblemAndDiagrams(boxes: DiagramBox[]): {
+  problem: DiagramBox;
+  diagrams: DiagramBox[];
+} | null {
+  const firstIdx = boxes.findIndex((b) => diagramBoxKind(b) === "problem");
+  if (firstIdx < 0) return null;
+  const problem = boxes[firstIdx]!;
+  const diagrams: DiagramBox[] = [];
+  for (let i = firstIdx + 1; i < boxes.length; i++) {
+    const b = boxes[i]!;
+    if (diagramBoxKind(b) === "diagram") diagrams.push(b);
+    else break;
+  }
+  return { problem, diagrams };
+}
+
+function dataUrlFromRawBase64(rawBase64: string, mimeType: string): string | null {
+  const raw = rawBase64.trim();
+  if (!raw) return null;
+  const mime = mimeType && mimeType.startsWith("image/") ? mimeType : "image/png";
+  return `data:${mime};base64,${raw}`;
+}
 
 type DividerDragState = {
   id: string;
@@ -732,6 +780,8 @@ export default function Home() {
   const [linePlacementMode] = useState(false);
   const [verticalGuideMode, setVerticalGuideMode] = useState(false);
   const [pendingDiagramBoxes, setPendingDiagramBoxes] = useState<DiagramBox[]>([]);
+  /** 다음 드래그 크롭이 문항 본문인지, 직전 문항에 붙는 도형·그래프인지 */
+  const [cropAttachmentMode, setCropAttachmentMode] = useState<DiagramBoxKind>("problem");
   const [batchResults, setBatchResults] = useState<BatchResult[]>([]);
   const [isBatchGenerating, setIsBatchGenerating] = useState(false);
   const [isExportChecking, setIsExportChecking] = useState(false);
@@ -1472,8 +1522,12 @@ export default function Home() {
           ? [...matchedQueuedProblem.diagramImages]
           : [];
       } else {
+        const pendingGroup = getFirstPendingProblemAndDiagrams(pendingDiagramBoxes);
+        const fallbackFirstCrop = pendingDiagramBoxes[0]?.crop;
         selectedProblemCrop =
-          pendingDiagramBoxes[0]?.crop ?? (completedCrop ? normalizeCrop(completedCrop) : null);
+          pendingGroup?.problem.crop ??
+          fallbackFirstCrop ??
+          (completedCrop ? normalizeCrop(completedCrop) : null);
         if (selectedProblemCrop && imageRef.current) {
           const precheck = runExtractionPrecheckForDisplayedCrop(
             selectedProblemCrop,
@@ -1489,7 +1543,8 @@ export default function Home() {
         imageBase64 = selectedProblemCrop
           ? cropImageToBase64(imageRef.current, selectedProblemCrop, mimeType)
           : await toBase64(sourceFile);
-        liveDiagramImages = pendingDiagramBoxes.map((box) => ({
+        const diagramBoxes = pendingGroup?.diagrams ?? [];
+        liveDiagramImages = diagramBoxes.map((box) => ({
           imageBase64: cropImageToBase64(imageRef.current!, box.crop, box.mimeType || mimeType),
           mimeType: box.mimeType || mimeType,
         }));
@@ -1874,8 +1929,16 @@ export default function Home() {
     document.addEventListener("mouseup", handleMouseUp);
   };
 
-  const addDiagramBox = (activeCrop: PixelCrop) => {
+  const addDiagramBox = (activeCrop: PixelCrop, kind: DiagramBoxKind) => {
     if (!imageRef.current) return;
+    if (kind === "diagram") {
+      const hasProblem = pendingDiagramBoxes.some((b) => diagramBoxKind(b) === "problem");
+      if (!hasProblem) {
+        setErrorMessage("도형·그래프 영역은 문항(본문) 박스를 하나 만든 뒤에 추가할 수 있습니다.");
+        setSuccessMessage("");
+        return;
+      }
+    }
     const mimeType = sourceFile?.type || "image/png";
     const normalizedCrop = clampPixelCropToSize(activeCrop, imageRef.current.width, imageRef.current.height);
     const cropRatio = pixelCropToRatioCrop(
@@ -1887,7 +1950,14 @@ export default function Home() {
     const currentPageNo = isPdfSource ? pdfPageNo : 1;
     const currentPageLabels = pendingDiagramBoxes.map((item) => item.labelNo);
     let nextLabelNo = 1;
-    if (currentPageLabels.length === 0) {
+    if (kind === "diagram") {
+      for (let i = pendingDiagramBoxes.length - 1; i >= 0; i--) {
+        if (diagramBoxKind(pendingDiagramBoxes[i]!) === "problem") {
+          nextLabelNo = pendingDiagramBoxes[i]!.labelNo;
+          break;
+        }
+      }
+    } else if (currentPageLabels.length === 0) {
       const usedInOtherPages = Object.entries(pageDrafts)
         .filter(([pageKey]) => Number.parseInt(pageKey, 10) !== currentPageNo)
         .flatMap(([, draft]) => draft.diagramBoxes.map((item) => item.labelNo));
@@ -1905,6 +1975,7 @@ export default function Home() {
       {
         id: `diagram-${diagramIdRef.current++}`,
         labelNo: nextLabelNo,
+        kind,
         crop: normalizedCrop,
         cropRatio,
         imageBase64,
@@ -1913,7 +1984,11 @@ export default function Home() {
     ]);
     setCrop(undefined);
     setCompletedCrop(undefined);
-    setSuccessMessage("문제 박스를 추가했습니다.");
+    setSuccessMessage(
+      kind === "diagram"
+        ? `문항 ${nextLabelNo}에 도형·그래프 영역을 추가했습니다.`
+        : `문항 ${nextLabelNo} 본문 영역을 추가했습니다.`,
+    );
     setErrorMessage("");
   };
 
@@ -1961,7 +2036,26 @@ export default function Home() {
     };
 
     const handleMouseUp = () => {
-      setDiagramDragState(null);
+      setDiagramDragState((current) => {
+        const finishedId = current?.id;
+        if (finishedId && imageRef.current) {
+          const mt = sourceFile?.type || "image/png";
+          queueMicrotask(() => {
+            setPendingDiagramBoxes((prev) =>
+              prev.map((box) =>
+                box.id !== finishedId
+                  ? box
+                  : {
+                      ...box,
+                      imageBase64: cropImageToBase64(imageRef.current!, box.crop, mt),
+                      mimeType: mt,
+                    },
+              ),
+            );
+          });
+        }
+        return null;
+      });
     };
 
     document.addEventListener("mousemove", handleMouseMove);
@@ -1970,7 +2064,7 @@ export default function Home() {
       document.removeEventListener("mousemove", handleMouseMove);
       document.removeEventListener("mouseup", handleMouseUp);
     };
-  }, [diagramDragState]);
+  }, [diagramDragState, sourceFile?.type]);
 
   useEffect(() => {
     if (!diagramResizeState) return;
@@ -2021,7 +2115,26 @@ export default function Home() {
     };
 
     const handleMouseUp = () => {
-      setDiagramResizeState(null);
+      setDiagramResizeState((current) => {
+        const finishedId = current?.id;
+        if (finishedId && imageRef.current) {
+          const mt = sourceFile?.type || "image/png";
+          queueMicrotask(() => {
+            setPendingDiagramBoxes((prev) =>
+              prev.map((box) =>
+                box.id !== finishedId
+                  ? box
+                  : {
+                      ...box,
+                      imageBase64: cropImageToBase64(imageRef.current!, box.crop, mt),
+                      mimeType: mt,
+                    },
+              ),
+            );
+          });
+        }
+        return null;
+      });
     };
 
     document.addEventListener("mousemove", handleMouseMove);
@@ -2030,11 +2143,12 @@ export default function Home() {
       document.removeEventListener("mousemove", handleMouseMove);
       document.removeEventListener("mouseup", handleMouseUp);
     };
-  }, [diagramResizeState]);
+  }, [diagramResizeState, sourceFile?.type]);
 
   const clearPendingSelection = () => {
     setPendingLineCrop(null);
     setPendingDiagramBoxes([]);
+    setCropAttachmentMode("problem");
   };
 
   const savePageDraft = (pageNumber: number) => {
@@ -2059,6 +2173,7 @@ export default function Home() {
       setDividerMarkers([]);
       setVerticalGuides([]);
       setPendingDiagramBoxes([]);
+      setCropAttachmentMode("problem");
       setPendingLineCrop(null);
       return;
     }
@@ -2085,6 +2200,12 @@ export default function Home() {
       setErrorMessage("현재 페이지에 최소 1개 이상의 문제 박스를 추가해 주세요.");
       return;
     }
+    if (diagramBoxKind(pendingDiagramBoxes[0]!) === "diagram") {
+      setErrorMessage(
+        "첫 번째 영역은 문항 본문이어야 합니다. 도형·그래프만 크롭은 「문항 본문」 다음에 추가해 주세요.",
+      );
+      return;
+    }
 
     const mimeType = sourceFile?.type || "image/png";
     const pageNumber = isPdfSource ? pdfPageNo : 1;
@@ -2104,9 +2225,19 @@ export default function Home() {
       0,
     );
 
-    const pageProblems: QueuedProblem[] = pendingDiagramBoxes.map((box, idx) => {
-      const crop = box.crop;
+    const groups = foldPendingBoxesToQuestionGroups(pendingDiagramBoxes);
+    if (groups.length === 0) {
+      setErrorMessage("저장할 문항 본문 박스가 없습니다.");
+      return;
+    }
+    const pageProblems: QueuedProblem[] = groups.map((g, idx) => {
+      const crop = g.problem.crop;
       const imageBase64 = cropImageToBase64(imageRef.current!, crop, mimeType);
+      const diagramImages = g.diagrams.map((d) => ({
+        imageBase64: cropImageToBase64(imageRef.current!, d.crop, mimeType),
+        mimeType,
+      }));
+      const diagramCrops = g.diagrams.map((d) => d.crop);
       return {
         id: `${Date.now()}-${pageNumber}-${idx}`,
         questionNo: String(baseCountWithoutCurrentPage + idx + 1),
@@ -2114,9 +2245,9 @@ export default function Home() {
         pdfPage: isPdfSource ? pageNumber : 1,
         imageBase64,
         imageMimeType: mimeType,
-        diagramImages: [],
+        diagramImages,
         crop,
-        diagramCrops: [],
+        diagramCrops,
       };
     });
 
@@ -2322,13 +2453,30 @@ export default function Home() {
       if (m.includes("gif")) return ".gif";
       return ".img";
     };
-    const itemsMeta: Array<{ questionNo: string; pageLabel: string; file: string }> = [];
+    const itemsMeta: Array<{
+      questionNo: string;
+      pageLabel: string;
+      file: string;
+      diagramFiles?: string[];
+    }> = [];
     for (const item of queuedProblems) {
       const label = item.pageLabel.replace(/[/\\?%*:|"<> \t\n\r]/g, "_") || "page";
       const ext = extFromMime(item.imageMimeType || "image/png");
       const fname = `q${item.questionNo}_${label}${ext}`;
       zip.file(fname, item.imageBase64, { base64: true });
-      itemsMeta.push({ questionNo: item.questionNo, pageLabel: item.pageLabel, file: fname });
+      const diagramFiles: string[] = [];
+      (item.diagramImages || []).forEach((fig, fi) => {
+        const figExt = extFromMime(fig.mimeType || "image/png");
+        const figName = `q${item.questionNo}_${label}_fig${fi + 1}${figExt}`;
+        zip.file(figName, fig.imageBase64, { base64: true });
+        diagramFiles.push(figName);
+      });
+      itemsMeta.push({
+        questionNo: item.questionNo,
+        pageLabel: item.pageLabel,
+        file: fname,
+        ...(diagramFiles.length > 0 ? { diagramFiles } : {}),
+      });
     }
     const examLabel = selectedExam || "직접업로드";
     zip.file(
@@ -3243,6 +3391,36 @@ export default function Home() {
                     )}
                   </div>
                 )}
+                <div className="mt-2 rounded-md border border-slate-200 bg-slate-50/80 p-2">
+                  <p className="text-[11px] font-semibold text-slate-800">다음 크롭 종류</p>
+                  <div className="mt-1 flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setCropAttachmentMode("problem")}
+                      className={`rounded-md border px-2.5 py-1 text-[11px] font-semibold ${
+                        cropAttachmentMode === "problem"
+                          ? "border-indigo-600 bg-indigo-600 text-white"
+                          : "border-slate-300 bg-white text-slate-700 hover:bg-slate-100"
+                      }`}
+                    >
+                      문항 본문(글+전체)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setCropAttachmentMode("diagram")}
+                      className={`rounded-md border px-2.5 py-1 text-[11px] font-semibold ${
+                        cropAttachmentMode === "diagram"
+                          ? "border-amber-600 bg-amber-600 text-white"
+                          : "border-slate-300 bg-white text-slate-700 hover:bg-slate-100"
+                      }`}
+                    >
+                      그래프·도형만 (직전 문항에 붙임)
+                    </button>
+                  </div>
+                  <p className="mt-1 text-[10px] leading-snug text-slate-600">
+                    「다음 그림과 같을 때」처럼 그래프가 있으면 본문은 질문+지시까지 넓게 잡고, 이어서 그래프만 따로 잡으면 해설 API에 함께 전달됩니다.
+                  </p>
+                </div>
                 <div className="max-h-[420px] overflow-auto rounded-md border border-slate-200 p-2">
                   <div className="relative inline-block">
                     <ReactCrop
@@ -3260,7 +3438,7 @@ export default function Home() {
                         }
                         const normalized = normalizeCrop(nextCrop);
                         if (!normalized) return;
-                        addDiagramBox(normalized);
+                        addDiagramBox(normalized, cropAttachmentMode);
                       }}
                     >
                       {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -3438,7 +3616,11 @@ export default function Home() {
                       {pendingDiagramBoxes.map((box, idx) => (
                         <div
                           key={box.id}
-                          className="absolute border-2 border-dashed border-emerald-500"
+                          className={`absolute border-2 border-dashed ${
+                            diagramBoxKind(box) === "diagram"
+                              ? "border-amber-500"
+                              : "border-emerald-500"
+                          }`}
                           style={{
                             left: `${box.crop.x}px`,
                             top: `${box.crop.y}px`,
@@ -3463,13 +3645,21 @@ export default function Home() {
                             });
                           }}
                         >
-                          <span className="absolute -top-5 left-0 rounded bg-emerald-600 px-1.5 py-0.5 text-[10px] font-bold text-white">
-                            문제 {box.labelNo ?? idx + 1}
+                          <span
+                            className={`absolute -top-5 left-0 rounded px-1.5 py-0.5 text-[10px] font-bold text-white ${
+                              diagramBoxKind(box) === "diagram" ? "bg-amber-600" : "bg-emerald-600"
+                            }`}
+                          >
+                            {diagramBoxKind(box) === "diagram"
+                              ? `도형 · 문항 ${box.labelNo ?? idx + 1}`
+                              : `문항 ${box.labelNo ?? idx + 1} 본문`}
                           </span>
                           <button
                             type="button"
-                            aria-label={`문제 ${box.labelNo ?? idx + 1} 크기 조절`}
-                            className="absolute -bottom-2 -right-2 h-4 w-4 rounded bg-emerald-600 text-white"
+                            aria-label={`${diagramBoxKind(box) === "diagram" ? "도형" : "문항"} ${box.labelNo ?? idx + 1} 크기 조절`}
+                            className={`absolute -bottom-2 -right-2 h-4 w-4 rounded text-white ${
+                              diagramBoxKind(box) === "diagram" ? "bg-amber-600" : "bg-emerald-600"
+                            }`}
                             style={{ cursor: "nwse-resize" }}
                             onMouseDown={(event) => {
                               event.preventDefault();
@@ -3495,13 +3685,11 @@ export default function Home() {
                   </div>
                 </div>
                 <p className="mt-2 rounded bg-blue-50 p-2 text-xs text-blue-700">
-                  문제 박스 모드: 드래그로 영역을 추가합니다. 박스 1개는 해설 API 1회당 한 문항에 대응합니다.
-                  2번·5번만 골라 지정하고 가운데 번호는 건너뛰는 식으로 써도 됩니다(옆 칸이 비쳐도 박스 안 문항만 풉니다). 인접
-                  문항이 섞이지 않게 잘라 주세요. 저장하면 해설 대기열에 포함됩니다.
+                  드래그로 영역을 추가합니다. 「문항 본문」은 해설 1회당 한 덩어리이고, 같은 문항에 그림이 있으면 「그래프·도형만」으로
+                  이어서 잡아 주세요. 2번·5번만 골라 지정해도 됩니다. 인접 문항이 섞이지 않게 잘라 주세요. 저장하면 대기열에 반영됩니다.
                 </p>
                 <p className="mt-2 rounded bg-emerald-50 p-2 text-xs text-emerald-700">
-                  박스를 드래그해 추가하면 자동 저장 목록에 포함됩니다. 추가된 박스는 드래그 이동, 우하단
-                  핸들로 크기 조절할 수 있습니다.
+                  초록 테두리는 본문, 노랑(주황) 테두리는 그래프·도형 크롭입니다. 박스는 드래그 이동·우하단 핸들로 크기 조절할 수 있습니다.
                 </p>
                 <button
                   onClick={savePendingAsQueuedProblem}
@@ -3512,7 +3700,9 @@ export default function Home() {
                 </button>
                 {pendingDiagramBoxes.length > 0 && (
                   <p className="mt-2 rounded bg-slate-50 p-2 text-xs text-slate-600">
-                    설정됨: 문제 박스 {pendingDiagramBoxes.length}개
+                    설정됨: 영역 {pendingDiagramBoxes.length}개 (본문{" "}
+                    {pendingDiagramBoxes.filter((b) => diagramBoxKind(b) === "problem").length} · 도형{" "}
+                    {pendingDiagramBoxes.filter((b) => diagramBoxKind(b) === "diagram").length})
                   </p>
                 )}
                 {pendingDiagramBoxes.length === 0 && (
@@ -3530,16 +3720,45 @@ export default function Home() {
                     <p className="text-xs font-semibold text-slate-700">
                       문제 박스 목록 ({pendingDiagramBoxes.length})
                     </p>
-                    <div className="mt-1 flex flex-wrap gap-2">
-                      {pendingDiagramBoxes.map((box, idx) => (
-                        <button
-                          key={box.id}
-                          onClick={() => removePendingDiagramBox(box.id)}
-                          className="rounded border border-slate-300 bg-white px-2 py-1 text-[11px]"
-                        >
-                          문제 {box.labelNo ?? idx + 1} 삭제
-                        </button>
-                      ))}
+                    <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-3 md:grid-cols-4">
+                      {pendingDiagramBoxes.map((box, idx) => {
+                        const previewSrc = dataUrlFromRawBase64(box.imageBase64, box.mimeType);
+                        return (
+                          <div
+                            key={box.id}
+                            className="flex flex-col overflow-hidden rounded border border-slate-200 bg-white shadow-sm"
+                          >
+                            <div className="relative flex aspect-[4/3] max-h-28 items-center justify-center bg-slate-100">
+                              {previewSrc ? (
+                                // eslint-disable-next-line @next/next/no-img-element -- data URL 미리보기
+                                <img
+                                  src={previewSrc}
+                                  alt=""
+                                  className="max-h-full max-w-full object-contain"
+                                />
+                              ) : (
+                                <span className="px-1 text-center text-[10px] text-slate-500">
+                                  미리보기 없음
+                                </span>
+                              )}
+                              <span
+                                className={`absolute left-1 top-1 rounded px-1 py-0.5 text-[9px] font-bold text-white ${
+                                  diagramBoxKind(box) === "diagram" ? "bg-amber-600" : "bg-emerald-600"
+                                }`}
+                              >
+                                {diagramBoxKind(box) === "diagram" ? "도형" : "본문"} {box.labelNo ?? idx + 1}
+                              </span>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => removePendingDiagramBox(box.id)}
+                              className="border-t border-slate-200 bg-slate-50 px-2 py-1.5 text-[11px] text-rose-700 hover:bg-rose-50"
+                            >
+                              삭제
+                            </button>
+                          </div>
+                        );
+                      })}
                     </div>
                   </div>
                 )}
@@ -3581,12 +3800,35 @@ export default function Home() {
                           return (
                             <li
                               key={item.id}
-                              className="flex flex-wrap items-center justify-between gap-1 rounded bg-white px-2 py-1"
+                              className="flex flex-wrap items-center justify-between gap-2 rounded bg-white px-2 py-1"
                             >
-                              <span className="min-w-0 flex-1">
-                                {index + 1}. {item.questionNo}번 ({item.pageLabel}
-                                {isPdfSource && p !== null ? ` · ${p}페이지` : ""})
-                              </span>
+                              <div className="flex min-w-0 flex-1 items-center gap-2">
+                                {(() => {
+                                  const thumb = dataUrlFromRawBase64(
+                                    item.imageBase64,
+                                    item.imageMimeType || "image/png",
+                                  );
+                                  return thumb ? (
+                                    // eslint-disable-next-line @next/next/no-img-element
+                                    <img
+                                      src={thumb}
+                                      alt=""
+                                      className="h-11 w-11 shrink-0 rounded border border-slate-200 bg-white object-contain"
+                                    />
+                                  ) : (
+                                    <div className="h-11 w-11 shrink-0 rounded border border-dashed border-slate-200 bg-slate-50" />
+                                  );
+                                })()}
+                                <span className="min-w-0">
+                                  {index + 1}. {item.questionNo}번 ({item.pageLabel}
+                                  {isPdfSource && p !== null ? ` · ${p}페이지` : ""})
+                                  {(item.diagramImages?.length ?? 0) > 0 && (
+                                    <span className="ml-1 rounded bg-amber-100 px-1 py-0.5 text-[10px] font-semibold text-amber-950">
+                                      그림 {item.diagramImages?.length}
+                                    </span>
+                                  )}
+                                </span>
+                              </div>
                               <div className="flex shrink-0 flex-wrap gap-1">
                                 {isPdfSource && p !== null && (
                                   <button
@@ -3668,11 +3910,32 @@ export default function Home() {
                     return (
                       <li
                         key={item.id}
-                        className="flex flex-wrap items-center justify-between gap-1 rounded bg-white px-2 py-1"
+                        className="flex flex-wrap items-center justify-between gap-2 rounded bg-white px-2 py-1"
                       >
-                        <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1">
+                        <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
+                          {(() => {
+                            const thumb = dataUrlFromRawBase64(
+                              item.imageBase64,
+                              item.imageMimeType || "image/png",
+                            );
+                            return thumb ? (
+                              // eslint-disable-next-line @next/next/no-img-element
+                              <img
+                                src={thumb}
+                                alt=""
+                                className="h-11 w-11 shrink-0 rounded border border-slate-200 bg-white object-contain"
+                              />
+                            ) : (
+                              <div className="h-11 w-11 shrink-0 rounded border border-dashed border-slate-200 bg-slate-50" />
+                            );
+                          })()}
                           <span className="truncate">
                             {index + 1}. {item.questionNo}번 ({item.pageLabel})
+                            {(item.diagramImages?.length ?? 0) > 0 && (
+                              <span className="ml-1 rounded bg-amber-100 px-1 py-0.5 text-[10px] font-semibold text-amber-950">
+                                그림 {item.diagramImages?.length}
+                              </span>
+                            )}
                           </span>
                           {isPdfSource && p !== null && (
                             <button
