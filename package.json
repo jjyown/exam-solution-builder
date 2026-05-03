@@ -6,7 +6,12 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "write-final-docx": "tsx write-final-docx.mts",
+    "mcp:gemini-explanation": "tsx mcp/gemini-explanation.mts",
+    "check-api": "tsx scripts/check-api-connection.mts",
+    "mcp:smoke": "node scripts/mcp-stdio-smoke.mjs",
+    "mcp:test-llm": "node scripts/mcp-llm-smoke.mjs"
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
@@ -24,6 +29,7 @@
     "react-katex": "^3.1.0"
   },
   "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
     "@types/react": "^19",
@@ -32,6 +38,8 @@
     "eslint": "^9",
     "eslint-config-next": "16.2.4",
     "tailwindcss": "^4",
-    "typescript": "^5"
+    "tsx": "^4.21.0",
+    "typescript": "^5",
+    "zod": "^4.4.2"
   }
 }

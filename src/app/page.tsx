@@ -28,6 +28,11 @@ type ParsedExplanation = {
 type ExamListResponse = {
   files: string[];
   error?: string;
+  sources?: { local?: boolean; googleDrive?: boolean };
+  warnings?: string[];
+  /** Next 서버가 읽는 작업 디렉터리 (원격 배포 시 사용자 PC 경로와 다름) */
+  serverCwd?: string;
+  localScanRoots?: string[];
 };
 
 type QueuedProblem = {
@@ -1151,17 +1156,35 @@ export default function Home() {
     setCurrentStep(2);
   };
 
+  const [examListHint, setExamListHint] = useState("");
+
   const loadExamFiles = useCallback(async () => {
     try {
       setIsLoadingExams(true);
       setErrorMessage("");
+      setExamListHint("");
       const response = await fetch("/api/exams", { cache: "no-store" });
       const data = (await response.json()) as ExamListResponse;
       if (!response.ok) {
         throw new Error(data.error || "시험지 목록 조회에 실패했습니다.");
       }
       setExamFiles(data.files);
+      const parts: string[] = [];
+      if (data.warnings?.length) parts.push(...data.warnings);
+      if (data.files.length === 0) {
+        if (data.sources?.googleDrive === false) {
+          parts.push("Google Drive OAuth가 없어 Drive 쪽 시험지는 목록에 안 붙습니다(.env.local).");
+        }
+        parts.push(
+          `서버 작업 경로(serverCwd): ${data.serverCwd ?? "(알 수 없음)"} — 시험지·exams는 이 기준의 하위에 있어야 합니다.`,
+        );
+        parts.push(
+          "브라우저 주소가 localhost가 아니면(예: Railway), 내 PC의 `highroad-math-solution/시험지`와는 별개입니다. Drive OAuth를 쓰거나, 직접 이미지 업로드·로컬에서 `npm run dev`로 열어 주세요.",
+        );
+      }
+      setExamListHint(parts.filter(Boolean).join(" "));
     } catch (error) {
+      setExamListHint("");
       const message =
         error instanceof Error
           ? error.message
@@ -2883,9 +2906,17 @@ export default function Home() {
               </label>
               <div className="h-44 overflow-y-auto rounded-md border border-slate-200">
                 {examFiles.length === 0 ? (
-                  <p className="p-3 text-sm text-slate-500">
-                    시험지 폴더에 파일이 없습니다. `시험지` 또는 `exams` 폴더에 png/jpg/pdf 파일을 넣어주세요.
-                  </p>
+                  <div className="p-3 text-sm text-slate-500">
+                    <p>
+                      시험지 폴더에 파일이 없습니다. 앱 루트(서버)의 `시험지` 또는 `exams`에 png/jpg/pdf
+                      등을 넣은 뒤 새로고침 하세요.
+                    </p>
+                    {examListHint ? (
+                      <p className="mt-2 rounded-md bg-amber-50 p-2 text-xs leading-snug text-amber-950">
+                        {examListHint}
+                      </p>
+                    ) : null}
+                  </div>
                 ) : (
                   <ul className="divide-y divide-slate-200">
                     {examFiles.map((file) => (

@@ -20,11 +20,13 @@
 
 ## 한 줄 구조(사용자 기준)
 
-1. **Railway** — PDF에서 영역 지정한 부분 **크롭**  
-   - 배포 시 **`NEXT_PUBLIC_UI_MODE=crop`** 를 넣으면 UI가 **시험지 선택 + 영역 지정**만 남고, 해설·DOCX 단계는 숨깁니다. 로컬 제작기에서는 이 변수를 두지 않습니다.  
+1. **Railway / 앱** — PDF에서 영역 지정한 부분 **크롭**  
+   - **`NEXT_PUBLIC_UI_MODE=crop`** 이면 UI가 **시험지 선택 + 영역 지정(+ 필요 시 Drive ZIP)** 중심이고, 해설·DOCX 단계는 숨깁니다. **해설·DOCX는 Cursor + MCP + CLI** 쪽이 주 동선입니다.  
 2. **Google Drive** — 그 묶음(이미지·zip 등)을 **Drive의 지정 폴더**에 저장  
-3. **Cursor** — 프롬프트·검수·문서 보조로 **해설 작업** 지원 (+ 로컬 Next 앱에서 생성·편집)  
-4. **로컬 `해설지 최종본`** — 최종 해설지(DOCX 등)를 **반드시 이 폴더에 저장**해 두어, 다른 PC로 폴더만 복사해도 동일하게 쓸 수 있게 함  
+3. **Cursor + MCP** — MCP 도구로 Gemini **해설 초안** 생성 → Cursor가 **형식·검수** → **`npm run write-final-docx`** 또는 (레거시) 로컬 Next `/api/save-result` 로 **로컬 `해설지 최종본`** 에 DOCX 저장  
+4. **로컬 `해설지 최종본`** — 최종 해설지(DOCX)를 **반드시 이 폴더에 저장**해 두어, 다른 PC로 폴더만 복사해도 동일하게 쓸 수 있게 함  
+
+상세·가능 여부·MCP 설정: **[CURSOR_MCP_WORKFLOW.md](./CURSOR_MCP_WORKFLOW.md)**  
 
 ---
 
@@ -43,15 +45,20 @@ flowchart TB
     BUNDLE --> GD_IN
   end
   subgraph work["3. 해설 작업"]
-    CUR[Cursor\n보조·규칙·검토]
-    APP[로컬 Next 앱\n생성·배치·DOCX]
+    MCP[MCP\nGemini 초안]
+    CUR[Cursor\n검수·정리]
+    CLI[write-final-docx\nCLI]
+    APP[로컬 Next\n레거시 full]
+    MCP --> CUR
+    CUR --> CLI
     CUR -.-> APP
   end
   subgraph out["4. 로컬 산출"]
     LOCAL[(프로젝트/해설지 최종본)]
+    CLI --> LOCAL
     APP --> LOCAL
   end
-  GD_IN -->|목록·다운로드\n또는 수동 동기화| APP
+  GD_IN -->|목록·다운로드\n또는 수동 동기화| CUR
 ```
 
 ---
@@ -62,7 +69,7 @@ flowchart TB
 |------|------|------|
 | **Drive · 입력 폴더** | 시험지 PDF 등 **읽기** | **`GOOGLE_DRIVE_EXAMS_FOLDER_ID`** (또는 부모 아래 `시험지`) |
 | **Drive · 작업완료** | 크롭 문항을 **ZIP 한 개**로 업로드 | **`GOOGLE_DRIVE_WORK_COMPLETE_FOLDER_ID`** 또는 부모 아래 **`작업완료`** 폴더. API: **`POST /api/upload-crop-bundle`** (UI: 「작업완료 폴더에 ZIP 묶음 업로드」) |
-| **로컬 · `해설지 최종본`** | **최종 해설 DOCX만** 저장(API `/api/save-result`) | 코드 상수: `src/lib/outputPaths.ts` 의 `FINAL_EXPLANATION_DIR_NAME`. 타 PC로 **이 폴더를 복사**하면 동일하게 사용 |
+| **로컬 · `해설지 최종본`** | **최종 해설 DOCX만** 저장 | **`npm run write-final-docx`** 또는 API `/api/save-result`(동일 빌더). 상수: `src/lib/outputPaths.ts` 의 `FINAL_EXPLANATION_DIR_NAME` |
 
 **원칙:** 최종 **DOCX**는 Drive API로 올리지 않음. **크롭 ZIP**만 Drive `작업완료`에 올릴 수 있음.
 

@@ -14,6 +14,7 @@
 
 ## OpenAI
 
+- **MCP** (`mcp/gemini-explanation.mts` 도구 `generate_math_explanation_openai`): `OPENAI_API_KEY` 필수, 모델은 인자 `model` 또는 **`OPENAI_MODEL_GENERATE_FALLBACK`**(없으면 `gpt-4o-mini`).
 - **폴백** (Gemini 실패 시): `OPENAI_MODEL_GENERATE_FALLBACK` (기본 `gpt-4o-mini`), `OPENAI_EXPLANATION_FORMAT_RETRY`
 - **교차 검증**(옵션): `EXPLANATION_CROSS_VERIFY=true`, `OPENAI_MODEL_CROSS_VERIFY`
 

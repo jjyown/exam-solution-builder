@@ -55,12 +55,16 @@ export async function GET() {
     }
 
     const sorted = Array.from(foundFiles).sort((a, b) => a.localeCompare(b, "ko"));
+    const cwd = process.cwd();
     return NextResponse.json({
       files: sorted,
       sources: {
         local: true,
         googleDrive: isGoogleDriveConfigured(),
       },
+      /** 브라우저 주소가 원격이면 이 경로는 사용자 PC와 다릅니다(목록이 비는 주된 원인). */
+      serverCwd: cwd,
+      localScanRoots: EXAM_DIR_CANDIDATES.map((dirPath) => path.relative(cwd, dirPath) || "."),
       ...(warnings.length > 0 ? { warnings } : {}),
     });
   } catch (error) {
