@@ -756,6 +756,7 @@ export default function Home() {
   const [noExplanationRefPage, setNoExplanationRefPage] = useState(false);
   const [isLoadingExams, setIsLoadingExams] = useState(false);
   const [isUploadingCropBundle, setIsUploadingCropBundle] = useState(false);
+  const [isDownloadingCropBundle, setIsDownloadingCropBundle] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
   const [queuedProblems, setQueuedProblems] = useState<QueuedProblem[]>([]);
   const [savedPageNumbers, setSavedPageNumbers] = useState<number[]>([]);
@@ -2334,44 +2335,49 @@ export default function Home() {
     setQueuedProblems((prev) => prev.filter((item) => item.id !== id));
   };
 
+  const buildCropBundleZipBlob = useCallback(async (): Promise<{ blob: Blob; examLabel: string }> => {
+    const JSZip = (await import("jszip")).default;
+    const zip = new JSZip();
+    const extFromMime = (mime: string) => {
+      const m = mime.toLowerCase();
+      if (m.includes("png")) return ".png";
+      if (m.includes("jpeg")) return ".jpg";
+      if (m.includes("webp")) return ".webp";
+      if (m.includes("gif")) return ".gif";
+      return ".img";
+    };
+    const itemsMeta: Array<{ questionNo: string; pageLabel: string; file: string }> = [];
+    for (const item of queuedProblems) {
+      const label = item.pageLabel.replace(/[/\\?%*:|"<> \t\n\r]/g, "_") || "page";
+      const ext = extFromMime(item.imageMimeType || "image/png");
+      const fname = `q${item.questionNo}_${label}${ext}`;
+      zip.file(fname, item.imageBase64, { base64: true });
+      itemsMeta.push({ questionNo: item.questionNo, pageLabel: item.pageLabel, file: fname });
+    }
+    const examLabel = selectedExam || "직접업로드";
+    zip.file(
+      "manifest.json",
+      JSON.stringify(
+        {
+          exportedAt: new Date().toISOString(),
+          examName: examLabel,
+          itemCount: queuedProblems.length,
+          items: itemsMeta,
+        },
+        null,
+        2,
+      ),
+    );
+    const blob = await zip.generateAsync({ type: "blob", compression: "DEFLATE" });
+    return { blob, examLabel };
+  }, [queuedProblems, selectedExam]);
+
   const handleUploadCropBundleToDrive = useCallback(async () => {
     if (queuedProblems.length === 0) return;
     setIsUploadingCropBundle(true);
     setErrorMessage("");
     try {
-      const JSZip = (await import("jszip")).default;
-      const zip = new JSZip();
-      const extFromMime = (mime: string) => {
-        const m = mime.toLowerCase();
-        if (m.includes("png")) return ".png";
-        if (m.includes("jpeg")) return ".jpg";
-        if (m.includes("webp")) return ".webp";
-        if (m.includes("gif")) return ".gif";
-        return ".img";
-      };
-      const itemsMeta: Array<{ questionNo: string; pageLabel: string; file: string }> = [];
-      for (const item of queuedProblems) {
-        const label = item.pageLabel.replace(/[/\\?%*:|"<> \t\n\r]/g, "_") || "page";
-        const ext = extFromMime(item.imageMimeType || "image/png");
-        const fname = `q${item.questionNo}_${label}${ext}`;
-        zip.file(fname, item.imageBase64, { base64: true });
-        itemsMeta.push({ questionNo: item.questionNo, pageLabel: item.pageLabel, file: fname });
-      }
-      const examLabel = selectedExam || "직접업로드";
-      zip.file(
-        "manifest.json",
-        JSON.stringify(
-          {
-            exportedAt: new Date().toISOString(),
-            examName: examLabel,
-            itemCount: queuedProblems.length,
-            items: itemsMeta,
-          },
-          null,
-          2,
-        ),
-      );
-      const blob = await zip.generateAsync({ type: "blob", compression: "DEFLATE" });
+      const { blob, examLabel } = await buildCropBundleZipBlob();
       const form = new FormData();
       form.append("file", blob, "bundle.zip");
       form.append("examName", examLabel);
@@ -2387,7 +2393,34 @@ export default function Home() {
     } finally {
       setIsUploadingCropBundle(false);
     }
-  }, [queuedProblems, selectedExam]);
+  }, [buildCropBundleZipBlob]);
+
+  const handleDownloadCropBundleZip = useCallback(async () => {
+    if (queuedProblems.length === 0) return;
+    setIsDownloadingCropBundle(true);
+    setErrorMessage("");
+    setSuccessMessage("");
+    try {
+      const { blob, examLabel } = await buildCropBundleZipBlob();
+      const stamp = new Date().toISOString().replace(/[-:]/g, "").replace("T", "_").slice(0, 15);
+      const safeBase = examLabel.replace(/[/\\?%*:|"<>]/g, "_").trim().slice(0, 80) || "crop";
+      const fileName = `${safeBase}_크롭묶음_${stamp}.zip`;
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = fileName;
+      a.rel = "noopener";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      setSuccessMessage("크롭 ZIP을 브라우저 다운로드로 저장했습니다. 이후 로컬에서 해설·DOCX 작업을 이어가면 됩니다.");
+    } catch (e) {
+      setErrorMessage(e instanceof Error ? e.message : "ZIP 내려받기 중 오류");
+    } finally {
+      setIsDownloadingCropBundle(false);
+    }
+  }, [buildCropBundleZipBlob]);
 
   const runBatchGeneration = async () => {
     if (queuedProblems.length === 0) {
@@ -3488,7 +3521,7 @@ export default function Home() {
                       저장된 문항 ({queuedProblems.length}개)
                     </p>
                     <p className="mt-1 text-[11px] leading-snug text-emerald-900">
-                      목록은 이 브라우저 탭 세션에만 유지됩니다. 아래 버튼으로 Drive 「작업완료」에 ZIP 한 개로 올릴 수 있습니다(.env에 OAuth·폴더 설정 필요).
+                      목록은 이 브라우저 탭 세션에만 유지됩니다. ZIP을 PC에 내려받거나, Drive 「작업완료」에 한 번에 올릴 수 있습니다(Drive는 OAuth·폴더 env 필요).
                     </p>
                     {queuedProblems.length === 0 ? (
                       <p className="mt-2 text-xs text-emerald-800">
@@ -3531,16 +3564,26 @@ export default function Home() {
                       </ul>
                     )}
                     {queuedProblems.length > 0 && (
-                      <button
-                        type="button"
-                        disabled={isUploadingCropBundle}
-                        onClick={() => void handleUploadCropBundleToDrive()}
-                        className="mt-3 w-full rounded-md bg-violet-700 px-3 py-2 text-sm font-semibold text-white hover:bg-violet-800 disabled:cursor-not-allowed disabled:opacity-55"
-                      >
-                        {isUploadingCropBundle
-                          ? "Drive 업로드 중..."
-                          : "작업완료 폴더에 ZIP 묶음 업로드"}
-                      </button>
+                      <div className="mt-3 flex flex-col gap-2 sm:flex-row">
+                        <button
+                          type="button"
+                          disabled={isDownloadingCropBundle || isUploadingCropBundle}
+                          onClick={() => void handleDownloadCropBundleZip()}
+                          className="w-full rounded-md border border-emerald-700 bg-white px-3 py-2 text-sm font-semibold text-emerald-950 hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-55 sm:flex-1"
+                        >
+                          {isDownloadingCropBundle ? "ZIP 만드는 중..." : "ZIP 파일로 내려받기"}
+                        </button>
+                        <button
+                          type="button"
+                          disabled={isUploadingCropBundle || isDownloadingCropBundle}
+                          onClick={() => void handleUploadCropBundleToDrive()}
+                          className="w-full rounded-md bg-violet-700 px-3 py-2 text-sm font-semibold text-white hover:bg-violet-800 disabled:cursor-not-allowed disabled:opacity-55 sm:flex-1"
+                        >
+                          {isUploadingCropBundle
+                            ? "Drive 업로드 중..."
+                            : "작업완료 폴더에 ZIP 묶음 업로드"}
+                        </button>
+                      </div>
                     )}
                   </div>
                 )}
@@ -3603,16 +3646,30 @@ export default function Home() {
                 </button>
               )}
               {queuedProblems.length > 0 && (
-                <button
-                  type="button"
-                  disabled={isUploadingCropBundle || isBatchGenerating}
-                  onClick={() => void handleUploadCropBundleToDrive()}
-                  className="mt-2 w-full rounded-md border border-violet-500 bg-white px-3 py-2 text-sm font-semibold text-violet-900 hover:bg-violet-50 disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  {isUploadingCropBundle
-                    ? "Drive 업로드 중..."
-                    : "작업완료 폴더에 ZIP 묶음 업로드"}
-                </button>
+                <div className="mt-2 flex flex-col gap-2 sm:flex-row">
+                  <button
+                    type="button"
+                    disabled={
+                      isDownloadingCropBundle || isUploadingCropBundle || isBatchGenerating
+                    }
+                    onClick={() => void handleDownloadCropBundleZip()}
+                    className="w-full rounded-md border border-slate-400 bg-white px-3 py-2 text-sm font-semibold text-slate-900 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 sm:flex-1"
+                  >
+                    {isDownloadingCropBundle ? "ZIP 만드는 중..." : "ZIP 파일로 내려받기"}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={
+                      isUploadingCropBundle || isDownloadingCropBundle || isBatchGenerating
+                    }
+                    onClick={() => void handleUploadCropBundleToDrive()}
+                    className="w-full rounded-md border border-violet-500 bg-white px-3 py-2 text-sm font-semibold text-violet-900 hover:bg-violet-50 disabled:cursor-not-allowed disabled:opacity-50 sm:flex-1"
+                  >
+                    {isUploadingCropBundle
+                      ? "Drive 업로드 중..."
+                      : "작업완료 폴더에 ZIP 묶음 업로드"}
+                  </button>
+                </div>
               )}
               <button
                 onClick={runBatchGeneration}
