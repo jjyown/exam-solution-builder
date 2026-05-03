@@ -2,6 +2,8 @@ import path from "node:path";
 import { google } from "googleapis";
 import type { drive_v3 } from "googleapis";
 
+import { FINAL_EXPLANATION_DIR_NAME } from "./outputPaths";
+
 function env(key: string) {
   return process.env[key]?.trim() || "";
 }
@@ -96,6 +98,24 @@ export async function resolveDriveWorkCompleteFolderId(drive: drive_v3.Drive): P
   if (!id) {
     throw new Error(
       `Drive에서 「${folderName}」 폴더를 찾지 못했습니다. 루트의 「${parentName}」 아래에 「${folderName}」 폴더를 만들거나, GOOGLE_DRIVE_WORK_COMPLETE_FOLDER_ID 를 직접 지정하세요.`,
+    );
+  }
+  return id;
+}
+
+/** 크롭 ZIP을 「해설지 최종본」 등 최종 산출용 Drive 폴더에 넣을 때 (로컬 폴더명과 동일 기본값) */
+export async function resolveDriveFinalExplanationFolderId(drive: drive_v3.Drive): Promise<string> {
+  const direct = env("GOOGLE_DRIVE_FINAL_EXPLANATION_FOLDER_ID");
+  if (direct) return direct;
+
+  const parentName = env("GOOGLE_DRIVE_PARENT_FOLDER_NAME") || "해설제작";
+  const folderName =
+    env("GOOGLE_DRIVE_FINAL_EXPLANATION_FOLDER_NAME") || FINAL_EXPLANATION_DIR_NAME;
+  const parentId = await resolveDriveParentFolderId(drive);
+  const id = await findChildFolderId(drive, parentId, folderName);
+  if (!id) {
+    throw new Error(
+      `Drive에서 「${folderName}」 폴더를 찾지 못했습니다. 「${parentName}」 아래에 해당 이름 폴더를 만들거나, GOOGLE_DRIVE_FINAL_EXPLANATION_FOLDER_ID 를 지정하세요.`,
     );
   }
   return id;

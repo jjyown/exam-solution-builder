@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import {
   getDriveClient,
   isGoogleDriveConfigured,
+  resolveDriveFinalExplanationFolderId,
   resolveDriveWorkCompleteFolderId,
   uploadBufferToDriveFolder,
 } from "@/lib/googleDrive";
@@ -31,6 +32,9 @@ export async function POST(request: Request) {
 
   const file = form.get("file");
   const examNameRaw = String(form.get("examName") ?? "").trim();
+  const driveFolderRaw = String(form.get("driveFolder") ?? "work-complete").trim();
+  const driveFolder =
+    driveFolderRaw === "final-explanation" ? "final-explanation" : "work-complete";
 
   if (!(file instanceof Blob)) {
     return NextResponse.json({ error: "file 필드에 ZIP 파일이 필요합니다." }, { status: 400 });
@@ -43,7 +47,11 @@ export async function POST(request: Request) {
 
   try {
     const drive = getDriveClient();
-    const folderId = await resolveDriveWorkCompleteFolderId(drive);
+    const folderId =
+      driveFolder === "final-explanation"
+        ? await resolveDriveFinalExplanationFolderId(drive)
+        : await resolveDriveWorkCompleteFolderId(drive);
+    const folderLabel = driveFolder === "final-explanation" ? "해설지 최종본" : "작업완료";
     const base = safeZipBaseName(examNameRaw || "cropped");
     const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
     const zipName = `${base}_크롭묶음_${stamp}.zip`;
@@ -57,9 +65,10 @@ export async function POST(request: Request) {
 
     return NextResponse.json({
       ok: true,
-      message: `Drive 「작업완료」 폴더에 업로드했습니다: ${name}`,
+      message: `Drive 「${folderLabel}」 폴더에 업로드했습니다: ${name}`,
       fileId: id,
       fileName: name,
+      driveFolder,
     });
   } catch (e) {
     const msg = e instanceof Error ? e.message : "Drive 업로드 중 오류가 발생했습니다.";
