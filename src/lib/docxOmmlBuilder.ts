@@ -133,6 +133,69 @@ function parseBinom(afterCmd: string): [MathComponent, string] | null {
   ];
 }
 
+/** `\\log_2 x`, `\\ln x`, `\\lg_{10} x` — 밑·윗첨자는 함수 이름에만 붙이고 인자는 m:func 본문에 둔다. */
+function buildLogLikeFunctionName(
+  cmd: string,
+  sub?: MathComponent[],
+  sup?: MathComponent[],
+): MathComponent[] {
+  const baseName = new MathRun(cmd === "Pr" ? "Pr" : cmd);
+  if (sub?.length && sup?.length) {
+    return [
+      new MathPreSubSuperScript({
+        children: [baseName],
+        subScript: sub,
+        superScript: sup,
+      }),
+    ];
+  }
+  if (sub?.length) {
+    return [new MathSubScript({ children: [baseName], subScript: sub })];
+  }
+  if (sup?.length) {
+    return [new MathSuperScript({ children: [baseName], superScript: sup })];
+  }
+  return [baseName];
+}
+
+function parseLogLike(cmd: "log" | "ln" | "lg", afterCmd: string): [MathComponent, string] {
+  let rest = afterCmd.trimStart();
+  let sub: MathComponent[] | undefined;
+  let sup: MathComponent[] | undefined;
+  for (let pass = 0; pass < 2; pass += 1) {
+    rest = rest.trimStart();
+    if (!sub) {
+      const e = extractScriptAfterMarker(rest, "_");
+      if (e) {
+        [sub, rest] = e;
+      }
+    }
+    rest = rest.trimStart();
+    if (!sup) {
+      const e2 = extractScriptAfterMarker(rest, "^");
+      if (e2) {
+        [sup, rest] = e2;
+      }
+    }
+  }
+  rest = rest.trimStart();
+  const children: MathComponent[] = [];
+  if (rest && !/^[\^_]/.test(rest)) {
+    const pair = parseOneWithScripts(rest);
+    if (pair[0]) {
+      children.push(pair[0]);
+      rest = pair[1];
+    }
+  }
+  return [
+    new MathFunction({
+      name: buildLogLikeFunctionName(cmd, sub, sup),
+      children,
+    }),
+    rest,
+  ];
+}
+
 const SYMBOL_CMD: Record<string, string> = {
   cdot: "\u22C5",
   times: "×",
@@ -303,6 +366,10 @@ function parseBackslashCommand(s: string): [MathComponent, string] | null {
     const t = parseTextArg(afterCmd);
     if (!t) return null;
     return [new MathRun(t[0]), t[1]];
+  }
+
+  if (cmd === "log" || cmd === "ln" || cmd === "lg") {
+    return parseLogLike(cmd, afterCmd);
   }
 
   if (TRIG_LIKE.has(cmd)) {

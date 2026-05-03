@@ -7,7 +7,8 @@ create table if not exists public.exam_solutions (
   question_no text not null,
   body text not null,
   source_filename text,
-  updated_at timestamptz not null default now()
+  updated_at timestamptz not null default now(),
+  status text not null default 'draft'
 );
 
 create unique index if not exists exam_solutions_exam_question

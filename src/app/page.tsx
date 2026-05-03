@@ -21,6 +21,11 @@ import { MethodBlocksMarkdown } from "@/components/ExplanationMarkdownMath";
 import { buildSelectedExplanationBody, splitMethodBlocks } from "@/lib/explanationBlocks";
 import { CROPPED_EXAMS_DIR_NAME, FINAL_EXPLANATION_DIR_NAME } from "@/lib/outputPaths";
 import { isCropOnlyUi } from "@/lib/uiMode";
+import { ExamSolutionReviewProvider } from "@/components/examSolutionReview/ExamSolutionReviewContext";
+import {
+  ExamSolutionReviewDetailBlock,
+  ExamSolutionReviewListBlock,
+} from "@/components/examSolutionReview/ExamSolutionReviewPanels";
 
 type ParsedExplanation = {
   quickAnswer: string;
@@ -2888,6 +2893,10 @@ export default function Home() {
 
   return (
     <main className="min-h-screen bg-slate-100 p-4 md:p-6">
+      <ExamSolutionReviewProvider
+        active={currentStep === 3 && !isCropOnlyUi}
+        defaultExamName={selectedExam ?? ""}
+      >
       <div className="mx-auto grid max-w-[1600px] grid-cols-1 gap-4 lg:grid-cols-2">
         <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm md:p-6">
           <h1 className="text-xl font-bold text-slate-900">
@@ -2937,7 +2946,7 @@ export default function Home() {
                       : "border-slate-200 bg-white text-slate-500"
                   } disabled:cursor-not-allowed disabled:opacity-50`}
                 >
-                  3) 해설 제작
+                  3) 해설 검토 및 저장
                 </button>
               )}
             </div>
@@ -2948,10 +2957,16 @@ export default function Home() {
               {currentStep === 2 &&
                 (isCropOnlyUi
                   ? "현재 단계: 크롭 전용. 한 박스에 한 문항만(선지·조건까지). 페이지마다 「현재 페이지 작업 저장」으로 대기열에 쌓입니다."
-                  : "현재 단계: 수동 영역 지정. 한 박스에는 한 문항만(선지·조건까지). 여러 문항이 보이면 박스를 나눕니다. 저장 후 해설 제작으로 넘어가세요.")}
+                  : "현재 단계: 수동 영역 지정. 한 박스에는 한 문항만(선지·조건까지). 여러 문항이 보이면 박스를 나눕니다. 저장 후 「해설 검토 및 저장」으로 넘어가세요.")}
               {!isCropOnlyUi && currentStep === 3 &&
-                "현재 단계: 해설 제작. 문제풀이 → 해설선택 → 빠른정답 → 해설지 생성 순서로 진행하세요."}
+                "현재 단계: 해설 검토 및 저장. 왼쪽에서 DB 문항을 고르고 오른쪽에서 수식 미리보기·수정·검증을 마칩니다. 웹 AI 생성·DOCX는 아래 「고급」에서 열 수 있습니다."}
             </div>
+
+            {!isCropOnlyUi && currentStep === 3 && (
+              <div className="mt-4">
+                <ExamSolutionReviewListBlock />
+              </div>
+            )}
 
             {currentStep === 1 && (
               <>
@@ -3043,7 +3058,7 @@ export default function Home() {
               </>
             )}
 
-            {currentStep >= 2 && hasImage && (
+            {currentStep >= 2 && currentStep !== 3 && hasImage && (
               <div>
                 <label className="mb-2 block text-sm font-semibold text-slate-800">
                   3) 문제 영역 지정(크롭)
@@ -3637,7 +3652,11 @@ export default function Home() {
             )}
 
             {!isCropOnlyUi && currentStep >= 3 && (
-              <>
+              <details className="rounded-md border border-slate-300 bg-slate-50 p-2">
+                <summary className="cursor-pointer select-none py-1 text-sm font-semibold text-slate-800">
+                  고급: 웹에서 AI 해설 생성 · DOCX (기존 흐름)
+                </summary>
+                <div className="mt-3 space-y-4">
             <div className="rounded-md border border-violet-200 bg-violet-50 p-3">
               <p className="text-sm font-semibold text-violet-900">
                 해설 대기열 ({queuedProblems.length})
@@ -4150,7 +4169,8 @@ export default function Home() {
 
               </div>
             </details>
-              </>
+                </div>
+              </details>
             )}
 
             {errorMessage && (
@@ -4276,13 +4296,19 @@ export default function Home() {
             </div>
           ) : !isCropOnlyUi && currentStep !== 3 ? (
             <div className="rounded-md border border-dashed border-slate-300 bg-white p-8 text-center text-slate-500">
-              <p className="text-sm">3단계(해설 제작)에서 해설 미리보기가 표시됩니다.</p>
+              <p className="text-sm">3단계(해설 검토 및 저장)에서 Supabase 동기화 해설 미리보기가 표시됩니다.</p>
               <p className="mt-2 text-xs">
                 지금은 좌측에서 시험지 선택과 문제 영역 지정을 먼저 진행하세요.
               </p>
             </div>
           ) : !isCropOnlyUi && currentStep === 3 ? (
-            <>
+            <div className="sticky top-4 space-y-4">
+              <ExamSolutionReviewDetailBlock />
+              <details className="rounded-md border border-dashed border-slate-300 bg-slate-50/90 p-2">
+                <summary className="cursor-pointer text-sm font-semibold text-slate-700">
+                  참고: 이 브라우저 세션에서 웹으로 생성한 해설 미리보기
+                </summary>
+                <div className="mt-3 space-y-3">
               {!hasGeneratedResult && (
                 <div className="rounded-md border border-amber-300 bg-amber-50 p-5 text-center text-amber-900">
                   <p className="text-sm font-semibold">아직 해설이 생성되지 않았습니다.</p>
@@ -4463,14 +4489,16 @@ export default function Home() {
                     <div className="rounded-md border border-slate-300 bg-slate-50 p-10 text-center text-slate-700">
                       <p className="text-base font-semibold">이 문항의 해설이 아직 없습니다</p>
                       <p className="mt-2 text-sm text-slate-600">
-                        해설 제작이 끝난 뒤에도 보이지 않으면, 해당 문항 생성이 실패했을 수 있습니다.
+                        웹 일괄 생성이 끝난 뒤에도 보이지 않으면, 해당 문항 생성이 실패했을 수 있습니다.
                         좌측 결과 목록을 확인하거나 문항을 다시 생성해 주세요.
                       </p>
                     </div>
                   )}
                 </div>
               )}
-            </>
+                </div>
+              </details>
+            </div>
           ) : null}
 
           {!isCropOnlyUi && currentStep === 3 && exportDocEntriesForSave.length > 0 && (
@@ -4511,6 +4539,7 @@ export default function Home() {
           )}
         </section>
       </div>
+      </ExamSolutionReviewProvider>
     </main>
   );
 }

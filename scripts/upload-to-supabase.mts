@@ -3,9 +3,12 @@
  *
  * 사용:
  *   npm run db-push
- *   npm run db-push -- --only "[TEST] TEST1.pdf"   (특정 시험 폴더만)
+ *   npm run upload-solutions
+ *   npm run upload-solutions -- --only "[TEST] TEST1.pdf"   (특정 시험 폴더만)
  *
- * 필수 환경변수(.env.local): NEXT_PUBLIC_SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
+ * 필수 환경변수(.env.local):
+ *   - URL: NEXT_PUBLIC_SUPABASE_URL (또는 SUPABASE_URL)
+ *   - 키: SUPABASE_SERVICE_ROLE_KEY (anon 키로는 RLS·upsert 실패 가능)
  * 테이블 DDL: supabase/exam_solutions.sql
  */
 import { config } from "dotenv";
@@ -94,12 +97,21 @@ async function collectFromExamFolder(examFolderAbs: string, examName: string): P
 async function main() {
   const { onlyExam } = parseArgs(process.argv);
 
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  const url =
+    process.env.NEXT_PUBLIC_SUPABASE_URL?.trim() ||
+    process.env.SUPABASE_URL?.trim() ||
+    "";
+  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim() || "";
 
   if (!url || !serviceKey) {
+    const hasUrl = Boolean(url);
+    const hasService = Boolean(serviceKey);
+    const hasAnon = Boolean(process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY?.trim());
+    console.error(".env.local 에 아래 두 줄이 필요합니다 (이름 정확히):");
+    console.error("  NEXT_PUBLIC_SUPABASE_URL=https://xxxx.supabase.co");
+    console.error("  SUPABASE_SERVICE_ROLE_KEY=eyJ...   ← Settings → API 의 service_role (anon 아님)");
     console.error(
-      "NEXT_PUBLIC_SUPABASE_URL 또는 SUPABASE_SERVICE_ROLE_KEY 가 없습니다. .env.local 을 확인하세요.",
+      `현재: URL=${hasUrl ? "있음" : "없음"}, SERVICE_ROLE=${hasService ? "있음" : "없음"}${hasAnon ? ", ANON_KEY만 있음(부족)" : ""}`,
     );
     process.exit(1);
   }

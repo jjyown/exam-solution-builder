@@ -24,6 +24,7 @@
 1. **MCP**는 Cursor가 로컬에서 띄운 프로세스와 표준 프로토콜로 통신합니다. 여기서 **Gemini** 또는 **OpenAI(Chat Completions)** 를 호출해 **해설 초안 텍스트**만 반환하는 도구를 둡니다.
 2. **Cursor**는 그 텍스트를 받아 형식·오류·톤을 다듬고, 프로젝트 파일이나 CLI로 **산출물을 기록**할 수 있습니다.
 3. **DOCX**는 이미 `src/lib/examExplanationDocx.ts`의 `buildExamExplanationDocxBuffer`로 생성 가능합니다. Next API(`/api/save-result`)와 동일 로직을 **`npm run write-final-docx`** CLI로도 호출할 수 있게 두었습니다.
+4. **MCP ↔ 웹 API 프롬프트 통일:** `mcp/gemini-explanation.mts` 는 호출마다 `buildMcpSystemInstruction()`(= `prompts.ts` 의 전체 시스템 지시)를 **Gemini `systemInstruction` / OpenAI `system` 역할**로 넣는다. 예전에는 Cursor `task` 만 모델에 가서 규칙이 빠질 수 있었고, 그 차이가 초안·DOCX 불일치로 이어질 수 있다. 난이도 프로필만 바꿀 때: MCP 환경변수 `GEMINI_MCP_SOLVER_PROFILE=easy|balanced|killer`(기본 `balanced`). 해설 `.md` 편집 시 Cursor 규칙: `.cursor/rules/explanation-markdown-latex.mdc`.
 
 한계(의도적으로 분리):
 

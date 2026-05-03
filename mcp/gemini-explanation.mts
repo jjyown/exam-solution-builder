@@ -1,12 +1,16 @@
 /**
  * Cursor MCP stdio 서버: Gemini / OpenAI 로 수학 해설 초안 텍스트만 반환합니다.
  * 최종 검수·DOCX 저장은 Cursor 또는 `npm run write-final-docx`가 담당합니다.
+ *
+ * 시스템 지시: 웹 `/api/generate-explanation` 과 동일한 `buildMcpSystemInstruction` 을
+ * 항상 적용합니다(Cursor가 task 에 짧게만 써도 규칙이 빠지지 않음).
  */
 import "./0-bootstrap.mjs";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import { buildMcpSystemInstruction } from "../src/app/api/generate-explanation/prompts";
 /** `src/lib/geminiDefaultModels.ts` 와 동일한 값. tsx MCP 엔트리 번들 시 `../src/lib/...` import 가 실패하므로 여기서 복제. */
 const DEFAULT_GEMINI_COST_MODELS: readonly string[] = [
   "gemini-2.5-flash-lite",
@@ -27,8 +31,14 @@ function normalizeImageBase64(raw: string): string {
 
 type VisionPart = { base64: string; mimeType: string };
 
+function mcpSolverProfile(): "easy" | "balanced" | "killer" {
+  const raw = process.env.GEMINI_MCP_SOLVER_PROFILE?.trim().toLowerCase();
+  if (raw === "easy" || raw === "killer" || raw === "balanced") return raw;
+  return "balanced";
+}
+
 async function generateWithGemini(
-  prompt: string,
+  userTask: string,
   modelOverride: string | undefined,
   image: VisionPart | undefined,
 ): Promise<string> {
@@ -44,9 +54,10 @@ async function generateWithGemini(
     ? [modelOverride.trim()]
     : [...DEFAULT_GEMINI_COST_MODELS];
 
+  const systemInstruction = buildMcpSystemInstruction(mcpSolverProfile());
   const parts: unknown[] = image
     ? [
-        prompt,
+        { text: userTask },
         {
           inlineData: {
             mimeType: image.mimeType || "image/png",
@@ -54,13 +65,13 @@ async function generateWithGemini(
           },
         },
       ]
-    : [prompt];
+    : [{ text: userTask }];
 
   const failures: string[] = [];
   let lastErr: Error | null = null;
   for (const model of candidates) {
     try {
-      const m = genAI.getGenerativeModel({ model });
+      const m = genAI.getGenerativeModel({ model, systemInstruction });
       const res = await m.generateContent(parts as never);
       const text = res.response.text();
       if (text?.trim()) return text.trim();
@@ -77,7 +88,7 @@ async function generateWithGemini(
 }
 
 async function generateWithOpenAI(
-  task: string,
+  userTask: string,
   modelOverride: string | undefined,
   image: VisionPart | undefined,
 ): Promise<string> {
@@ -92,9 +103,10 @@ async function generateWithOpenAI(
     process.env.OPENAI_MODEL_GENERATE_FALLBACK?.trim() ||
     "gpt-4o-mini";
 
+  const systemInstruction = buildMcpSystemInstruction(mcpSolverProfile());
   const userContent = image
     ? [
-        { type: "text" as const, text: task },
+        { type: "text" as const, text: userTask },
         {
           type: "image_url" as const,
           image_url: {
@@ -102,7 +114,7 @@ async function generateWithOpenAI(
           },
         },
       ]
-    : task;
+    : userTask;
 
   const res = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
@@ -112,7 +124,10 @@ async function generateWithOpenAI(
     },
     body: JSON.stringify({
       model,
-      messages: [{ role: "user", content: userContent }],
+      messages: [
+        { role: "system", content: systemInstruction },
+        { role: "user", content: userContent },
+      ],
       temperature: 0.35,
     }),
   });
@@ -139,7 +154,7 @@ const server = new McpServer(
   { name: "highroad-gemini-explanation", version: "1.4.0" },
   {
     instructions:
-      "하이로드 수학 시험 해설 초안(Gemini·OpenAI). 이미지는 imageBase64+imageMimeType(순수 Base64 또는 data URL). 출력: [문항 n], [정답], [해설]. 객관식(①~⑤ 보기): [정답]은 1~5 한 자리만(계산 숫자 넣지 말 것). DOCX는 프로젝트 write-final-docx /api/generate-explanation과 동일 규칙.",
+      "하이로드 수학 시험 해설 초안(Gemini·OpenAI). 모든 호출에 웹 앱과 동일한 시스템 프롬프트(buildMcpSystemInstruction)가 자동 적용된다. task에는 난이도·특이 요청만 짧게 적어도 된다. 이미지: imageBase64+imageMimeType. 출력: [문제] 선택, [정답], [해설]. 객관식: [정답]은 1~5만. 프로필: env GEMINI_MCP_SOLVER_PROFILE=easy|balanced|killer (기본 balanced).",
   },
 );
 

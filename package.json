@@ -15,7 +15,8 @@
     "check-api": "tsx scripts/check-api-connection.mts",
     "mcp:smoke": "node scripts/mcp-stdio-smoke.mjs",
     "mcp:test-llm": "node scripts/mcp-llm-smoke.mjs",
-    "db-push": "tsx scripts/upload-to-supabase.mts"
+    "db-push": "tsx scripts/upload-to-supabase.mts",
+    "upload-solutions": "tsx scripts/upload-to-supabase.mts"
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
