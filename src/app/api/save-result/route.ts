@@ -2,6 +2,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { NextResponse } from "next/server";
 import { buildExamExplanationDocxBuffer } from "@/lib/examExplanationDocx";
+import { formatExportGateReport, validateExportReadiness } from "@/lib/explanationExportGate";
 import { FINAL_EXPLANATION_DIR_NAME } from "@/lib/outputPaths";
 
 const OUTPUT_DIR = path.join(process.cwd(), FINAL_EXPLANATION_DIR_NAME);
@@ -13,6 +14,16 @@ export async function POST(request: Request) {
     const examName = String(formData.get("examName") || "미지정시험지");
     const quickAnswer = String(formData.get("quickAnswer") || "-");
     const explanationBody = String(formData.get("explanationBody") || "");
+
+    const gate = validateExportReadiness(explanationBody);
+    if (!gate.ok) {
+      return NextResponse.json(
+        {
+          error: formatExportGateReport(gate),
+        },
+        { status: 400 },
+      );
+    }
 
     const now = new Date();
     const { buffer, docxFileName } = await buildExamExplanationDocxBuffer({

@@ -1,25 +1,36 @@
 import path from "node:path";
 import {
   Document,
+  ImageRun,
   Packer,
   Paragraph,
   ParagraphChild,
   TextRun,
   AlignmentType,
   SectionType,
-  TabStopType,
+  Table,
+  TableRow,
+  TableCell,
+  WidthType,
+  BorderStyle,
+  TableLayoutType,
 } from "docx";
 import { explanationLineToParagraphChildren } from "@/lib/docxOmmlBuilder";
 import {
   imageRunFromBuffer,
+  isDocxOmittedTypingReferenceCropMarkdownLine,
   parseMarkdownImageLine,
   readImageRelativeToBase,
 } from "@/lib/docxMarkdownImage";
 import {
   EXAM_DOCX_BODY_PARAGRAPH_SPACING,
   EXAM_DOCX_BODY_SIZE_HALF_PT,
+  EXAM_DOCX_EXPLANATION_PARAGRAPH_INDENT_TWIPS,
   EXAM_DOCX_FONT,
+  EXAM_DOCX_HML_PAGE,
+  EXAM_DOCX_INTER_QUESTION_BEFORE_TWIPS,
   EXAM_DOCX_SECTION_TITLE_HALF_PT,
+  EXAM_DOCX_SINGLE_COLUMN_WIDTH_TWIPS,
 } from "@/lib/examDocxTheme";
 import { explanationLatexToPlain, quickAnswerToPlainLine } from "@/lib/latexToPlainText";
 import { normalizeLatexSourceText } from "@/lib/latexSourceNormalize";
@@ -50,7 +61,82 @@ type ExplanationBlock = {
 /** 마크다운 이미지 줄(문제 원본·도형) */
 const MD_IMAGE_LINE = /^\s*!\[[^\]]*]\([^)]+\)\s*$/;
 
-/** `[문제]…[정답]` 선행이 있으면 분리한다. `[문항 n]` 직후에 주입된 `![](...)` 줄은 문제 블록 앞에 붙인다. `[문제]`가 없으면 `[정답]` 직전까지를 발문+선지로 본다. */
+/** DOCX에서 ㄱㄴㄷ·①~⑤ 보기 묶음을 테두리 박스로 넣기 위한 마커 */
+const OPEN_BOGI = /^\s*<보기>\s*$/i;
+const CLOSE_BOGI = /^\s*<\/보기>\s*$/i;
+
+const EXAM_DOCX_CHOICES_BOX_BORDER = {
+  style: BorderStyle.SINGLE,
+  size: 4,
+  color: "666666",
+} as const;
+
+/** 문항 블록을 한 덩어리로 묶어 페이지 경계에서 잘리지 않게 한다(HML과 동일하게 통째로 다음 페이지). */
+const EXAM_DOCX_QUESTION_WRAPPER_BORDERS = {
+  top: { style: BorderStyle.NIL, size: 0, color: "FFFFFF" },
+  bottom: { style: BorderStyle.NIL, size: 0, color: "FFFFFF" },
+  left: { style: BorderStyle.NIL, size: 0, color: "FFFFFF" },
+  right: { style: BorderStyle.NIL, size: 0, color: "FFFFFF" },
+  insideHorizontal: { style: BorderStyle.NIL, size: 0, color: "FFFFFF" },
+  insideVertical: { style: BorderStyle.NIL, size: 0, color: "FFFFFF" },
+} as const;
+
+function wrapQuestionBlockInCantSplitTable(children: (Paragraph | Table)[]): Table {
+  const colW = EXAM_DOCX_SINGLE_COLUMN_WIDTH_TWIPS;
+  return new Table({
+    layout: TableLayoutType.FIXED,
+    width: { size: colW, type: WidthType.DXA },
+    columnWidths: [colW],
+    borders: EXAM_DOCX_QUESTION_WRAPPER_BORDERS,
+    rows: [
+      new TableRow({
+        cantSplit: true,
+        children: [
+          new TableCell({
+            width: { size: colW, type: WidthType.DXA },
+            children,
+          }),
+        ],
+      }),
+    ],
+  });
+}
+
+type ProblemLineSegment = { type: "line"; line: string } | { type: "choices"; lines: string[] };
+
+/** `<보기>`~`</보기>`(또는 빈 줄·닫는 태그 생략 시 연속 보기 줄)을 한 덩어리로 분리한다. */
+function segmentProblemLinesForChoicesBox(rawLines: string[]): ProblemLineSegment[] {
+  const out: ProblemLineSegment[] = [];
+  let i = 0;
+  while (i < rawLines.length) {
+    const line = rawLines[i]!;
+    if (OPEN_BOGI.test(line)) {
+      i += 1;
+      const bucket: string[] = [];
+      while (i < rawLines.length) {
+        const L = rawLines[i]!;
+        if (CLOSE_BOGI.test(L)) {
+          i += 1;
+          break;
+        }
+        if (L.trim() === "") {
+          if (bucket.length > 0) break;
+          i += 1;
+          continue;
+        }
+        bucket.push(L);
+        i += 1;
+      }
+      if (bucket.length > 0) out.push({ type: "choices", lines: bucket });
+      continue;
+    }
+    out.push({ type: "line", line });
+    i += 1;
+  }
+  return out;
+}
+
+/** `[문제]…[빠른 정답]/[정답]` 선행이 있으면 분리한다. `[문항 n]` 직후 `![](...)` 줄은 문제 블록 앞에 붙인다. */
 function extractLeadingProblemBlock(chunk: string): { problemLinesRaw: string[]; rest: string } {
   const raw = chunk.trim();
   const lines = raw.split("\n");
@@ -61,7 +147,9 @@ function extractLeadingProblemBlock(chunk: string): { problemLinesRaw: string[];
     i += 1;
   }
   const t = lines.slice(i).join("\n").trim();
-  const m = t.match(/^\[문제(?:\s+\d+)?\]\s*([\s\S]*?)(?=\n\s*\[정답\]|\[정답\])/i);
+  const m = t.match(
+    /^\[문제(?:\s+\d+)?\]\s*([\s\S]*?)(?=\n\s*(?:\[빠른\s*정답\]|\[정답\])|(?:\[빠른\s*정답\]|\[정답\]))/i,
+  );
   if (m) {
     const problemLinesRaw = [
       ...leadingImages,
@@ -74,7 +162,7 @@ function extractLeadingProblemBlock(chunk: string): { problemLinesRaw: string[];
     return { problemLinesRaw, rest };
   }
 
-  const splitAtAnswer = t.split(/(?=\n\s*\[정답\])/i);
+  const splitAtAnswer = t.split(/(?=\n\s*(?:\[빠른\s*정답\]|\[정답\]))/i);
   if (splitAtAnswer.length >= 2) {
     const problemBody = splitAtAnswer[0]?.trim() ?? "";
     const rest = splitAtAnswer.slice(1).join("").trim();
@@ -83,7 +171,7 @@ function extractLeadingProblemBlock(chunk: string): { problemLinesRaw: string[];
       : [];
     return { problemLinesRaw: [...leadingImages, ...problemLines], rest };
   }
-  if (/^\[정답\]/i.test(t)) {
+  if (/^(?:\[빠른\s*정답\]|\[정답\])/i.test(t)) {
     return { problemLinesRaw: leadingImages, rest: t };
   }
   return { problemLinesRaw: [...leadingImages, ...t.split("\n").map((l) => l.trim()).filter(Boolean)], rest: "" };
@@ -102,8 +190,8 @@ function parseExplanationBlocks(explanationBody: string, fallbackQuickAnswer: st
     labeled.forEach((item) => {
       const { label, chunk } = item;
       const { problemLinesRaw, rest: chunkRest } = extractLeadingProblemBlock(chunk);
-      const answerMatch = chunkRest.match(/\[정답\]\s*([^\n\r]*)/i);
-      const answerLineMatch = chunkRest.match(/\[정답\]\s*\n\s*([^\n\r]+)/i);
+      const answerMatch = chunkRest.match(/\[(?:빠른\s*정답|정답)\]\s*([^\n\r]*)/i);
+      const answerLineMatch = chunkRest.match(/\[(?:빠른\s*정답|정답)\]\s*\n\s*([^\n\r]+)/i);
       const answer =
         answerLineMatch?.[1]?.trim() || answerMatch?.[1]?.trim() || fallbackQuickAnswer || "-";
       const explMatch = chunkRest.match(/\[해설\]\s*([\s\S]*)/i);
@@ -126,11 +214,13 @@ function parseExplanationBlocks(explanationBody: string, fallbackQuickAnswer: st
   }
 
   const { problemLinesRaw: leadingProblem, rest: rawRest } = extractLeadingProblemBlock(raw);
-  const answers = [...rawRest.matchAll(/\[정답\]\s*([^\n\r]*)/gi)].map(
+  const answers = [...rawRest.matchAll(/\[(?:빠른\s*정답|정답)\]\s*([^\n\r]*)/gi)].map(
     (item) => item[1]?.trim() || "-",
   );
   const explanationsRaw = [
-    ...rawRest.matchAll(/\[해설\]\s*([\s\S]*?)(?=\n\s*\[정답\]|\s*$)/gi),
+    ...rawRest.matchAll(
+      /\[해설\]\s*([\s\S]*?)(?=\n\s*(?:\[빠른\s*정답\]|\[정답\])|\s*$)/gi,
+    ),
   ].map((item) =>
     item[1]
       .split("\n")
@@ -203,9 +293,24 @@ function classifyQuickAnswerKind(answer: string, explanationLines: string[]): Qu
   return "short";
 }
 
+/** `[문제]` 블록 전용: 작업용「문제 원본」크롭 줄은 DOCX에 출력하지 않는다. */
+async function paragraphChildrenForProblemDocxLine(
+  line: string,
+  assetBaseDir: string | undefined,
+): Promise<ParagraphChild[] | null> {
+  if (isDocxOmittedTypingReferenceCropMarkdownLine(line)) return null;
+  return paragraphChildrenForDocxLine(line, assetBaseDir, { boldContent: true });
+}
+
+type DocxLineRenderOpts = {
+  /** [문제]·[해설] 본문: 평문·한글 구간 굵게 */
+  boldContent?: boolean;
+};
+
 async function paragraphChildrenForDocxLine(
   line: string,
   assetBaseDir: string | undefined,
+  renderOpts?: DocxLineRenderOpts,
 ): Promise<ParagraphChild[]> {
   const img = parseMarkdownImageLine(line);
   if (img && assetBaseDir) {
@@ -217,6 +322,7 @@ async function paragraphChildrenForDocxLine(
         new TextRun({
           text: `〔DOCX에 넣을 수 없는 이미지 형식〕 ${img.src}`,
           italics: true,
+          bold: renderOpts?.boldContent,
           font: EXAM_DOCX_FONT,
           size: EXAM_DOCX_BODY_SIZE_HALF_PT,
         }),
@@ -226,100 +332,279 @@ async function paragraphChildrenForDocxLine(
       new TextRun({
         text: `〔그림 파일 없음〕 ${img.src}`,
         italics: true,
+        bold: renderOpts?.boldContent,
         font: EXAM_DOCX_FONT,
         size: EXAM_DOCX_BODY_SIZE_HALF_PT,
       }),
     ];
   }
-  return explanationLineToParagraphChildren(line);
+  return explanationLineToParagraphChildren(line, { bold: renderOpts?.boldContent });
 }
 
-async function buildExplanationParagraphs(blocks: ExplanationBlock[], assetBaseDir?: string) {
-  const paragraphs: Paragraph[] = [];
+function isSingleImageRunParagraph(children: ParagraphChild[]): boolean {
+  return children.length === 1 && children[0] instanceof ImageRun;
+}
 
-  for (let idx = 0; idx < blocks.length; idx += 1) {
-    const block = blocks[idx]!;
-    const answerKind = classifyQuickAnswerKind(block.answer, block.explanationLines);
-    const objective = normalizeObjectiveAnswer(block.answer);
-    const rawAnswer = block.answer.trim();
-    /** ③만이 아니라 「③번」「③번 (구하는 값은 6)」처럼 붙은 객관식 요약은 평문 한 줄로 유지 */
-    const objectiveWithExtra =
-      Boolean(objective) &&
-      (/번/u.test(rawAnswer) || /\([^)]+\)/u.test(rawAnswer) || rawAnswer.replace(/\s/g, "").length > 2);
-    const quickAnswerText =
-      answerKind === "essay"
-        ? "해설참고"
-        : objectiveWithExtra
-          ? quickAnswerToPlainLine(block.answer || "-")
-          : objective
-            ? toCircledObjectiveAnswer(objective)
-            : quickAnswerToPlainLine(block.answer || "-");
-    if (block.problemLinesRaw.length > 0) {
-      paragraphs.push(
-        new Paragraph({
-          children: [
-            bodyTextRun({ text: `${block.questionLabel}) `, bold: true }),
-            bodyTextRun({ text: "[문제]", bold: true }),
-          ],
-          spacing: {
-            ...EXAM_DOCX_BODY_PARAGRAPH_SPACING,
-            before: idx === 0 ? 0 : 220,
-            after: 70,
-          },
-        }),
-      );
-      for (const line of block.problemLinesRaw) {
-        const children = await paragraphChildrenForDocxLine(line, assetBaseDir);
-        paragraphs.push(
-          new Paragraph({
-            children,
-            spacing: { ...EXAM_DOCX_BODY_PARAGRAPH_SPACING, after: 100 },
-          }),
-        );
-      }
-    }
-    paragraphs.push(
+/** DOCX 「문제」: `N. [문제]` 대신 `N. 발문…` 한 덩어리로 붙인다. */
+function prependQuestionNumberToProblemChildren(
+  questionLabel: string,
+  children: ParagraphChild[],
+): ParagraphChild[] {
+  return [bodyTextRun({ text: `${questionLabel}. `, bold: true }), ...children];
+}
+
+async function buildDocxChoicesBoxTable(lines: string[], assetBaseDir?: string): Promise<Table> {
+  const b = EXAM_DOCX_CHOICES_BOX_BORDER;
+  /** 2단 칼럼 너비에 맞춘 고정 그리드 — `WidthType.PERCENTAGE` 단독 사용 시 보기 박스가 가로로 눌리는 경우가 있어 DXA + fixed 레이아웃으로 통일 */
+  const colW = EXAM_DOCX_SINGLE_COLUMN_WIDTH_TWIPS;
+  const cellChildren: Paragraph[] = [
+    new Paragraph({
+      children: [bodyTextRun({ text: "보기", bold: true })],
+      spacing: { ...EXAM_DOCX_BODY_PARAGRAPH_SPACING, after: 60 },
+    }),
+  ];
+  for (const line of lines) {
+    const children = await paragraphChildrenForProblemDocxLine(line, assetBaseDir);
+    if (!children) continue;
+    const figureOnly = isSingleImageRunParagraph(children);
+    cellChildren.push(
       new Paragraph({
-        tabStops: [{ type: TabStopType.LEFT, position: 1800 }],
-        children: [
-          bodyTextRun({ text: `${block.questionLabel})`, bold: true }),
-          bodyTextRun({ text: "\t[빠른 정답] ", bold: true }),
-          bodyTextRun({ text: quickAnswerText, bold: true }),
-        ],
+        children,
+        alignment: figureOnly ? AlignmentType.CENTER : undefined,
         spacing: {
           ...EXAM_DOCX_BODY_PARAGRAPH_SPACING,
-          before: idx === 0 && block.problemLinesRaw.length === 0 ? 0 : 120,
-          after: 80,
+          after: figureOnly ? 140 : 80,
         },
       }),
     );
-    paragraphs.push(
+  }
+  return new Table({
+    layout: TableLayoutType.FIXED,
+    width: { size: colW, type: WidthType.DXA },
+    columnWidths: [colW],
+    borders: {
+      top: b,
+      bottom: b,
+      left: b,
+      right: b,
+      insideHorizontal: b,
+      insideVertical: b,
+    },
+    rows: [
+      new TableRow({
+        children: [
+          new TableCell({
+            width: { size: colW, type: WidthType.DXA },
+            margins: { top: 120, bottom: 120, left: 200, right: 200 },
+            children: cellChildren,
+          }),
+        ],
+      }),
+    ],
+  });
+}
+
+function quickAnswerDisplayText(block: ExplanationBlock): string {
+  const answerKind = classifyQuickAnswerKind(block.answer, block.explanationLines);
+  const objective = normalizeObjectiveAnswer(block.answer);
+  const rawAnswer = block.answer.trim();
+  const objectiveWithExtra =
+    Boolean(objective) &&
+    (/번/u.test(rawAnswer) || /\([^)]+\)/u.test(rawAnswer) || rawAnswer.replace(/\s/g, "").length > 2);
+  if (answerKind === "essay") return "해설참고";
+  if (objectiveWithExtra) return quickAnswerToPlainLine(block.answer || "-");
+  if (objective) return toCircledObjectiveAnswer(objective);
+  return quickAnswerToPlainLine(block.answer || "-");
+}
+
+/**
+ * HML·`[TEST] TEST1.hml` 과 같은 **대역 순서**(편집본 DOCX와 동일한 **구분 폼**):
+ * 1) 문항 순서대로 **문제** 전체(섹션·2단) — `N. 발문…`, 문항은 `w:cantSplit` 표로 묶어 페이지 가운데에서 잘리지 않게 함
+ * 2) **다음 면**에서 **`[빠른정답]`**(1단·전체 너비) — 문항마다 `N.` → `[정답]` → 값
+ * 3) **그다음 면**에서 **`[해설]`**(2단) — 문항마다 `N.` → `[정답]` → 값 → `[해설]` → 해설 본문 줄
+ */
+type ExamExplanationSectionChildren = {
+  /** 2단 본문 — 문항 단위 `cantSplit` 표로 감싼 블록 */
+  problemChildren: (Paragraph | Table)[];
+  /** 1단 — `[빠른정답]` 다음 페이지(HML 표 전체 너비에 가깝게) */
+  quickAnswerChildren: (Paragraph | Table)[];
+  /** 2단 — `[해설]` 다음 페이지 */
+  explanationChildren: (Paragraph | Table)[];
+};
+
+async function buildExplanationSectionChildren(
+  blocks: ExplanationBlock[],
+  assetBaseDir?: string,
+): Promise<ExamExplanationSectionChildren> {
+  const problemChildren: (Paragraph | Table)[] = [];
+
+  for (let idx = 0; idx < blocks.length; idx += 1) {
+    const block = blocks[idx]!;
+    if (block.problemLinesRaw.length === 0) continue;
+
+    const inner: (Paragraph | Table)[] = [];
+    let problemNumberPrefixApplied = false;
+    for (const seg of segmentProblemLinesForChoicesBox(block.problemLinesRaw)) {
+      if (seg.type === "choices") {
+        if (!problemNumberPrefixApplied) {
+          inner.push(
+            new Paragraph({
+              children: [bodyTextRun({ text: `${block.questionLabel}. `, bold: true })],
+              spacing: {
+                ...EXAM_DOCX_BODY_PARAGRAPH_SPACING,
+                before: idx === 0 ? 0 : EXAM_DOCX_INTER_QUESTION_BEFORE_TWIPS,
+                after: 80,
+              },
+            }),
+          );
+          problemNumberPrefixApplied = true;
+        }
+        inner.push(await buildDocxChoicesBoxTable(seg.lines, assetBaseDir));
+        continue;
+      }
+      let children = await paragraphChildrenForProblemDocxLine(seg.line, assetBaseDir);
+      if (!children) continue;
+      const isFirstProblemParagraph = !problemNumberPrefixApplied;
+      if (isFirstProblemParagraph) {
+        children = prependQuestionNumberToProblemChildren(block.questionLabel, children);
+        problemNumberPrefixApplied = true;
+      }
+      const figureOnly = isSingleImageRunParagraph(children);
+      inner.push(
+        new Paragraph({
+          children,
+          alignment: figureOnly ? AlignmentType.CENTER : undefined,
+          spacing: {
+            ...EXAM_DOCX_BODY_PARAGRAPH_SPACING,
+            before: isFirstProblemParagraph
+              ? idx === 0
+                ? 0
+                : EXAM_DOCX_INTER_QUESTION_BEFORE_TWIPS
+              : undefined,
+            after: figureOnly ? 140 : 100,
+          },
+        }),
+      );
+    }
+    if (inner.length > 0) {
+      problemChildren.push(wrapQuestionBlockInCantSplitTable(inner));
+    }
+  }
+
+  const quickAnswerChildren: (Paragraph | Table)[] = [
+    new Paragraph({
+      children: [bodyTextRun({ text: "[빠른정답]", bold: true })],
+      spacing: {
+        ...EXAM_DOCX_BODY_PARAGRAPH_SPACING,
+        before: 0,
+        after: 160,
+      },
+    }),
+  ];
+
+  for (let idx = 0; idx < blocks.length; idx += 1) {
+    const block = blocks[idx]!;
+    const quickAnswerText = quickAnswerDisplayText(block);
+    quickAnswerChildren.push(
+      new Paragraph({
+        children: [bodyTextRun({ text: `${block.questionLabel}.`, bold: true })],
+        spacing: {
+          ...EXAM_DOCX_BODY_PARAGRAPH_SPACING,
+          before: idx === 0 ? 80 : 160,
+          after: 60,
+        },
+      }),
+    );
+    quickAnswerChildren.push(
+      new Paragraph({
+        children: [bodyTextRun({ text: "[정답]", bold: true })],
+        spacing: { ...EXAM_DOCX_BODY_PARAGRAPH_SPACING, after: 60 },
+      }),
+    );
+    quickAnswerChildren.push(
+      new Paragraph({
+        children: [bodyTextRun({ text: quickAnswerText, bold: true })],
+        spacing: { ...EXAM_DOCX_BODY_PARAGRAPH_SPACING, after: 220 },
+      }),
+    );
+  }
+
+  const explIndent = EXAM_DOCX_EXPLANATION_PARAGRAPH_INDENT_TWIPS;
+  const explanationChildren: (Paragraph | Table)[] = [
+    new Paragraph({
+      children: [bodyTextRun({ text: "[해설]", bold: true })],
+      indent: explIndent,
+      spacing: {
+        ...EXAM_DOCX_BODY_PARAGRAPH_SPACING,
+        before: 0,
+        after: 160,
+      },
+    }),
+  ];
+
+  for (let idx = 0; idx < blocks.length; idx += 1) {
+    const block = blocks[idx]!;
+    const quickAnswerText = quickAnswerDisplayText(block);
+    explanationChildren.push(
+      new Paragraph({
+        children: [bodyTextRun({ text: `${block.questionLabel}.`, bold: true })],
+        indent: explIndent,
+        spacing: {
+          ...EXAM_DOCX_BODY_PARAGRAPH_SPACING,
+          before: idx === 0 ? 100 : 240,
+          after: 60,
+        },
+      }),
+    );
+    explanationChildren.push(
+      new Paragraph({
+        children: [bodyTextRun({ text: "[정답]", bold: true })],
+        indent: explIndent,
+        spacing: { ...EXAM_DOCX_BODY_PARAGRAPH_SPACING, after: 60 },
+      }),
+    );
+    explanationChildren.push(
+      new Paragraph({
+        children: [bodyTextRun({ text: quickAnswerText, bold: true })],
+        indent: explIndent,
+        spacing: { ...EXAM_DOCX_BODY_PARAGRAPH_SPACING, after: 60 },
+      }),
+    );
+    explanationChildren.push(
       new Paragraph({
         children: [bodyTextRun({ text: "[해설]", bold: true })],
-        spacing: { ...EXAM_DOCX_BODY_PARAGRAPH_SPACING, after: 120 },
+        indent: explIndent,
+        spacing: { ...EXAM_DOCX_BODY_PARAGRAPH_SPACING, after: 100 },
       }),
     );
     if (block.explanationLinesRaw.length === 0) {
-      paragraphs.push(
+      explanationChildren.push(
         new Paragraph({
-          children: [bodyTextRun({ text: "해설 본문이 제공되지 않았습니다." })],
-          spacing: { ...EXAM_DOCX_BODY_PARAGRAPH_SPACING, after: 140 },
+          children: [bodyTextRun({ text: "해설 본문이 제공되지 않았습니다.", bold: true })],
+          indent: explIndent,
+          spacing: { ...EXAM_DOCX_BODY_PARAGRAPH_SPACING, after: 200 },
         }),
       );
       continue;
     }
     for (const line of block.explanationLinesRaw) {
-      const children = await paragraphChildrenForDocxLine(line, assetBaseDir);
-      paragraphs.push(
+      const children = await paragraphChildrenForDocxLine(line, assetBaseDir, { boldContent: true });
+      const figureOnly = isSingleImageRunParagraph(children);
+      explanationChildren.push(
         new Paragraph({
           children,
-          spacing: EXAM_DOCX_BODY_PARAGRAPH_SPACING,
+          alignment: figureOnly ? AlignmentType.CENTER : undefined,
+          indent: explIndent,
+          spacing: {
+            ...EXAM_DOCX_BODY_PARAGRAPH_SPACING,
+            after: figureOnly ? 140 : EXAM_DOCX_BODY_PARAGRAPH_SPACING.after,
+          },
         }),
       );
     }
   }
 
-  return paragraphs;
+  return { problemChildren, quickAnswerChildren, explanationChildren };
 }
 
 export type BuildExamExplanationDocxParams = {
@@ -345,10 +630,22 @@ export async function buildExamExplanationDocxBuffer(params: BuildExamExplanatio
   const docxFileName = `${baseName}.docx`;
 
   const blocks = parseExplanationBlocks(params.explanationBody, quickAnswer);
-  const explanationParagraphs = await buildExplanationParagraphs(
+  const sectionsBody = await buildExplanationSectionChildren(
     blocks,
     params.assetBaseDir?.trim() || undefined,
   );
+  const noProblemPlaceholder: (Paragraph | Table)[] = [
+    new Paragraph({
+      children: [bodyTextRun({ text: "〔문제 본문이 없습니다.〕" })],
+      spacing: EXAM_DOCX_BODY_PARAGRAPH_SPACING,
+    }),
+  ];
+  const emptyExplFallback: (Paragraph | Table)[] = [
+    new Paragraph({
+      children: [bodyTextRun({ text: "해설 본문이 제공되지 않았습니다." })],
+      spacing: EXAM_DOCX_BODY_PARAGRAPH_SPACING,
+    }),
+  ];
   const headerTitle = `${path.parse(examName).name}(해설)`;
   const docDate = `${now.getFullYear()}.${String(now.getMonth() + 1).padStart(2, "0")}.${String(
     now.getDate(),
@@ -366,7 +663,12 @@ export async function buildExamExplanationDocxBuffer(params: BuildExamExplanatio
     },
     sections: [
       {
-        properties: {},
+        properties: {
+          page: {
+            size: EXAM_DOCX_HML_PAGE.size,
+            margin: EXAM_DOCX_HML_PAGE.margin,
+          },
+        },
         children: [
           new Paragraph({
             alignment: AlignmentType.CENTER,
@@ -389,7 +691,7 @@ export async function buildExamExplanationDocxBuffer(params: BuildExamExplanatio
             alignment: AlignmentType.CENTER,
             children: [
               new TextRun({
-                text: "※ 본문(2단): 문항별 [문제]·[빠른 정답]·[해설] 순 · 가운데 구분선 · 수식은 Word 수식(OMML). 마크다운 그림 경로는 본문 md와 같은 폴더를 기준으로 넣으면 DOCX에 삽입됩니다.",
+                text: "※ (1) **문제** 2단·문항 단위 `cantSplit` (2) **빠른정답**은 다음 **1단** 면 (3) **해설**은 그다음 **2단** 면. 문항 번호+발문, `![문제 원본](…)` 크롭은 DOCX에 넣지 않음. **N.** → **[정답]** → 값·**[해설]** 풀이. <보기>는 테두리 박스. 용지·여백·단 간격은 `[TEST] TEST1.hml` PAGEDEF/SECDEF·PARAMARGIN에 맞춤(B4 세로).",
                 italics: true,
                 size: EXAM_DOCX_BODY_SIZE_HALF_PT,
                 font: EXAM_DOCX_FONT,
@@ -402,22 +704,47 @@ export async function buildExamExplanationDocxBuffer(params: BuildExamExplanatio
       {
         properties: {
           type: SectionType.NEXT_PAGE,
+          page: {
+            size: EXAM_DOCX_HML_PAGE.size,
+            margin: EXAM_DOCX_HML_PAGE.margin,
+          },
           column: {
             count: 2,
-            space: 708,
+            space: EXAM_DOCX_HML_PAGE.columnSpaceTwips,
             separate: true,
           },
         },
-        children: [
-          ...(explanationParagraphs.length > 0
-            ? explanationParagraphs
-            : [
-                new Paragraph({
-                  children: [bodyTextRun({ text: "해설 본문이 제공되지 않았습니다." })],
-                  spacing: EXAM_DOCX_BODY_PARAGRAPH_SPACING,
-                }),
-              ]),
-        ],
+        children:
+          sectionsBody.problemChildren.length > 0 ? sectionsBody.problemChildren : noProblemPlaceholder,
+      },
+      {
+        properties: {
+          type: SectionType.NEXT_PAGE,
+          page: {
+            size: EXAM_DOCX_HML_PAGE.size,
+            margin: EXAM_DOCX_HML_PAGE.margin,
+          },
+          column: { count: 1 },
+        },
+        children: sectionsBody.quickAnswerChildren,
+      },
+      {
+        properties: {
+          type: SectionType.NEXT_PAGE,
+          page: {
+            size: EXAM_DOCX_HML_PAGE.size,
+            margin: EXAM_DOCX_HML_PAGE.margin,
+          },
+          column: {
+            count: 2,
+            space: EXAM_DOCX_HML_PAGE.columnSpaceTwips,
+            separate: true,
+          },
+        },
+        children:
+          sectionsBody.explanationChildren.length > 0
+            ? sectionsBody.explanationChildren
+            : emptyExplFallback,
       },
     ],
   });

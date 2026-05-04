@@ -13,6 +13,22 @@ export function parseMarkdownImageLine(line: string): { alt: string; src: string
   return { alt: (m[1] ?? "").trim(), src };
 }
 
+/**
+ * 타이핑·검수용으로 남긴 **문제 텍스트만 담긴 크롭** — 최종 해설지 DOCX `[문제]` 파트에는 넣지 않는다.
+ * (그래프·좌표평면·도형 등은 `![참고 도형 …]` 등 다른 대체 텍스트로 둔다.)
+ */
+export function isDocxOmittedTypingReferenceCropAlt(alt: string): boolean {
+  const a = (alt || "").trim();
+  if (!a) return false;
+  return /문제\s*원본|문제\s*스캔|원본\s*크롭|작업용(?:\s*크롭)?|타이핑\s*참고|HWP\s*스캔|시험지\s*스캔|문항\s*스캔/i.test(a);
+}
+
+export function isDocxOmittedTypingReferenceCropMarkdownLine(line: string): boolean {
+  const img = parseMarkdownImageLine(line.trim());
+  if (!img) return false;
+  return isDocxOmittedTypingReferenceCropAlt(img.alt);
+}
+
 type RasterType = "png" | "jpg" | "gif" | "bmp";
 
 function detectRasterType(buf: Buffer): RasterType | null {
@@ -72,8 +88,11 @@ function rasterDimensions(buf: Buffer, t: RasterType): { w: number; h: number } 
   return bmpDimensions(buf);
 }
 
-/** 2단 칼럼 기준 단일 칼럼 너비에 맞게 픽셀 단위로 축소(docx ImageRun 은 px → 내부 EMU 변환) */
-const MAX_DISPLAY_WIDTH_PX = 300;
+/**
+ * 2단 칼럼 기준 단일 칼럼 너비에 맞게 픽셀 단위로 축소(docx ImageRun 은 px → 내부 EMU 변환).
+ * B4·HML 여백(`examDocxTheme` EXAM_DOCX_HML_PAGE)에 맞춘 본문 단 너비보다 크지 않게 상한을 둔다.
+ */
+const MAX_DISPLAY_WIDTH_PX = 280;
 
 function scaleToMaxWidth(w: number, h: number): { width: number; height: number } {
   if (w <= 0 || h <= 0) return { width: MAX_DISPLAY_WIDTH_PX, height: 200 };

@@ -1,8 +1,10 @@
 import {
+  BuilderElement,
   Math,
   MathComponent,
   MathCurlyBrackets,
   MathFraction,
+  MathFunction,
   MathIntegral,
   MathPreSubSuperScript,
   MathRadical,
@@ -13,26 +15,77 @@ import {
   MathSuperScript,
   ParagraphChild,
   TextRun,
+  XmlComponent,
+  createMathAccentCharacter,
+  createMathBase,
 } from "docx";
 import { EXAM_DOCX_BODY_SIZE_HALF_PT, EXAM_DOCX_FONT } from "./examDocxTheme";
 import { explanationLatexToPlain } from "./latexToPlainText";
 import { normalizeLatexSourceText } from "./latexSourceNormalize";
 
-/** `\left`/`\right` 등은 단순 괄호로만 취급 */
+/**
+ * `2^{5/2}`, `4^{1/3}` 등 지수 안의 `숫자/숫자`를 OMML에서 **가로 분수**로 쌓이게 `\frac` 로 바꾼다.
+ * (그대로 두면 윗첨자에 `5`, `/`, `2`가 따로 나와 LaTeX·플레인텍스트처럼 보인다.)
+ */
+function normalizeNumericFractionInScripts(s: string): string {
+  let t = s;
+  for (let guard = 0; guard < 12; guard += 1) {
+    const next = t
+      .replace(/\^\{(\d+)\s*\/\s*(\d+)\}/g, "^{\\frac{$1}{$2}}")
+      .replace(/_\{(\d+)\s*\/\s*(\d+)\}/g, "_{\\frac{$1}{$2}}");
+    if (next === t) break;
+    t = next;
+  }
+  return t;
+}
+
+/** 수식 전용 줄·블록 끝의 마침표(소수점 오인 방지) — 문장 부호로 쓰이지 않게 제거 */
+function stripTrailingEquationPeriodInMath(inner: string): string {
+  const t = inner.trim();
+  return t.replace(/(?<=[\d\)\]}])\.(?=\s*$)/u, "");
+}
+
 function preprocessInlineMath(inner: string): string {
-  return inner
-    .replace(/\\dfrac\b|\\tfrac\b/g, "\\frac")
-    .replace(/\\left\s*\\\{/g, "{")
-    .replace(/\\right\s*\\\}/g, "}")
-    .replace(/\\left\s*\(/g, "(")
-    .replace(/\\right\s*\)/g, ")")
-    .replace(/\\left\s*\[/g, "[")
-    .replace(/\\right\s*\]/g, "]")
-    .replace(/\\left\s*\|/g, "|")
-    .replace(/\\right\s*\|/g, "|")
-    .replace(/\\left\s*\./g, "")
-    .replace(/\\right\s*\./g, "")
-    .replace(/\\left|\\right/g, "");
+  const stripped = stripTrailingEquationPeriodInMath(inner);
+  return normalizeNumericFractionInScripts(
+    stripped
+      /** `\dfrac12`·`\tfrac12` 처럼 한 자리 분수(중괄호 생략) → `\frac{1}{2}` */
+      .replace(/\\dfrac(?!\{)\s*(\d)\s*(\d)(?![0-9])/g, "\\frac{$1}{$2}")
+      .replace(/\\tfrac(?!\{)\s*(\d)\s*(\d)(?![0-9])/g, "\\frac{$1}{$2}")
+      .replace(/\\displaystyle\s*|\\textstyle\s*|\\scriptstyle\s*|\\scriptscriptstyle\s*/g, "")
+      /** HWP·복사 붙여넣기에서 쓰이는 중점·곱점 → LaTeX (OMML 파서가 인식) */
+      .replace(/\u00B7|\u2219|\u22C5|·/g, "\\cdot ")
+      .replace(/\\dfrac\b|\\tfrac\b/g, "\\frac")
+      /** 일부 편집기·복사 과정에서 `\frac` 앞 역슬래시만 `#`으로 깨지는 경우 */
+      .replace(/#frac\b/g, "\\frac")
+      .replace(/\\Biggl\s*/g, "")
+      .replace(/\\biggl\s*/g, "")
+      .replace(/\\Biggr\s*/g, "")
+      .replace(/\\biggr\s*/g, "")
+      .replace(/\\Bigl\s*/g, "")
+      .replace(/\\Bigr\s*/g, "")
+      .replace(/\\bigl\s*/g, "")
+      .replace(/\\bigr\s*/g, "")
+      .replace(/\\Bigm\s*/g, "")
+      .replace(/\\bigm\s*/g, "")
+      .replace(/\\Bigg[lrm]?\s*/g, "")
+      .replace(/\\bigg[lrm]?\s*/g, "")
+      .replace(/\\Big(?=\()/g, "")
+      .replace(/\\big(?=\()/g, "")
+      .replace(/\\Big\s+/g, "")
+      .replace(/\\big\s+/g, "")
+      .replace(/\\left\s*\\\{/g, "{")
+      .replace(/\\right\s*\\\}/g, "}")
+      .replace(/\\left\s*\(/g, "(")
+      .replace(/\\right\s*\)/g, ")")
+      .replace(/\\left\s*\[/g, "[")
+      .replace(/\\right\s*\]/g, "]")
+      .replace(/\\left\s*\|/g, "|")
+      .replace(/\\right\s*\|/g, "|")
+      .replace(/\\left\s*\./g, "")
+      .replace(/\\right\s*\./g, "")
+      .replace(/\\left|\\right/g, ""),
+  );
 }
 
 function takeBalancedBrace(s: string): [string, string] | null {
@@ -47,6 +100,28 @@ function takeBalancedBrace(s: string): [string, string] | null {
     }
   }
   return null;
+}
+
+/**
+ * OMML `m:bar`(pos=top) — `\overline{…}`.
+ * `m:acc`+가늠표는 일부 글꼴에서 P·Q 위에 빈 네모(토푸)가 뜨는 경우가 있어 Word 표준 막대로 처리한다.
+ */
+class MathOverline extends XmlComponent {
+  constructor(children: readonly MathComponent[]) {
+    super("m:bar");
+    this.root.push(
+      new BuilderElement({
+        name: "m:barPr",
+        children: [
+          new BuilderElement({
+            name: "m:pos",
+            attributes: { value: { key: "m:val", value: "top" } },
+          }),
+        ],
+      }),
+    );
+    this.root.push(createMathBase({ children }));
+  }
 }
 
 function takeParenContent(s: string): [string, string] | null {
@@ -158,21 +233,19 @@ function buildLogLikeFunctionName(
 }
 
 /**
- * Word OMML `m:func` 는 `m:fName` 과 인자 `m:e` 사이에 표준 수식 간격(함수 적용)이 들어가
- * 삼각함수·로그처럼 `\sin\theta`, `\log_2 x` 옆에 과한 빈칸이 보이는 경우가 많다.
- * 가시적 괄호 문자는 없고 `m:dPr` 만 있는 `m:d`(docx `MathRoundBrackets` 기본형)로 묶으면
- * 같은 수식 박스 안에서 이름과 인자가 바로 이어진다.
+ * 삼각·로그·지수 등: Word OMML `m:func` 로 이름과 인자를 분리하면
+ * `MathRoundBrackets`(묶음 m:d)에 비해 **가시 괄호·간격 왜곡**이 적고 교과서형 `\sin x` 에 가깝다.
  */
-function wrapTightFunctionNameAndArgs(
-  nameParts: MathComponent[],
-  args: MathComponent[],
-): MathComponent {
+function buildStandardFunction(nameParts: MathComponent[], args: MathComponent[]): MathComponent {
   if (args.length === 0) {
     if (nameParts.length === 0) return new MathRun("");
     if (nameParts.length === 1) return nameParts[0]!;
     return new MathRoundBrackets({ children: nameParts });
   }
-  return new MathRoundBrackets({ children: [...nameParts, ...args] });
+  return new MathFunction({
+    name: nameParts,
+    children: args,
+  });
 }
 
 function parseLogLike(cmd: "log" | "ln" | "lg", afterCmd: string): [MathComponent, string] {
@@ -205,7 +278,7 @@ function parseLogLike(cmd: "log" | "ln" | "lg", afterCmd: string): [MathComponen
     }
   }
   return [
-    wrapTightFunctionNameAndArgs(buildLogLikeFunctionName(cmd, sub, sup), children),
+    buildStandardFunction(buildLogLikeFunctionName(cmd, sub, sup), children),
     rest,
   ];
 }
@@ -244,6 +317,7 @@ const SYMBOL_CMD: Record<string, string> = {
   rightarrow: "→",
   Rightarrow: "⇒",
   Leftarrow: "⇐",
+  Leftrightarrow: "⇔",
   leftrightarrow: "↔",
   mapsto: "↦",
   parallel: "∥",
@@ -352,6 +426,13 @@ function parseBackslashCommand(s: string): [MathComponent, string] | null {
   const cmd = m[1];
   const afterCmd = s.slice(m[0].length);
 
+  if (cmd === "overline") {
+    const r = afterCmd.trimStart();
+    const tb = takeBalancedBrace(r);
+    if (!tb) return null;
+    const inner = parseConcat(tb[0].trim());
+    return [new MathOverline(inner) as MathComponent, tb[1]];
+  }
   if (cmd === "frac" || cmd === "dfrac" || cmd === "tfrac") {
     const f = parseFrac(afterCmd);
     return f;
@@ -397,7 +478,7 @@ function parseBackslashCommand(s: string): [MathComponent, string] | null {
       }
     }
     return [
-      wrapTightFunctionNameAndArgs([new MathRun(cmd === "Pr" ? "Pr" : cmd)], children),
+      buildStandardFunction([new MathRun(cmd === "Pr" ? "Pr" : cmd)], children),
       rest,
     ];
   }
@@ -535,8 +616,45 @@ export function normalizeDisplayMathDelimitersForDocx(line: string): string {
   return s;
 }
 
+/**
+ * 한 줄이 **수식 블록만** 이고 끝에 마침표가 붙은 경우 제거(소수점 오인 방지).
+ * `$$….$$` 처럼 블록 **안** 끝의 마침표는 `preprocessInlineMath` 의 strip 에서 처리.
+ */
+export function normalizeMathLineTrailingPeriod(line: string): string {
+  const lead = line.match(/^(\s*)/)?.[1] ?? "";
+  const t = line.trim();
+  if (!t || t.startsWith("![")) return line;
+  const m1 = t.match(/^(\$[^$\n]+\$)\s*\.\s*$/);
+  if (m1) return `${lead}${m1[1]}`;
+  const m2 = t.match(/^(\$\$[\s\S]*\$\$)\s*\.\s*$/);
+  if (m2) return `${lead}${m2[1]}`;
+  return line;
+}
+
+function normalizeExplanationPedagogyKorean(line: string): string {
+  return line
+    /** 백슬래시 유실·변환 실패로 남는 조각 */
+    .replace(/\bLeftrightarrow\b/g, "⇔")
+    .replace(/\bRightarrow\b/g, "⇒")
+    .replace(/\bLeftarrow\b/g, "⇐")
+    .replace(/\bLeftr\b/g, "⇔")
+    /** 보기 소항: `**ㄱ.**` → `ㄱ) ` (HML·교재형), 줄 아무 곳에서나 */
+    .replace(/\*\*ㄱ\.\*\*\s*/gu, "ㄱ) ")
+    .replace(/\*\*ㄴ\.\*\*\s*/gu, "ㄴ) ")
+    .replace(/\*\*ㄷ\.\*\*\s*/gu, "ㄷ) ")
+    .replace(/\*\*ㄹ\.\*\*\s*/gu, "ㄹ) ")
+    .replace(/와\s+동치이므로/g, "와 같으므로")
+    .replace(/과\s+동치이므로/g, "과 같으므로")
+    .replace(/와\s+동치이다/g, "와 같다")
+    .replace(/과\s+동치이다/g, "과 같다")
+    .replace(/와\s+동치다/g, "와 같다")
+    .replace(/과\s+동치다/g, "과 같다")
+    .replace(/으로\s+동치이다/g, "으로 같다")
+    .replace(/으로\s+동치다/g, "으로 같다");
+}
+
 function lineLooksLikeBareLatexCommand(line: string): boolean {
-  return /\\(?:frac|dfrac|tfrac|sqrt|binom|sum|prod|int|oint|cdot|times|leq|geq|neq|approx|equiv|pi|sin|cos|tan|log|ln|alpha|beta|gamma|theta|infty|partial|lim|to|rightarrow|Rightarrow|Leftarrow|ldots|cdots|vec|overline|underline|text|left|right|bigl|bigr|Bigl|Bigr|begin|end)\b/i.test(
+  return /\\(?:frac|dfrac|tfrac|sqrt|binom|sum|prod|int|oint|cdot|times|leq|geq|neq|approx|equiv|pi|sin|cos|tan|log|ln|alpha|beta|gamma|theta|infty|partial|lim|to|rightarrow|Rightarrow|Leftarrow|ldots|cdots|vec|overline|underline|text|left|right|bigl|bigr|Bigl|Bigr|begin|end|displaystyle)\b/i.test(
     line,
   );
 }
@@ -576,8 +694,21 @@ function segmentLineByDollars(line: string): LineSeg[] {
  * 해설 한 줄을 DOCX 단락 자식으로 변환한다.
  * `$...$` / `$$...$$` 는 OMML(Math), 그 외는 본문 텍스트(수식 없는 줄은 평문화).
  */
-export function explanationLineToParagraphChildren(line: string): ParagraphChild[] {
-  const normalizedLine = normalizeDisplayMathDelimitersForDocx(normalizeLatexSourceText(line));
+export type ExplanationLineDocxOptions = {
+  /** 문제·해설 본문 가독성: 한글·평문 구간만 굵게(OMML 수식 블록은 Word 기본 두께 유지). */
+  bold?: boolean;
+};
+
+export function explanationLineToParagraphChildren(
+  line: string,
+  opts?: ExplanationLineDocxOptions,
+): ParagraphChild[] {
+  const bold = Boolean(opts?.bold);
+  const normalizedLine = normalizeMathLineTrailingPeriod(
+    normalizeDisplayMathDelimitersForDocx(
+      normalizeExplanationPedagogyKorean(normalizeLatexSourceText(line)),
+    ),
+  );
   const segs = segmentLineByDollars(normalizedLine);
   const hasMath = segs.some((s) => s.kind === "math" && s.value.trim().length > 0);
   if (!hasMath) {
@@ -593,6 +724,7 @@ export function explanationLineToParagraphChildren(line: string): ParagraphChild
     return [
       new TextRun({
         text: explanationLatexToPlain(normalizedLine),
+        bold,
         font: EXAM_DOCX_FONT,
         size: EXAM_DOCX_BODY_SIZE_HALF_PT,
       }),
@@ -605,6 +737,7 @@ export function explanationLineToParagraphChildren(line: string): ParagraphChild
         children.push(
           new TextRun({
             text: seg.value,
+            bold,
             font: EXAM_DOCX_FONT,
             size: EXAM_DOCX_BODY_SIZE_HALF_PT,
           }),
@@ -620,6 +753,7 @@ export function explanationLineToParagraphChildren(line: string): ParagraphChild
     children.push(
       new TextRun({
         text: plain,
+        bold,
         font: EXAM_DOCX_FONT,
         size: EXAM_DOCX_BODY_SIZE_HALF_PT,
       }),

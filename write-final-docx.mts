@@ -16,9 +16,10 @@
  * 빠른정답: 같은 폴더에 `빠른정답_요약.txt`가 있으면 자동으로 읽습니다. 없으면 `--quick-answer` 또는 `-`.
  *
  * 그림: 합본 md와 같은 폴더를 asset 기준으로 씁니다. 다른 폴더면 `--asset-dir <dir>`.
+ * [문제] 안 `![문제 원본](…)` 등 타이핑 참고 크롭은 DOCX에 넣지 않고, 그래프·도형 줄만 삽입됩니다.
  *
- * 구성 검사: 기본적으로 문제+[정답]+[해설] 구조를 검사하고, 오류가 있으면 DOCX를 만들지 않습니다.
- *   --skip-structure-check   검사 생략(비권장)
+ * 구성 검사: **이중 검수**(기본 구조 + [문제]→[빠른 정답]→[해설] + 정밀 LaTeX 잔존·미닫힌 달러·코드 펜스). 오류 시 DOCX 미생성.
+ *   --skip-structure-check   검사 전부 생략(비권장)
  *
  * `buildExamExplanationDocxBuffer` 는 동적 import 로 불러옵니다.
  */
@@ -175,14 +176,12 @@ async function main() {
   }
 
   if (!skipStructureCheck) {
-    const { validateMergedExplanationMarkdown, formatStructureCheckReport } = await import(
-      "./src/lib/mergedExplanationStructureCheck"
-    );
-    const check = validateMergedExplanationMarkdown(explanationBody);
-    console.error(formatStructureCheckReport(check));
+    const { validateExportReadiness, formatExportGateReport } = await import("./src/lib/explanationExportGate");
+    const check = validateExportReadiness(explanationBody);
+    console.error(formatExportGateReport(check));
     if (!check.ok) {
       console.error(
-        "\nDOCX를 생성하지 않았습니다. 위 오류를 수정한 뒤 다시 실행하세요. (긴급 시에만 --skip-structure-check)",
+        "\nDOCX를 생성하지 않았습니다. 삼중 헤더·수식 밖 LaTeX 등을 수정한 뒤 다시 실행하세요. (긴급 시에만 --skip-structure-check)",
       );
       process.exit(1);
     }

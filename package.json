@@ -20,6 +20,7 @@
     "upload-solutions": "tsx scripts/upload-to-supabase.mts",
     "graph:for-md": "tsx scripts/orchestrate-question-graph.mts",
     "build:md": "tsx scripts/build-markdown-assembly.mts",
+    "validate:explanation": "tsx scripts/validate-explanation-format.mts",
     "batch:payloads": "tsx scripts/batch-explanations-from-payloads.mts"
   },
   "dependencies": {

@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { formatExportGateReport, validateExportReadiness } from "@/lib/explanationExportGate";
 import { getSupabaseServiceClient } from "@/lib/supabaseServiceClient";
 
 export const runtime = "nodejs";
@@ -32,6 +33,16 @@ export async function POST(request: Request) {
   }
   if (!body) {
     return NextResponse.json({ error: "explanationBody 가 비었습니다." }, { status: 400 });
+  }
+
+  const gate = validateExportReadiness(body);
+  if (!gate.ok) {
+    return NextResponse.json(
+      {
+        error: formatExportGateReport(gate),
+      },
+      { status: 400 },
+    );
   }
 
   const supabase = getSupabaseServiceClient();

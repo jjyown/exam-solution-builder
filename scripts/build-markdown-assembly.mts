@@ -36,6 +36,7 @@ type Cli = {
   imagesDir: string;
   outputPath: string;
   dryRun: boolean;
+  skipExportGate: boolean;
 };
 
 function parseArgs(argv: string[]): Cli {
@@ -44,6 +45,7 @@ function parseArgs(argv: string[]): Cli {
   let imagesDir = "";
   let outputPath = "";
   let dryRun = false;
+  let skipExportGate = false;
   for (let i = 2; i < argv.length; i += 1) {
     const a = argv[i];
     if (a === "--workdir" && argv[i + 1]) {
@@ -60,6 +62,8 @@ function parseArgs(argv: string[]): Cli {
       i += 1;
     } else if (a === "--dry-run") {
       dryRun = true;
+    } else if (a === "--skip-export-gate") {
+      skipExportGate = true;
     }
   }
   const wd = workdir.trim() ? path.resolve(process.cwd(), workdir) : "";
@@ -74,7 +78,7 @@ function parseArgs(argv: string[]): Cli {
     : wd
       ? path.join(wd, "합본_편집용.md")
       : "";
-  return { workdir: wd, manifestPath: manifest, imagesDir: imgDir, outputPath: out, dryRun };
+  return { workdir: wd, manifestPath: manifest, imagesDir: imgDir, outputPath: out, dryRun, skipExportGate };
 }
 
 function toPosixRel(fromFile: string, toAbsolute: string): string {
@@ -301,6 +305,19 @@ async function main() {
 
   await fs.writeFile(cli.outputPath, finalOut, "utf8");
   console.log(`작성 완료: ${cli.outputPath}`);
+
+  if (!cli.skipExportGate) {
+    const { validateExportReadiness, formatExportGateReport } = await import("../src/lib/explanationExportGate");
+    const gate = validateExportReadiness(finalOut);
+    console.error(formatExportGateReport(gate));
+    if (!gate.ok) {
+      console.error(
+        "\n합본이 내보내기 규칙을 통과하지 못했습니다. [문제]·[빠른 정답]·[해설] 순서와 수식($) 안쪽 여부를 수정하세요. (검사 생략: --skip-export-gate)",
+      );
+      process.exit(1);
+    }
+    console.error("이중 검수 통과.");
+  }
 }
 
 void main();
