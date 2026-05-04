@@ -138,7 +138,8 @@ export async function PATCH(request: Request) {
 }
 
 /**
- * DELETE ?id=<uuid> — 해당 행을 Supabase에서 제거
+ * DELETE ?id=<uuid>          — 해당 행 1건 삭제
+ * DELETE ?examName=<string>  — 해당 시험명의 행 전체 삭제(합본 포함)
  */
 export async function DELETE(request: Request) {
   const supabase = getSupabaseServiceClient();
@@ -151,8 +152,27 @@ export async function DELETE(request: Request) {
 
   const url = new URL(request.url);
   const id = (url.searchParams.get("id") || "").trim();
-  if (!id) {
-    return NextResponse.json({ error: "id 쿼리가 필요합니다." }, { status: 400 });
+  const examName = (
+    url.searchParams.get("examName") ||
+    url.searchParams.get("testName") ||
+    ""
+  ).trim();
+
+  if (!id && !examName) {
+    return NextResponse.json({ error: "id 또는 examName 쿼리가 필요합니다." }, { status: 400 });
+  }
+
+  if (examName) {
+    const { data, error } = await supabase
+      .from("exam_solutions")
+      .delete()
+      .eq("exam_name", examName)
+      .select("id");
+    if (error) {
+      return NextResponse.json({ error: error.message }, { status: 500 });
+    }
+    const deletedCount = Array.isArray(data) ? data.length : 0;
+    return NextResponse.json({ ok: true, deletedCount, examName });
   }
 
   const { data, error } = await supabase.from("exam_solutions").delete().eq("id", id).select("id").maybeSingle();

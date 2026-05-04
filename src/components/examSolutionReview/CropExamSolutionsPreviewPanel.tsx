@@ -29,6 +29,7 @@ export function CropExamSolutionsPreviewPanel({ examName }: { examName: string }
   const [err, setErr] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [deletingAll, setDeletingAll] = useState(false);
 
   const load = useCallback(async () => {
     if (!examName.trim()) {
@@ -94,6 +95,31 @@ export function CropExamSolutionsPreviewPanel({ examName }: { examName: string }
     }
   };
 
+  const removeAll = async () => {
+    const name = examName.trim();
+    if (!name) return;
+    if (
+      !window.confirm(
+        `필터된 시험(${name})의 해설 행을 Supabase에서 모두 삭제할까요?\n합본 포함 전체가 삭제되며 복구할 수 없습니다.`,
+      )
+    ) {
+      return;
+    }
+    setDeletingAll(true);
+    setErr(null);
+    try {
+      const q = `?examName=${encodeURIComponent(name)}`;
+      const res = await fetch(`/api/exam-solutions${q}`, { method: "DELETE" });
+      const data = (await res.json()) as { error?: string; deletedCount?: number };
+      if (!res.ok) throw new Error(data.error || "전체 삭제에 실패했습니다.");
+      await load();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setDeletingAll(false);
+    }
+  };
+
   useEffect(() => {
     if (items.length === 0) {
       setSelectedId(null);
@@ -156,13 +182,24 @@ export function CropExamSolutionsPreviewPanel({ examName }: { examName: string }
           필터: <span className="font-medium text-slate-800">{examName.trim() || "(전체)"}</span>
           {loading ? <span className="ml-2 text-slate-400">불러오는 중…</span> : null}
         </p>
-        <button
-          type="button"
-          onClick={() => void load()}
-          className="rounded border border-slate-400 bg-white px-2 py-1 text-xs font-semibold text-slate-800 hover:bg-slate-50"
-        >
-          새로고침
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => void load()}
+            className="rounded border border-slate-400 bg-white px-2 py-1 text-xs font-semibold text-slate-800 hover:bg-slate-50"
+          >
+            새로고침
+          </button>
+          <button
+            type="button"
+            disabled={items.length === 0 || deletingAll || deletingId !== null || loading}
+            onClick={() => void removeAll()}
+            className="rounded border border-rose-300 bg-rose-50 px-2 py-1 text-xs font-semibold text-rose-700 hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-50"
+            title="현재 필터(exam_name)의 행을 모두 삭제"
+          >
+            {deletingAll ? "전체 삭제 중…" : "모두 삭제"}
+          </button>
+        </div>
       </div>
 
       {err ? (
