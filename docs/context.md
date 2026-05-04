@@ -1,6 +1,6 @@
 # 하이로드 수학 해설지 제작기 — 컨텍스트 노트
 
-- 문서 기준일: 2026-05-02
+- 문서 기준일: 2026-05-04
 
 ## 제품·운영 컨텍스트
 
@@ -21,6 +21,7 @@
 
 | 날짜 | 결정 | 이유 | 영향 범위 |
 |------|------|------|-----------|
+| 2026-05-04 | OpenAI **종량제·하이브리드 라우팅**: `solver-profile`별 교차검증·Gemini 실패 시 폴백 모델 분리(easy→mini 기본, killer→4o 기본); easy 검증은 공통 `OPENAI_MODEL_CROSS_VERIFY`만으로는 4o를 쓰지 않음 | 원장님 비용·체감 요금 논의 반영, 공식 요금표는 시점별 변동 → 문서에 링크·감만 기술 | `generate-explanation/route.ts`, `docs/models.md`, `.env.local.example` |
 | 2026-05-03 | MCP 도구에 **`imageBase64`/`imageMimeType`** 추가 — 크롭 이미지 비전 풀이 후 Cursor가 참고용 대수 등으로 검수 | 구 MCP는 텍스트만 가능했음 | `mcp/gemini-explanation.mts`, `CURSOR_MCP_WORKFLOW.md` |
 | 2026-05-03 | **`batch:crops-to-docx` 기본은 API→DOCX 직행**(MCP·중재 없음). 품질 동선은 **`--drafts-only`** 또는 문항별 MCP | 혼동 방지·`해설 작업중/` 초안 저장 | `batch-crops-to-docx.mts`, 문서 |
 | 2026-05-03 | **주 동선: MCP 해설 + Cursor 중재** | 틀(DOCX·`[문항]`/`[정답]`/`[해설]`)은 **대략** 맞추면 되고, **해설 내용**을 좋게 하는 데 집중 | [CURSOR_MCP_WORKFLOW.md](./CURSOR_MCP_WORKFLOW.md), 배치는 보조 |

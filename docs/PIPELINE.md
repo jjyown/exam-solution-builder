@@ -16,6 +16,7 @@
 | [plan.md](./plan.md) | 목표, 원칙, 완료/다음 단계 |
 | [checklist.md](./checklist.md) | PASS/FAIL·회귀·미완료 |
 | [models.md](./models.md) | LLM·env 키 |
+| [AGENTIC_MD_PIPELINE.md](./AGENTIC_MD_PIPELINE.md) | matplotlib·OpenAI preflight·`validate:format` Agentic 동선 |
 
 각 파일 상단의 **문서 기준일**을 작업일에 맞출 것.
 
@@ -46,7 +47,7 @@
 | 단계 | 무엇을 쓰는지 | 비고 |
 |------|----------------|------|
 | **1차** | **Gemini** (`GEMINI_MODELS_GENERATE_*`, 프로필에 따라 easy/balanced/killer) | 크롭 이미지 기준 본 풀이·초안 |
-| **2차** | **OpenAI**(선택) — 교차 검증·대안 풀이 | `.env.local` 에 `EXPLANATION_CROSS_VERIFY=true`, `OPENAI_API_KEY` 필요. 킬러 검증 모델은 `OPENAI_MODEL_CROSS_VERIFY_KILLER` → 없으면 `OPENAI_MODEL_CROSS_VERIFY` → 코드 기본값 순 ([models.md](./models.md)). |
+| **2차** | **OpenAI**(선택) — 교차 검증·대안 풀이 | `EXPLANATION_CROSS_VERIFY=true`, `OPENAI_API_KEY`. **프로필별 모델**(easy→기본 mini, balanced/killer→기본 4o 등)은 [models.md](./models.md) 「하이브리드 라우팅」. |
 | **중재(계속)** | **Cursor**(에이전트·채팅) + **원장님 판단** | 제미나이 초안 vs 오픈AI 수정안이 **다르면** 어느 쪽을 따를지·어디를 합칠지 정한다. 한 문항에 대해 **여러 번** MCP/앱을 왕복해도 된다. 목표는 **규칙에 맞는 해설 한 벌**만 남기는 것. |
 | **합본·저장** | 위에서 확정한 텍스트를 `[문항 n]` … 형식으로 묶어 **`npm run write-final-docx`** 또는 **`/api/save-result`** 로 **`해설지 최종본`** | 자동 파이프라인은 **초안·검증까지 돕고**, **최종 책임·통합은 중재 단계**에 둔다. |
 

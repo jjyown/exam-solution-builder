@@ -18,8 +18,11 @@
     "mcp:test-llm": "node scripts/mcp-llm-smoke.mjs",
     "db-push": "tsx scripts/upload-to-supabase.mts",
     "upload-solutions": "tsx scripts/upload-to-supabase.mts",
+    "upload-solutions:watch": "tsx scripts/upload-to-supabase.mts --watch",
     "graph:for-md": "tsx scripts/orchestrate-question-graph.mts",
     "build:md": "tsx scripts/build-markdown-assembly.mts",
+    "build:md:agentic": "tsx scripts/build-markdown-assembly.mts --run-python-graphs",
+    "validate:format": "tsx scripts/validate-format.mts",
     "validate:explanation": "tsx scripts/validate-explanation-format.mts",
     "batch:payloads": "tsx scripts/batch-explanations-from-payloads.mts"
   },

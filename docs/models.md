@@ -30,14 +30,45 @@ OPENAI_MODEL_CROSS_VERIFY_KILLER=gpt-4o
 - **기본 후보**(env 비움): `src/lib/geminiDefaultModels.ts` — **`gemini-2.5-flash-lite` → `gemini-2.5-flash`** 순으로 시도. (구 `gemini-2.0-flash-lite`는 Google이 신규 키에서 단계적으로 비활성해 **404**가 나므로 폴백에서 제외됨.) 품질을 우선하면 env에 `gemini-2.0-flash` 등을 직접 적으면 됨.
 - **사전검증** `/api/precheck-extraction`: `GEMINI_MODELS_PRECHECK`
 - **해설 생성** `/api/generate-explanation`: `GEMINI_MODELS_GENERATE_*` 계열 (UI 생성 모드·프로필별로 키가 다름 — `resolveGeminiGenerateEnvKey` 와 동일)
-- **내보내기 보정** `/api/repair-explanations`: `GEMINI_MODELS_REPAIR`
+- **보내기 보정** `/api/repair-explanations`: `GEMINI_MODELS_REPAIR`
 - `gemini-1.5-pro`, `gemini-1.5-flash` 는 generate/precheck 후보에서 제외됩니다.
 
 ## OpenAI
 
 - **MCP** (`mcp/gemini-explanation.mts` 도구 `generate_math_explanation_openai`): `OPENAI_API_KEY` 필수, 모델은 인자 `model` 또는 **`OPENAI_MODEL_GENERATE_FALLBACK`**(없으면 `gpt-4o-mini`).
-- **폴백** (Gemini 실패 시): `OPENAI_MODEL_GENERATE_FALLBACK` (기본 `gpt-4o-mini`), `OPENAI_EXPLANATION_FORMAT_RETRY`
-- **교차 검증**(옵션, **Gemini 1차 초안 → OpenAI가 이미지·초안 대조 후 수정**): `EXPLANATION_CROSS_VERIFY=true`, `OPENAI_API_KEY` 필수. 일반 검증 모델: `OPENAI_MODEL_CROSS_VERIFY`(기본 `gpt-4o`). **killer 프로필**일 때는 `OPENAI_MODEL_CROSS_VERIFY_KILLER` → 없으면 `OPENAI_MODEL_CROSS_VERIFY` → 기본 `gpt-5.2` 순 (`generate-explanation/route.ts` 의 `resolveCrossVerifyModel`).
+- **폴백** (Gemini 실패 시, 비전 Chat Completions): 프로필별로 분기 (`generate-explanation/route.ts`).
+  - **easy:** `OPENAI_MODEL_GENERATE_FALLBACK_EASY` → `OPENAI_MODEL_GENERATE_FALLBACK` → `gpt-4o-mini`
+  - **balanced:** `OPENAI_MODEL_GENERATE_FALLBACK_BALANCED` → `OPENAI_MODEL_GENERATE_FALLBACK` → `gpt-4o-mini`
+  - **killer:** `OPENAI_MODEL_GENERATE_FALLBACK_KILLER` → `OPENAI_MODEL_GENERATE_FALLBACK` → `gpt-4o`
+- **교차 검증**(옵션, **Gemini 1차 초안 → OpenAI가 이미지·초안 대조 후 수정**): `EXPLANATION_CROSS_VERIFY=true`, `OPENAI_API_KEY` 필수. 모델은 **`solver-profile`(easy / balanced / killer)** 에 따라 자동 선택된다.
+
+### OpenAI 종량제·감 잡기 (월정액 아님)
+
+- 요금은 **입력 토큰·출력 토큰** 합이며, 시점·모델마다 단가가 바뀐다. **항상 [OpenAI 요금 페이지](https://openai.com/api/pricing/)** 를 기준으로 한다.
+- 참고용 **과거 구간**(예: GPT-4o 계열이 널리 쓰이던 시기): 대략 **입력 $5 / 1M 토큰**, **출력 $15 / 1M 토큰** 수준이 자주 인용된다. 지금 단가는 위 공식 페이지가 정답이다.
+- 한글은 글자당 토큰이 영어보다 커지는 편이라, “짧은 프롬프트 + 긴 해설”이면 **출력 비중**이 비용을 좌우한다.
+- **체감 시뮬레이션(교육용 대략값, 법적 견적 아님):** 입력·출력을 각각 약 1k 토큰이라 가정하면, 위 구간 단가 기준으로 대략 **수 센트/문항** 안팎이 될 수 있다. 문항 수·이미지·시스템 프롬프트 길이에 비례해 증가한다.
+
+### 하이브리드 라우팅 (비용 vs 품질, 코드 반영)
+
+| 용도 | 프로필 / 단계 | 기본 모델( env 미설정 시 ) | 덮어쓰기 env |
+|------|----------------|---------------------------|--------------|
+| 교차 검증 | **easy** | `gpt-4o-mini` | `OPENAI_MODEL_CROSS_VERIFY_EASY` |
+| 교차 검증 | **balanced** | `gpt-4o` | `OPENAI_MODEL_CROSS_VERIFY_BALANCED` → `OPENAI_MODEL_CROSS_VERIFY` |
+| 교차 검증 | **killer** | `gpt-4o` | `OPENAI_MODEL_CROSS_VERIFY_KILLER` → `OPENAI_MODEL_CROSS_VERIFY` |
+| Gemini 실패 시 OpenAI 비전 폴백 | **easy** | `gpt-4o-mini` | `OPENAI_MODEL_GENERATE_FALLBACK_EASY` → `OPENAI_MODEL_GENERATE_FALLBACK` |
+| Gemini 실패 시 OpenAI 비전 폴백 | **balanced** | `gpt-4o-mini` | `OPENAI_MODEL_GENERATE_FALLBACK_BALANCED` → `OPENAI_MODEL_GENERATE_FALLBACK` |
+| Gemini 실패 시 OpenAI 비전 폴백 | **killer** | `gpt-4o` | `OPENAI_MODEL_GENERATE_FALLBACK_KILLER` → `OPENAI_MODEL_GENERATE_FALLBACK` |
+| 합본 preflight (`build:md --preflight-openai`) | — | `gpt-4o-mini` | `OPENAI_MODEL_PREFLIGHT` 만 (교차검증 모델과 분리) |
+| 보정 `/api/repair-explanations` | — | `gpt-4o-mini` | `OPENAI_MODEL_REPAIR_FALLBACK` |
+
+- **easy 교차검증**은 `OPENAI_MODEL_CROSS_VERIFY`만 `gpt-4o`로 두어도 **기본은 mini**로 유지한다(쉬운 세트에서 검증 비용 누적 방지). easy만 4o를 쓰려면 `OPENAI_MODEL_CROSS_VERIFY_EASY=gpt-4o` 를 명시한다.
+- **킬러에 최상위 추론 모델**이 필요하면 `OPENAI_MODEL_CROSS_VERIFY_KILLER=gpt-5.2` 등으로만 올린다(비용·지연 증가).
+
+### 프롬프트 다이어트
+
+- 배치·MCP·교차검증 모두 **불필요한 장문·중복 예시**를 줄이면 입력 토큰이 줄어든다.
+- 시스템 지시는 코드(`buildSystemInstruction`, 교차검증용 `buildCrossVerifyUserPrompt` 등)에 고정된 만큼, **유저가 붙이는 task·초안**만 짧게 유지하는 것이 효과가 크다.
 
 ## 예시 `.env.local`
 
@@ -48,11 +79,22 @@ OPENAI_API_KEY=...
 # (선택) Gemini 초안 후 OpenAI 비전으로 2차 검증 — 원장님 확정 동선(PIPELINE.md)
 # EXPLANATION_CROSS_VERIFY=true
 # OPENAI_MODEL_CROSS_VERIFY=gpt-4o
-# OPENAI_MODEL_CROSS_VERIFY_KILLER=gpt-5.2
+# OPENAI_MODEL_CROSS_VERIFY_KILLER=gpt-4o
+# OPENAI_MODEL_CROSS_VERIFY_BALANCED=gpt-4o
+# OPENAI_MODEL_CROSS_VERIFY_EASY=gpt-4o-mini
 
 # (선택) 미설정 시 Flash-Lite 기본 체인 사용
-# GEMINI_MODELS_PRECHECK=gemini-2.5-flash-lite,gemini-2.5-flash
-# GEMINI_MODELS_GENERATE_FINAL=gemini-2.0-flash
+# (gemini-2.5-flash-lite → gemini-2.5-flash; 구 2.0-flash-lite는 신규 키 404로 비권장).
+# 해설 품질 우선 예시 — 위 「해설 품질 최우선」 참고
+# GEMINI_MODELS_GENERATE_FINAL=gemini-2.0-flash,gemini-2.5-pro
+# GEMINI_MODELS_GENERATE_KILLER=gemini-2.5-pro,gemini-2.0-flash
+# GEMINI_MODELS_PRECHECK=gemini-2.0-flash
+# GEMINI_MODELS_GENERATE_TEST=...
+# GEMINI_MODELS_GENERATE_FINAL=...
+# GEMINI_MODELS_GENERATE_EASY=...
+# GEMINI_MODELS_GENERATE_BALANCED=...
+# GEMINI_MODELS_GENERATE_KILLER=...
+# GEMINI_MODELS_REPAIR=...
 ```
 
 프롬프트·스타일 규칙은 **저장소 코드**와 **Cursor**에서 관리합니다 (`getRuntimePromptRules` 는 현재 항상 `null`).

@@ -8,7 +8,7 @@ type Item = {
   id: string;
   exam_name: string;
   question_no: string;
-  body: string;
+  body?: string;
   source_filename: string | null;
   updated_at: string;
   status: string;
@@ -23,7 +23,9 @@ function labelForQuestion(row: Pick<Item, "question_no">) {
  */
 export function CropExamSolutionsPreviewPanel({ examName }: { examName: string }) {
   const [items, setItems] = useState<Item[]>([]);
+  const [bodyById, setBodyById] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(false);
+  const [loadingBodyId, setLoadingBodyId] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
@@ -38,7 +40,7 @@ export function CropExamSolutionsPreviewPanel({ examName }: { examName: string }
     setLoading(true);
     setErr(null);
     try {
-      const q = `?examName=${encodeURIComponent(examName.trim())}&listOnly=0`;
+      const q = `?examName=${encodeURIComponent(examName.trim())}&listOnly=1`;
       const res = await fetch(`/api/exam-solutions${q}`);
       const data = (await res.json()) as { items?: Item[]; error?: string; configured?: boolean };
       if (!res.ok) {
@@ -51,9 +53,11 @@ export function CropExamSolutionsPreviewPanel({ examName }: { examName: string }
         throw new Error(base);
       }
       setItems(data.items ?? []);
+      setBodyById({});
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
       setItems([]);
+      setBodyById({});
     } finally {
       setLoading(false);
     }
@@ -102,9 +106,33 @@ export function CropExamSolutionsPreviewPanel({ examName }: { examName: string }
     () => (selectedId ? items.find((i) => i.id === selectedId) : undefined),
     [items, selectedId],
   );
-  const deferredSelectedBody = useDeferredValue(selected?.body ?? "");
+  const selectedBody = selectedId ? bodyById[selectedId] ?? "" : "";
+  const deferredSelectedBody = useDeferredValue(selectedBody);
   const previewBody =
-    selected?.question_no === "합본" ? deferredSelectedBody : (selected?.body ?? "");
+    selected?.question_no === "합본" ? deferredSelectedBody : selectedBody;
+
+  useEffect(() => {
+    if (!selectedId || !selected) return;
+    if (bodyById[selectedId] != null) return;
+    const ac = new AbortController();
+    setLoadingBodyId(selectedId);
+    (async () => {
+      try {
+        const q = `?id=${encodeURIComponent(selectedId)}`;
+        const res = await fetch(`/api/exam-solutions${q}`, { signal: ac.signal });
+        const data = (await res.json()) as { item?: Item; error?: string };
+        if (!res.ok) throw new Error(data.error || "본문을 불러오지 못했습니다.");
+        const body = data.item?.body ?? "";
+        setBodyById((prev) => (prev[selectedId] != null ? prev : { ...prev, [selectedId]: body }));
+      } catch (e) {
+        if (ac.signal.aborted) return;
+        setErr(e instanceof Error ? e.message : String(e));
+      } finally {
+        if (!ac.signal.aborted) setLoadingBodyId((prev) => (prev === selectedId ? null : prev));
+      }
+    })();
+    return () => ac.abort();
+  }, [selectedId, selected, bodyById]);
 
   return (
     <div className="sticky top-4 flex max-h-[min(92vh,960px)] flex-col gap-3">
@@ -202,10 +230,14 @@ export function CropExamSolutionsPreviewPanel({ examName }: { examName: string }
                   {selected.exam_name} · {labelForQuestion(selected)}
                   {selected.status ? ` · ${selected.status}` : ""}
                 </p>
-                <MethodBlocksMarkdown
-                  source={previewBody}
-                  className="text-[13px] leading-6 [&_.katex]:text-[0.95em]"
-                />
+                {loadingBodyId === selected.id && !previewBody ? (
+                  <p className="text-xs text-slate-500">본문 불러오는 중…</p>
+                ) : (
+                  <MethodBlocksMarkdown
+                    source={previewBody}
+                    className="text-[13px] leading-6 [&_.katex]:text-[0.95em]"
+                  />
+                )}
               </>
             ) : (
               <p className="text-xs text-slate-500">문항을 선택하세요.</p>

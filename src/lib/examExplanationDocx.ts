@@ -148,7 +148,7 @@ function extractLeadingProblemBlock(chunk: string): { problemLinesRaw: string[];
   }
   const t = lines.slice(i).join("\n").trim();
   const m = t.match(
-    /^\[문제(?:\s+\d+)?\]\s*([\s\S]*?)(?=\n\s*(?:\[빠른\s*정답\]|\[정답\])|(?:\[빠른\s*정답\]|\[정답\]))/i,
+    /^\s*(?:\d+\)\s*)?\[문제(?:\s+\d+)?\]\s*([\s\S]*?)(?=\n\s*(?:(?:\d+\)\s*)?\[빠른\s*정답\]|(?:\d+\)\s*)?\[정답\])|(?:(?:\d+\)\s*)?\[빠른\s*정답\]|(?:\d+\)\s*)?\[정답\]))/i,
   );
   if (m) {
     const problemLinesRaw = [
@@ -162,7 +162,7 @@ function extractLeadingProblemBlock(chunk: string): { problemLinesRaw: string[];
     return { problemLinesRaw, rest };
   }
 
-  const splitAtAnswer = t.split(/(?=\n\s*(?:\[빠른\s*정답\]|\[정답\]))/i);
+  const splitAtAnswer = t.split(/(?=\n\s*(?:(?:\d+\)\s*)?\[빠른\s*정답\]|(?:\d+\)\s*)?\[정답\]))/i);
   if (splitAtAnswer.length >= 2) {
     const problemBody = splitAtAnswer[0]?.trim() ?? "";
     const rest = splitAtAnswer.slice(1).join("").trim();
@@ -171,7 +171,7 @@ function extractLeadingProblemBlock(chunk: string): { problemLinesRaw: string[];
       : [];
     return { problemLinesRaw: [...leadingImages, ...problemLines], rest };
   }
-  if (/^(?:\[빠른\s*정답\]|\[정답\])/i.test(t)) {
+  if (/^(?:(?:\d+\)\s*)?\[빠른\s*정답\]|(?:\d+\)\s*)?\[정답\])/i.test(t)) {
     return { problemLinesRaw: leadingImages, rest: t };
   }
   return { problemLinesRaw: [...leadingImages, ...t.split("\n").map((l) => l.trim()).filter(Boolean)], rest: "" };
@@ -190,8 +190,9 @@ function parseExplanationBlocks(explanationBody: string, fallbackQuickAnswer: st
     labeled.forEach((item) => {
       const { label, chunk } = item;
       const { problemLinesRaw, rest: chunkRest } = extractLeadingProblemBlock(chunk);
-      const answerMatch = chunkRest.match(/\[(?:빠른\s*정답|정답)\]\s*([^\n\r]*)/i);
-      const answerLineMatch = chunkRest.match(/\[(?:빠른\s*정답|정답)\]\s*\n\s*([^\n\r]+)/i);
+      const tail = chunkRest.trimStart();
+      const answerMatch = tail.match(/^(?:\d+\)\s*)?\[(?:빠른\s*정답|정답)\]\s*([^\n\r]*)/i);
+      const answerLineMatch = tail.match(/^(?:\d+\)\s*)?\[(?:빠른\s*정답|정답)\]\s*\n\s*([^\n\r]+)/i);
       const answer =
         answerLineMatch?.[1]?.trim() || answerMatch?.[1]?.trim() || fallbackQuickAnswer || "-";
       const explMatch = chunkRest.match(/\[해설\]\s*([\s\S]*)/i);
@@ -588,6 +589,8 @@ async function buildExplanationSectionChildren(
       continue;
     }
     for (const line of block.explanationLinesRaw) {
+      const lt = line.trim();
+      if (/^<div\s+align/i.test(lt) || /^<\/div>/i.test(lt)) continue;
       const children = await paragraphChildrenForDocxLine(line, assetBaseDir, { boldContent: true });
       const figureOnly = isSingleImageRunParagraph(children);
       explanationChildren.push(

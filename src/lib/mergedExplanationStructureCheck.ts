@@ -75,7 +75,9 @@ function checkQuestionChunk(chunk: string, displayLabel: string) {
 
   if (idxAns >= 0) {
     const before = chunk.slice(0, idxAns);
-    const problemHint = stripLeadingMdImages(before).replace(/^\[문제(?:\s+\d+)?\]\s*/i, "").trim();
+    const problemHint = stripLeadingMdImages(before)
+      .replace(/^\s*(?:\d+\)\s*)?\[문제(?:\s+\d+)?\]\s*/i, "")
+      .trim();
     const firstProbLine =
       problemHint
         .split("\n")
@@ -89,7 +91,7 @@ function checkQuestionChunk(chunk: string, displayLabel: string) {
         `${displayLabel}: 발문이 '${firstProbLine.slice(0, 24)}…'처럼 **숫자+가 아닌 양수**로 시작합니다. 시험지의 **문항 번호(1. 2. …)** 가 줄바꿈 없이 붙어 조건의 **1이 아닌**으로 잘못 들어간 전형적 오타인지 원본과 대조하세요(로그의 밑·진수는 보통 1이 아닌 양수).`,
       );
     }
-    const hasProblemHeader = /^\s*\[문제(?:\s+\d+)?\]/im.test(before);
+    const hasProblemHeader = /^\s*(?:\d+\)\s*)?\[문제(?:\s+\d+)?\]/im.test(before);
     if (problemHint.length < MIN_PROBLEM_HINT_LEN && !hasProblemHeader) {
       warnings.push(
         `${displayLabel}: [빠른 정답] 앞에 발문·선지 텍스트가 거의 없습니다. DOCX 「문제」 단락이 비어 보일 수 있습니다. ([문제] 헤더 아래에 발문을 두세요.)`,
@@ -104,7 +106,7 @@ function checkQuestionChunk(chunk: string, displayLabel: string) {
     for (const line of lines) {
       if (parseMarkdownImageLine(line)) {
         imageLines += 1;
-      } else if (!/^\[문제(?:\s+\d+)?\]/i.test(line)) {
+      } else if (!/^\s*(?:\d+\)\s*)?\[문제(?:\s+\d+)?\]/i.test(line)) {
         const stripMath = line
           .replace(/\$\$[\s\S]*?\$\$/g, " ")
           .replace(/\$[^$\n]+\$/g, " ");

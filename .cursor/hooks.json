@@ -6,6 +6,13 @@
         "command": "node .cursor/hooks/mcp-explanation-post-tool.mjs",
         "matcher": "generate_math_explanation"
       }
+    ],
+    "afterFileEdit": [
+      {
+        "command": "node .cursor/hooks/auto-upload-supabase-after-edit.mjs",
+        "timeout": 10,
+        "failClosed": false
+      }
     ]
   }
 }

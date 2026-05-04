@@ -33,13 +33,21 @@ type Row = {
 
 function parseArgs(argv: string[]) {
   let onlyExam: string | null = null;
+  let watch = false;
+  let intervalMs = 3000;
   for (let i = 2; i < argv.length; i += 1) {
     if (argv[i] === "--only" && argv[i + 1]) {
       onlyExam = argv[i + 1];
       i += 1;
+    } else if (argv[i] === "--watch") {
+      watch = true;
+    } else if (argv[i] === "--interval-ms" && argv[i + 1]) {
+      const n = Number.parseInt(argv[i + 1], 10);
+      if (Number.isFinite(n) && n >= 1000) intervalMs = n;
+      i += 1;
     }
   }
-  return { onlyExam };
+  return { onlyExam, watch, intervalMs };
 }
 
 async function isDirectory(p: string): Promise<boolean> {
@@ -94,8 +102,80 @@ async function collectFromExamFolder(examFolderAbs: string, examName: string): P
   return rows;
 }
 
+async function collectRowsFromDraftRoot(
+  draftAbs: string,
+  onlyExam: string | null,
+): Promise<Row[]> {
+  const examDirs = await readdir(draftAbs);
+  const allRows: Row[] = [];
+
+  for (const dirName of examDirs) {
+    if (onlyExam && dirName !== onlyExam) continue;
+
+    const examAbs = path.join(draftAbs, dirName);
+    if (!(await isDirectory(examAbs))) continue;
+
+    const rows = await collectFromExamFolder(examAbs, dirName);
+    if (rows.length === 0) {
+      console.log(`스킵(대상 .md 없음): ${dirName}`);
+      continue;
+    }
+    allRows.push(...rows);
+    console.log(`수집: ${dirName} → ${rows.length}건`);
+  }
+  return allRows;
+}
+
+async function upsertRows(
+  supabase: ReturnType<typeof createClient>,
+  allRows: Row[],
+): Promise<void> {
+  if (allRows.length === 0) {
+    console.error("업로드할 행이 없습니다. 문항##_API초안.md 또는 합본_편집용.md 가 있는지 확인하세요.");
+    return;
+  }
+
+  const chunkSize = 50;
+  for (let i = 0; i < allRows.length; i += chunkSize) {
+    const chunk = allRows.slice(i, i + chunkSize);
+    const { error } = await supabase.from("exam_solutions").upsert(chunk, {
+      onConflict: "exam_name,question_no",
+    });
+    if (error) {
+      console.error("Supabase upsert 오류:", error.message);
+      console.error(
+        "테이블·unique 인덱스(exam_name, question_no)가 없으면 supabase/exam_solutions.sql 을 실행하세요.",
+      );
+      throw new Error(error.message);
+    }
+  }
+  console.log(`완료: exam_solutions 에 ${allRows.length}행 upsert (${[...new Set(allRows.map((r) => r.exam_name))].join(", ")})`);
+}
+
+async function latestDraftMtimeMs(rootAbs: string, onlyExam: string | null): Promise<number> {
+  let max = 0;
+  const dirs = await readdir(rootAbs);
+  for (const dirName of dirs) {
+    if (onlyExam && dirName !== onlyExam) continue;
+    const examAbs = path.join(rootAbs, dirName);
+    if (!(await isDirectory(examAbs))) continue;
+    const names = await readdir(examAbs);
+    for (const name of names) {
+      if (!name.toLowerCase().endsWith(".md")) continue;
+      const abs = path.join(examAbs, name);
+      try {
+        const st = await stat(abs);
+        if (st.isFile() && st.mtimeMs > max) max = st.mtimeMs;
+      } catch {
+        // ignore
+      }
+    }
+  }
+  return max;
+}
+
 async function main() {
-  const { onlyExam } = parseArgs(process.argv);
+  const { onlyExam, watch, intervalMs } = parseArgs(process.argv);
 
   const url =
     process.env.NEXT_PUBLIC_SUPABASE_URL?.trim() ||
@@ -122,49 +202,36 @@ async function main() {
     process.exit(1);
   }
 
-  const examDirs = await readdir(draftAbs);
-  const allRows: Row[] = [];
-
-  for (const dirName of examDirs) {
-    if (onlyExam && dirName !== onlyExam) continue;
-
-    const examAbs = path.join(draftAbs, dirName);
-    if (!(await isDirectory(examAbs))) continue;
-
-    const rows = await collectFromExamFolder(examAbs, dirName);
-    if (rows.length === 0) {
-      console.log(`스킵(대상 .md 없음): ${dirName}`);
-      continue;
-    }
-    allRows.push(...rows);
-    console.log(`수집: ${dirName} → ${rows.length}건`);
-  }
-
-  if (allRows.length === 0) {
-    console.error("업로드할 행이 없습니다. 문항##_API초안.md 또는 합본_편집용.md 가 있는지 확인하세요.");
-    process.exit(1);
-  }
-
   const supabase = createClient(url, serviceKey, {
     auth: { persistSession: false, autoRefreshToken: false },
   });
 
-  const chunkSize = 50;
-  for (let i = 0; i < allRows.length; i += chunkSize) {
-    const chunk = allRows.slice(i, i + chunkSize);
-    const { error } = await supabase.from("exam_solutions").upsert(chunk, {
-      onConflict: "exam_name,question_no",
-    });
-    if (error) {
-      console.error("Supabase upsert 오류:", error.message);
-      console.error(
-        "테이블·unique 인덱스(exam_name, question_no)가 없으면 supabase/exam_solutions.sql 을 실행하세요.",
-      );
-      process.exit(1);
-    }
-  }
+  const runOnce = async () => {
+    const allRows = await collectRowsFromDraftRoot(draftAbs, onlyExam);
+    await upsertRows(supabase, allRows);
+  };
 
-  console.log(`완료: exam_solutions 에 ${allRows.length}행 upsert (${[...new Set(allRows.map((r) => r.exam_name))].join(", ")})`);
+  await runOnce();
+  if (!watch) return;
+
+  console.log(`[watch] 변경 감시 시작: ${draftAbs}${onlyExam ? ` (only=${onlyExam})` : ""}`);
+  let last = await latestDraftMtimeMs(draftAbs, onlyExam);
+  let running = false;
+  setInterval(async () => {
+    if (running) return;
+    try {
+      const cur = await latestDraftMtimeMs(draftAbs, onlyExam);
+      if (cur <= last) return;
+      last = cur;
+      running = true;
+      console.log(`[watch] 변경 감지 → 재업로드 (${new Date().toLocaleString()})`);
+      await runOnce();
+    } catch (e) {
+      console.error("[watch] 업로드 실패:", e instanceof Error ? e.message : e);
+    } finally {
+      running = false;
+    }
+  }, intervalMs);
 }
 
 main().catch((e) => {

@@ -54,11 +54,12 @@ export function findFigureMarkdownInExplanation(
 ): string[] {
   const w: string[] = [];
   linesOf(explText).forEach((line, i) => {
-    if (/^\s*!\[[^\]]*]\([^)]+\)\s*$/.test(line)) {
-      w.push(
-        `${displayLabel}: [해설] ${i + 1}행에 그림(![](…))이 있습니다. 참고 HML·DOCX는 그림을 해당 문항 [문제] 블록(발문·선지 바로 아래)에 둡니다.`,
-      );
-    }
+    if (!/^\s*!\[[^\]]*]\([^)]+\)\s*$/.test(line)) return;
+    /** 자동 생성·manifest 주입 `![참고 도형 …]` 은 [해설] 직후 허용(파이프라인 Step 3). */
+    if (/^\s*!\[\s*참고\s*도형/i.test(line)) return;
+    w.push(
+      `${displayLabel}: [해설] ${i + 1}행에 그림(![](…))이 있습니다. 참고 HML·DOCX는 그림을 해당 문항 [문제] 블록(발문·선지 바로 아래)에 둡니다.`,
+    );
   });
   return w;
 }
@@ -197,7 +198,9 @@ export function findBogiBlockStructureIssues(problemBody: string, displayLabel: 
 
 function problemAndExplanationBodies(chunk: string): { problemBody: string; explBody: string } {
   let problemBody = "";
-  const pm = chunk.match(/\[문제(?:\s+\d+)?\]\s*([\s\S]*?)(?=\n\s*\[빠른\s*정답\]|\[빠른\s*정답\])/i);
+  const pm = chunk.match(
+    /\s*(?:\d+\)\s*)?\[문제(?:\s+\d+)?\]\s*([\s\S]*?)(?=\n\s*(?:(?:\d+\)\s*)?\[빠른\s*정답\]|(?:\d+\)\s*)?\[정답\])|(?:(?:\d+\)\s*)?\[빠른\s*정답\]|(?:\d+\)\s*)?\[정답\]))/i,
+  );
   if (pm) problemBody = pm[1] ?? "";
   const em = chunk.match(/\[해설\]\s*([\s\S]*)/i);
   const explBody = em?.[1] ?? "";

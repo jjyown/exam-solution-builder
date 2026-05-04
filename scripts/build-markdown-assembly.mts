@@ -1,3 +1,5 @@
+import "dotenv/config";
+
 /**
  * Manifest-Driven Markdown Assembly
  *
@@ -13,6 +15,7 @@
  * - 이미지 파일명은 manifest의 file / diagramFiles와 일치(보통 workdir 또는 images-dir 루트)
  * - 초안 파일명: 문항01_API초안.md (숫자 zero-padding, 정렬 기준)
  */
+import { spawnSync } from "node:child_process";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 
@@ -37,6 +40,11 @@ type Cli = {
   outputPath: string;
   dryRun: boolean;
   skipExportGate: boolean;
+  runPythonGraphs: boolean;
+  preflightOpenai: boolean;
+  writeDocx: boolean;
+  docxExamName: string;
+  docxQuickAnswer: string;
 };
 
 function parseArgs(argv: string[]): Cli {
@@ -46,6 +54,11 @@ function parseArgs(argv: string[]): Cli {
   let outputPath = "";
   let dryRun = false;
   let skipExportGate = false;
+  let runPythonGraphs = false;
+  let preflightOpenai = false;
+  let writeDocx = false;
+  let docxExamName = "";
+  let docxQuickAnswer = "";
   for (let i = 2; i < argv.length; i += 1) {
     const a = argv[i];
     if (a === "--workdir" && argv[i + 1]) {
@@ -64,6 +77,18 @@ function parseArgs(argv: string[]): Cli {
       dryRun = true;
     } else if (a === "--skip-export-gate") {
       skipExportGate = true;
+    } else if (a === "--run-python-graphs" || a === "--agentic") {
+      runPythonGraphs = true;
+    } else if (a === "--preflight-openai") {
+      preflightOpenai = true;
+    } else if (a === "--write-docx") {
+      writeDocx = true;
+    } else if (a === "--exam-name" && argv[i + 1]) {
+      docxExamName = argv[i + 1];
+      i += 1;
+    } else if (a === "--quick-answer" && argv[i + 1]) {
+      docxQuickAnswer = argv[i + 1];
+      i += 1;
     }
   }
   const wd = workdir.trim() ? path.resolve(process.cwd(), workdir) : "";
@@ -78,7 +103,19 @@ function parseArgs(argv: string[]): Cli {
     : wd
       ? path.join(wd, "합본_편집용.md")
       : "";
-  return { workdir: wd, manifestPath: manifest, imagesDir: imgDir, outputPath: out, dryRun, skipExportGate };
+  return {
+    workdir: wd,
+    manifestPath: manifest,
+    imagesDir: imgDir,
+    outputPath: out,
+    dryRun,
+    skipExportGate,
+    runPythonGraphs,
+    preflightOpenai,
+    writeDocx,
+    docxExamName,
+    docxQuickAnswer,
+  };
 }
 
 function toPosixRel(fromFile: string, toAbsolute: string): string {
@@ -190,7 +227,7 @@ function injectMainImage(
   return out;
 }
 
-/** [해설] 단독 줄 바로 아래(빈 줄은 건너뜀)에 도형 이미지들 삽입 */
+/** [해설] 단독 줄 바로 아래(빈 줄은 건너뜀)에 도형 이미지 — 중앙 정렬 div + ![참고 도형 …] */
 function injectFigureImages(lines: string[], mdRelPaths: string[]): string[] {
   if (mdRelPaths.length === 0) return lines;
   const out = [...lines];
@@ -202,7 +239,14 @@ function injectFigureImages(lines: string[], mdRelPaths: string[]): string[] {
     if (out[j]?.trimStart().startsWith("![참고 도형")) {
       return out;
     }
-    const block = mdRelPaths.map((p, k) => `![참고 도형 ${k + 1}](${p})`);
+    if (out[j]?.trim() === "<div align=\"center\">") {
+      return out;
+    }
+    const block: string[] = [];
+    for (let k = 0; k < mdRelPaths.length; k += 1) {
+      const p = mdRelPaths[k]!;
+      block.push("", "<div align=\"center\">", "", `![참고 도형 ${k + 1}](${p})`, "", "</div>", "");
+    }
     out.splice(i + 1, 0, ...block);
     return out;
   }
@@ -216,6 +260,7 @@ function injectDraft(
   assets: AssetEntry | undefined,
   outputFile: string,
   imagesAbsDir: string,
+  extraGeneratedFigRels: string[],
 ): string {
   let lines = body.replace(/^\uFEFF/, "").split(/\r?\n/);
   if (assets) {
@@ -223,7 +268,9 @@ function injectDraft(
     const mainRel = toPosixRel(outputFile, mainAbs);
     lines = injectMainImage(lines, questionNum, mainRel);
     const figRels = assets.figs.map((f) => toPosixRel(outputFile, path.join(imagesAbsDir, f)));
-    lines = injectFigureImages(lines, figRels);
+    lines = injectFigureImages(lines, [...figRels, ...extraGeneratedFigRels]);
+  } else if (extraGeneratedFigRels.length > 0) {
+    lines = injectFigureImages(lines, extraGeneratedFigRels);
   }
   return lines.join("\n").replace(/\n{3,}/g, "\n\n").trimEnd() + "\n";
 }
@@ -240,7 +287,15 @@ async function main() {
   --manifest <경로>   (기본: <workdir>/manifest.json)
   --images-dir <경로> (기본: workdir — manifest의 file명이 이 폴더에 있다고 가정)
   --output <경로>     (기본: <workdir>/합본_편집용.md)
-  --dry-run`);
+  --dry-run
+
+Agentic / 그래프 / OpenAI / DOCX (선택):
+  --run-python-graphs   초안의 \`\`\`python 펜스 추출 → matplotlib 실행 → q{n}_generated_graph.png
+  --agentic             --run-python-graphs 와 동일
+  --preflight-openai    합본 작성 후 OpenAI로 \"그림 권장\" 검수표 → export_preflight_openai.md
+  --write-docx          통과 시 npm run write-final-docx (아래 인자 필요)
+  --exam-name <이름>    DOCX 표제
+  --quick-answer <문자열>  생략 시 <workdir>/빠른정답_요약.txt 사용 시도`);
     process.exit(1);
   }
 
@@ -290,8 +345,23 @@ async function main() {
       }
     }
 
-    const body = await fs.readFile(draftPath, "utf8");
-    const merged = injectDraft(body, n, assets, cli.outputPath, cli.imagesDir);
+    let body = await fs.readFile(draftPath, "utf8");
+    const extraFigRels: string[] = [];
+    if (cli.runPythonGraphs) {
+      const { stripPythonFencesAndRunGraphs } = await import("../src/lib/explanationPythonGraphRunner");
+      try {
+        const py = await stripPythonFencesAndRunGraphs(body, n, cli.workdir);
+        body = py.cleanedText;
+        for (const abs of py.generatedPngAbsPaths) {
+          extraFigRels.push(toPosixRel(cli.outputPath, abs));
+        }
+        for (const lg of py.logs) console.log(`  ${lg}`);
+      } catch (e) {
+        console.error(e instanceof Error ? e.message : e);
+        process.exit(1);
+      }
+    }
+    const merged = injectDraft(body, n, assets, cli.outputPath, cli.imagesDir, extraFigRels);
     chunks.push(merged.trimEnd());
   }
 
@@ -306,6 +376,23 @@ async function main() {
   await fs.writeFile(cli.outputPath, finalOut, "utf8");
   console.log(`작성 완료: ${cli.outputPath}`);
 
+  if (cli.preflightOpenai) {
+    try {
+      const { runOpenAiImageNecessityPreflight } = await import("../src/lib/openaiExportPreflight");
+      const report = await runOpenAiImageNecessityPreflight(finalOut);
+      const prePath = path.join(cli.workdir, "export_preflight_openai.md");
+      await fs.writeFile(
+        prePath,
+        `<!-- OpenAI 보내기 전 그림·정합 검수 (자동) — Cursor에서 최종 검토 후 DOCX 저장 -->\n\n${report}\n`,
+        "utf8",
+      );
+      console.log(`OpenAI preflight 저장: ${prePath}`);
+    } catch (e) {
+      console.error(e instanceof Error ? e.message : e);
+      process.exit(1);
+    }
+  }
+
   if (!cli.skipExportGate) {
     const { validateExportReadiness, formatExportGateReport } = await import("../src/lib/explanationExportGate");
     const gate = validateExportReadiness(finalOut);
@@ -317,6 +404,40 @@ async function main() {
       process.exit(1);
     }
     console.error("이중 검수 통과.");
+  }
+
+  if (cli.writeDocx) {
+    let quick = cli.docxQuickAnswer.trim();
+    if (!quick) {
+      const qaPath = path.join(cli.workdir, "빠른정답_요약.txt");
+      try {
+        quick = (await fs.readFile(qaPath, "utf8")).trim();
+      } catch {
+        console.error("--write-docx 는 --quick-answer 또는 <workdir>/빠른정답_요약.txt 가 필요합니다.");
+        process.exit(1);
+      }
+    }
+    const exam =
+      cli.docxExamName.trim() ||
+      (manifest.examName as string | undefined)?.trim() ||
+      path.basename(cli.workdir);
+    const r = spawnSync(
+      "npx",
+      [
+        "tsx",
+        "write-final-docx.mts",
+        "--exam-name",
+        exam,
+        "--quick-answer",
+        quick,
+        "--body-file",
+        cli.outputPath,
+      ],
+      { cwd: process.cwd(), stdio: "inherit", shell: true },
+    );
+    if (r.status !== 0) {
+      process.exit(r.status ?? 1);
+    }
   }
 }
 
