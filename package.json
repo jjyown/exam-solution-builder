@@ -26,7 +26,9 @@
     "validate:format": "tsx scripts/validate-format.mts",
     "validate:explanation": "tsx scripts/validate-explanation-format.mts",
     "batch:payloads": "tsx scripts/batch-explanations-from-payloads.mts",
-    "final:from-input": "tsx scripts/make-final-from-input.mts"
+    "final:from-input": "tsx scripts/make-final-from-input.mts",
+    "final:from-textbook": "tsx scripts/make-final-from-textbook.mts",
+    "textbook:build-reference": "tsx scripts/build-textbook-reference.mts"
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
