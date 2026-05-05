@@ -144,6 +144,8 @@ async function main() {
     console.log(`[textbook-ref] 생성: ${path.relative(cwd, outPath)} (conf=${result.confidence ?? "n/a"})`);
   }
 
+  // PDF 중간 렌더 캐시는 실행 종료 시 정리한다.
+  await fs.rm(pdfRenderCacheDir, { recursive: true, force: true }).catch(() => {});
   console.log(`[textbook-ref] 완료: 성공 ${okCount}, 스킵 ${skipCount}, 실패 ${failCount}, 총 ${images.length}`);
 }
 
