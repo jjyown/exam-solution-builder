@@ -24,12 +24,9 @@ import { explanationLatexToPlain } from "./latexToPlainText";
 import { normalizeLatexSourceText } from "./latexSourceNormalize";
 
 function boldMathRun(text: string): MathRun {
-  return new MathRun({
-    text,
-    bold: true,
-    font: EXAM_DOCX_FONT,
-    size: EXAM_DOCX_BODY_SIZE_HALF_PT,
-  });
+  // docx 최신 타입(MathRun)은 string 시그니처만 허용한다.
+  // 수식 내 런 스타일은 OMML 경로에서 처리하고, 여기서는 타입 호환을 우선한다.
+  return new MathRun(text);
 }
 
 /**
