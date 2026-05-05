@@ -7,6 +7,7 @@
 
 | 일시(로컬) | 작업 | 핵심 변경 | 영향 파일 |
 |---|---|---|---|
+| 2026-05-06 | 교재 다문항 페이지: Mathpix line_data + bbox 크롭 분할 | 1페이지 다문항 시 이미지·텍스트 1:1 매핑이 깨지는 문제를 `include_line_data` 기반으로 문항 구간 분리·Pillow 크롭·`{stem}_problemNN.png/md` 산출하는 Python 스크립트 추가. npm `textbook:split-pages`, Pillow 의존성 목록·워크플로 문서 보강 | `scripts/textbook_page_split_mathpix.py`, `scripts/requirements-textbook-ocr.txt`, `package.json`, `docs/TEXTBOOK_WORKFLOW.md`, `docs/worklog.md`, `docs/context.md`, `docs/checklist.md` |
 | 2026-05-06 | 교재 OCR 임시 캐시 정리 보강 | PDF→PNG 중간 파일(`교재 참고자료/_tmp_pdf_pages`)이 산출물에 섞이지 않도록 스크립트 종료 시 자동 삭제를 추가하고, 이미 커밋된 임시 png를 git에서 제거 | `scripts/build-textbook-reference.mts`, `교재 참고자료/_tmp_pdf_pages/*(삭제)`, `docs/worklog.md` |
 | 2026-05-05 | 참고용 문제 폴더 전체 OCR→Markdown 실행(16건) + PDF 자동 변환 보강 | `textbook:build-reference`가 PDF 직접 OCR에서 실패(`Cannot read image`)하던 문제를 해결하기 위해 스크립트에 PDF 1페이지→PNG 자동 렌더(pypdfium2) 단계를 추가하고, `참고용 문제` 전체(대수/확통 16개 PDF)를 `교재 참고자료` md로 생성 완료 | `scripts/build-textbook-reference.mts`, `src/lib/recognition/textbookReferenceOcr.ts`, `교재 참고자료/**`, `docs/worklog.md`, `docs/context.md`, `docs/plan.md`, `docs/checklist.md` |
 | 2026-05-05 | 전체 참고자료 자동 주입 강화(태그 미지정 fallback) | `textbookReferenceSelector`를 보강해 단원/유형/난이도 태그가 없을 때도 교재 참고 md 전체를 후보로 선택해 프롬프트에 주입하도록 변경. `generate-explanation`에서 `includeAllWhenNoTag=true`와 `maxItems=12`를 고정해 “현재 참고용 자료 모두 반영” 요구를 기본 동작으로 반영 | `src/lib/reasoning/textbookReferenceSelector.ts`, `src/app/api/generate-explanation/route.ts`, `docs/worklog.md`, `docs/context.md`, `docs/plan.md`, `docs/checklist.md` |

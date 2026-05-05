@@ -29,6 +29,21 @@ npm run textbook:build-reference -- --input "./교재 입력" --output "./교재
 npm run textbook:build-reference -- --input "./교재 입력" --output "./교재 참고자료" --force
 ```
 
+## 0-1) 한 페이지에 문제가 여러 개: Mathpix bbox로 문항 분할(실전형 Multi-Mapping)
+
+- **문제**: `1페이지 = 이미지 1장`인데 문항은 3~4개면, 파일명 번호만으로 이미지↔md 1:1 매핑이 깨진다.
+- **해결**: Mathpix `include_line_data`로 줄 단위 `cnt`(바운딩 박스)를 받아, 문항 시작 패턴(`1.`, `22)` 등)마다 구간을 나누고 **구간별 bbox 합집합**으로 페이지 이미지를 크롭한다.
+- **의존성**: `pip install -r scripts/requirements-textbook-ocr.txt` (Pillow)
+- **실행 예**:
+
+```bash
+npm run textbook:split-pages -- --input "./페이지이미지폴더" --output "./문항별산출"
+```
+
+- **옵션**: `--force`(덮어쓰기), `--padding 0.02`(크롭 여백 비율), `--max-workers 3`(페이지 병렬, 최대 5), `--unit` / `--type` / `--difficulty`(md frontmatter 보강)
+- **산출**: `{페이지파일명_stem}_problem01.png` + 동명 `.md` … (한 페이지에서 검출된 문항 수만큼)
+- **한계(전문가 메모)**: 문항 번호가 OCR에서 누락되거나 줄 단위 bbox가 비면 **1문항 폴백**(전체 페이지 1세트)으로 떨어질 수 있다. 이 경우 원본 스캔 품질·레이아웃(단락)을 점검하거나 `--force`로 재시도한다.
+
 ## 기본 동작
 
 - 내부적으로 `final:from-input`을 호출하되, 시중교재 전용 프리셋을 적용한다.

@@ -65,6 +65,7 @@
 - [x] 시중교재 전용 모듈화: `final:from-textbook` 스크립트/프리셋 모듈/운영 가이드(`docs/TEXTBOOK_WORKFLOW.md`) 추가
 - [x] 교재 OCR 참고자료 구축 모듈화: `textbook:build-reference` + `textbookReferenceSelector` + `generate-explanation` 태그 주입(`textbookUnit/type/difficulty`)
 - [x] 전체 참고자료 반영: 태그 미지정 시에도 교재 참고 md를 기본 후보로 주입하도록 fallback 활성화
+- [x] 교재 다문항 페이지: Mathpix `line_data` bbox 기반 `textbook:split-pages`로 문항별 png+md 1:1 분할(Pillow)
 - [x] 참고용 문제 폴더 실데이터 OCR 완료: PDF 16건을 Markdown 참고자료로 변환(성공 16, 실패 0)
 - [ ] DOCX 보내기 후: 문제 박스 수식 굵기·해설 OMML 모양·보기 잘림·페이지 끊김 — `05` §3 체크리스트로 육안 확인
 - [x] `npm run build` 통과 (Turbopack NFT 경고는 별도 이슈)

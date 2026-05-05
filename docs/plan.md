@@ -57,6 +57,7 @@
 - [x] 교재 OCR 참고자료 모듈 1차: `textbook:build-reference`(이미지→md) + 태그 선택기(`textbookReferenceSelector`) + 해설 API 프롬프트 주입 연동
 - [x] 참고자료 전체 반영 강화: 태그 미지정 시에도 교재 md 전체를 기본 후보로 주입(`maxItems=12`)
 - [x] 참고용 문제 폴더 전체 OCR 완료: PDF 16건을 자동 변환(PDF→PNG) 후 `교재 참고자료` md 자산으로 생성
+- [x] 교재 1페이지 다문항: `scripts/textbook_page_split_mathpix.py` + `npm run textbook:split-pages`(bbox 크롭·문항 텍스트 분리)
 
 ## 최근 완료 작업 (요약)
 

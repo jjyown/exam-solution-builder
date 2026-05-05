@@ -28,7 +28,8 @@
     "batch:payloads": "tsx scripts/batch-explanations-from-payloads.mts",
     "final:from-input": "tsx scripts/make-final-from-input.mts",
     "final:from-textbook": "tsx scripts/make-final-from-textbook.mts",
-    "textbook:build-reference": "tsx scripts/build-textbook-reference.mts"
+    "textbook:build-reference": "tsx scripts/build-textbook-reference.mts",
+    "textbook:split-pages": "python scripts/textbook_page_split_mathpix.py"
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.1",

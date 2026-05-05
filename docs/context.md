@@ -21,6 +21,7 @@
 
 | 날짜 | 결정 | 이유 | 영향 범위 |
 |------|------|------|-----------|
+| 2026-05-06 | 다문항 교재 페이지는 Mathpix `line_data.cnt`로 문항 구간을 나눈 뒤 Pillow로 크롭해 `problemNN.png`+`md` 1:1 세트를 만든다 | 페이지 OCR 1건=md 1건 가정은 실제 교재(한 페이지 3~4문항)와 충돌하므로, bbox 기반 물리 분할이 해설·DOCX 입력 품질에 필수에 가깝다 | `scripts/textbook_page_split_mathpix.py`, `docs/TEXTBOOK_WORKFLOW.md`, `npm run textbook:split-pages` |
 | 2026-05-05 | 교재 참고자료 빌드에서 PDF는 Mathpix에 직접 넣지 않고 1페이지를 PNG로 변환 후 OCR한다 | Mathpix v3/text에 로컬 PDF data URL을 직접 전달하면 `Cannot read image`가 반복되어, 실무 자동화를 위해 렌더링 전처리 계층(PDF→이미지)이 필요함 | `scripts/build-textbook-reference.mts`, `src/lib/recognition/textbookReferenceOcr.ts` |
 | 2026-05-05 | 태그가 없더라도 교재 참고 md 전체를 기본 후보로 주입한다(`maxItems=12`) | 실무 입력에서 단원/유형/난이도 태그를 항상 전달하지 못하는 경우가 많아, “현재 참고자료 모두 반영” 요구를 만족하려면 무태그 fallback을 상시 동작으로 두는 편이 운영 안정성이 높음 | `src/lib/reasoning/textbookReferenceSelector.ts`, `src/app/api/generate-explanation/route.ts` |
 | 2026-05-05 | 교재 OCR 참고자료는 `frontmatter(unit/type/difficulty)+본문` md 자산으로 저장하고, 해설 API에서 태그 매칭으로 자동 주입한다 | 교재의 난이도·유형 분류 자산을 재사용 가능한 지식 계층으로 분리하면, DOCX 양식과 독립적으로 해설 품질(서술 톤/전개 밀도)을 안정적으로 향상시킬 수 있음 | `scripts/build-textbook-reference.mts`, `src/lib/recognition/textbookReferenceOcr.ts`, `src/lib/reasoning/textbookReferenceSelector.ts`, `src/app/api/generate-explanation/route.ts` |
