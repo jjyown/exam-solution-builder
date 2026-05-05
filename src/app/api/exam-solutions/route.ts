@@ -16,6 +16,17 @@ type Row = {
 
 type ListRow = Omit<Row, "body">;
 
+function normalizeExamNameForMatch(name: string): string {
+  return name
+    .trim()
+    .replace(/\.[a-z0-9]+$/i, "")
+    .replace(/[\[\]\(\){}]/g, " ")
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
 /**
  * GET ?examName=...  → 목록(본문 제외 가능)
  * GET ?id=<uuid>     → 단건 전체
@@ -50,16 +61,31 @@ export async function GET(request: Request) {
   }
 
   let q = supabase.from("exam_solutions").select("*");
-  if (examName) {
-    q = q.eq("exam_name", examName);
-  }
+  if (examName) q = q.eq("exam_name", examName);
   q = q.order("exam_name").order("question_no");
 
   const { data, error } = await q;
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
-  const raw = (data ?? []) as Record<string, unknown>[];
+
+  let raw = (data ?? []) as Record<string, unknown>[];
+  // 좌측 시험명에 괄호 표기/확장자(pdf) 차이가 있어도 같은 시험으로 보이게 폴백 매칭
+  if (examName && raw.length === 0) {
+    const { data: allData, error: allError } = await supabase
+      .from("exam_solutions")
+      .select("*")
+      .order("exam_name")
+      .order("question_no");
+    if (allError) {
+      return NextResponse.json({ error: allError.message }, { status: 500 });
+    }
+    const target = normalizeExamNameForMatch(examName);
+    raw = ((allData ?? []) as Record<string, unknown>[]).filter(
+      (r) => normalizeExamNameForMatch(String(r.exam_name ?? "")) === target,
+    );
+  }
+
   const items: Row[] | ListRow[] = listOnly
     ? sortExamSolutionItemsByQuestionNo(
         raw.map((r) => ({
