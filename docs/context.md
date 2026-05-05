@@ -21,6 +21,12 @@
 
 | 날짜 | 결정 | 이유 | 영향 범위 |
 |------|------|------|-----------|
+| 2026-05-05 | Supabase 정합성 확인은 업로드 성공 로그만 보지 않고, 로컬 초안과 DB 본문을 문항별 diff로 비교하는 별도 CLI(`snapshot:compare`)를 운영 루틴에 포함한다 | “Supabase 미리보기/최종 DOCX가 다르게 보인다”는 반복 이슈를 빠르게 분리(데이터 차이 vs 렌더 차이)하기 위함 | `scripts/compare-supabase-snapshot.mts`, `package.json`, `해설 작업중/*/supabase_snapshot_compare.md` |
+| 2026-05-05 | 원클릭 strict content gate 뒤에 Python(sympy) 보조 검산 게이트를 추가하되, 런타임에 미설치면 치명 중단 없이 경고로만 처리한다 | 운영 환경 편차(Windows/배포)에서 파이썬 의존성 미설치로 전체 파이프라인이 멈추는 리스크를 방지하면서 검산 이득을 확보하기 위함 | `tools/math_expression_gate.py`, `scripts/make-final-from-input.mts` |
+| 2026-05-05 | Supabase 우측 해설 미리보기는 렌더 직전에 수식 구분자(`\(...\)`, `\[...\]`)를 markdown 수학 구분자(`$...$`, `$$...$$`)로 정규화한다 | 검수자는 “최종 해설 형태”를 미리 봐야 하며, 원문 LaTeX 토큰 노출이 검토 효율을 크게 떨어뜨림 | `src/components/ExplanationMarkdownMath.tsx` |
+| 2026-05-05 | 크롭 UI 우측 Supabase 미리보기는 `exam_name` 완전 일치가 실패하면 정규화(괄호/확장자/공백 제거) 기반 폴백 매칭을 적용한다 | 현장 운영에서 시험명 표기 `(TEST) TEST1.pdf` vs `[TEST] TEST1` 차이로 “행 없음”이 반복됨 | `src/app/api/exam-solutions/route.ts` |
+| 2026-05-05 | Railway 빌드 TypeScript 실패는 `docx`의 `MathRun` 시그니처 변경(string only)으로 판정하고, 수식 런 생성을 타입 호환 우선으로 복구한다 | 배포 로그에서 `src/lib/docxOmmlBuilder.ts`의 `new MathRun({...})` 타입 불일치가 치명 에러로 확인됨 | `src/lib/docxOmmlBuilder.ts` |
+| 2026-05-05 | 원클릭(`final:from-input`)은 중요한 작업 기본값으로 Mathpix OCR 보강을 ON으로 운용한다 | 사용자 요청: Mathpix를 수동으로 켜지 않아도 중요한 작업에서 자동 적용되도록 해야 함 | `scripts/make-final-from-input.mts`, `docs/AGENTIC_MD_PIPELINE.md` |
 | 2026-05-05 | DOCX 수식은 OMML 내부 런 자체를 bold로 생성해 수식 박스 내 굵기 체감을 우선 개선한다 | 사용자 피드백이 “Ctrl+B 전/후 차이”에 집중되어 있어 평문화 우회보다 OMML 런 bold 적용이 직접적 대응임 | `src/lib/docxOmmlBuilder.ts` |
 | 2026-05-05 | 외부 HML 양식에서 선행 학생명 태그(`[이름]`)는 출력 제목에서 제거하고 내용 규칙만 반영한다 | 사용자 요청: 수학비서 양식 적용 시 학생 이름은 제외하고 서식/내용만 채택 | `src/lib/examExplanationDocx.ts`, `tools/downloads_zip_extracted/*` |
 | 2026-05-05 | 원클릭 합본 `[문제]`에는 placeholder 문장 대신 원본 문항 이미지 링크를 기본 주입한다 | 사용자 피드백에서 가장 큰 불만이 `[문제]` 누락이었고, 이미지 주입은 즉시 품질 체감을 개선함 | `scripts/make-final-from-input.mts` |

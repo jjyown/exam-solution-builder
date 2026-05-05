@@ -7,6 +7,7 @@ import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
 
 import { splitLabeledQuestionMarkdownChunks, splitMethodBlocks } from "@/lib/explanationBlocks";
+import { normalizeLatexSourceText } from "@/lib/latexSourceNormalize";
 
 const markdownShell =
   "max-w-none text-[15px] leading-7 text-slate-800 [&_p]:my-2 [&_ul]:my-2 [&_ol]:my-2 [&_li]:my-0.5 [&_.katex]:text-[1em] [&_.katex-display]:my-3";
@@ -18,8 +19,20 @@ type Props = {
 
 const katexOptions = { strict: false, throwOnError: false, errorColor: "#b91c1c" } as const;
 
+/**
+ * Supabase 미리보기에서도 DOCX 렌더와 유사하게 보이도록
+ * \(...\), \[...\] 구분자를 markdown 수학 구분자($, $$)로 맞춘다.
+ */
+function normalizeMathDelimitersForPreview(source: string): string {
+  let s = normalizeLatexSourceText(source);
+  s = s.replace(/\\\(([\s\S]*?)\\\)/g, (_m, inner: string) => `$${inner}$`);
+  s = s.replace(/\\\[([\s\S]*?)\\\]/g, (_m, inner: string) => `$$${inner}$$`);
+  return s;
+}
+
 function MarkdownBlock({ source, className = "" }: Props) {
-  if (!source.trim()) {
+  const normalizedSource = normalizeMathDelimitersForPreview(source);
+  if (!normalizedSource.trim()) {
     return <p className="text-sm text-slate-500">(내용 없음)</p>;
   }
   return (
@@ -45,7 +58,7 @@ function MarkdownBlock({ source, className = "" }: Props) {
           },
         }}
       >
-        {source}
+        {normalizedSource}
       </ReactMarkdown>
     </div>
   );
@@ -100,7 +113,8 @@ function LazyLabeledChunk({
 
 /** react-markdown + remark-math + rehype-katex: $...$ / $$...$$ LaTeX 렌더링 */
 export function ExplanationMarkdownMath({ source, className = "" }: Props) {
-  const chunks = useMemo(() => splitLabeledQuestionMarkdownChunks(source), [source]);
+  const normalizedSource = useMemo(() => normalizeMathDelimitersForPreview(source), [source]);
+  const chunks = useMemo(() => splitLabeledQuestionMarkdownChunks(normalizedSource), [normalizedSource]);
   if (!source.trim()) {
     return <p className="text-sm text-slate-500">(내용 없음)</p>;
   }
@@ -108,7 +122,7 @@ export function ExplanationMarkdownMath({ source, className = "" }: Props) {
   const multiLabeled = chunks.length >= 2;
 
   if (!multiLabeled) {
-    return <MarkdownBlock source={source} className={className} />;
+    return <MarkdownBlock source={normalizedSource} className={className} />;
   }
 
   return (

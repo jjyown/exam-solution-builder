@@ -21,6 +21,7 @@ type Cli = {
   mathpixNoCache: boolean;
   strictGate: boolean;
   fastMode: boolean;
+  disableMathpix: boolean;
 };
 
 type DraftItem = {
@@ -35,6 +36,13 @@ type ContentIssue = {
   severity: "fatal" | "warn";
   code: string;
   message: string;
+};
+
+type PythonMathGateResult = {
+  ok: boolean;
+  sympyAvailable: boolean;
+  issues: ContentIssue[];
+  error?: string;
 };
 
 function normalizeMathDelimiters(input: string): string {
@@ -61,12 +69,13 @@ function parseArgs(argv: string[]): Cli {
   let solverProfile: Cli["solverProfile"] = "balanced";
   let generationMode: Cli["generationMode"] = "final";
   let delayMs = 800;
-  let mathpix = false;
+  let mathpix = true;
   let mathpixMinConfidence: number | null = null;
   let mathpixStrict = false;
   let mathpixNoCache = false;
   let strictGate = true;
   let fastMode = false;
+  let disableMathpix = false;
 
   for (let i = 2; i < argv.length; i += 1) {
     const a = argv[i];
@@ -101,6 +110,9 @@ function parseArgs(argv: string[]): Cli {
       mathpixStrict = true;
     } else if (a === "--mathpix-no-cache") {
       mathpixNoCache = true;
+    } else if (a === "--no-mathpix") {
+      disableMathpix = true;
+      mathpix = false;
     } else if (a === "--strict-gate") {
       strictGate = true;
     } else if (a === "--fast") {
@@ -122,6 +134,7 @@ function parseArgs(argv: string[]): Cli {
     mathpixNoCache,
     strictGate,
     fastMode,
+    disableMathpix,
   };
 }
 
@@ -448,6 +461,63 @@ function runContentGate(drafts: DraftItem[]): ContentIssue[] {
   return issues;
 }
 
+function runPythonMathGate(drafts: DraftItem[]): PythonMathGateResult {
+  const scriptPath = path.join(process.cwd(), "tools", "math_expression_gate.py");
+  const input = JSON.stringify({
+    drafts: drafts.map((d) => ({
+      questionNo: d.questionNo,
+      explanation: d.explanation,
+    })),
+  });
+
+  const py = spawnSync("python", [scriptPath], {
+    cwd: process.cwd(),
+    input,
+    encoding: "utf8",
+    stdio: ["pipe", "pipe", "pipe"],
+    shell: false,
+  });
+
+  if (py.error) {
+    return {
+      ok: false,
+      sympyAvailable: false,
+      issues: [],
+      error: py.error.message,
+    };
+  }
+  if (py.status !== 0) {
+    return {
+      ok: false,
+      sympyAvailable: false,
+      issues: [],
+      error: (py.stderr || py.stdout || "").trim() || `python_exit_${py.status}`,
+    };
+  }
+
+  try {
+    const parsed = JSON.parse((py.stdout || "").trim()) as {
+      ok?: boolean;
+      sympyAvailable?: boolean;
+      issues?: ContentIssue[];
+      error?: string;
+    };
+    return {
+      ok: Boolean(parsed.ok),
+      sympyAvailable: Boolean(parsed.sympyAvailable),
+      issues: Array.isArray(parsed.issues) ? parsed.issues : [],
+      error: parsed.error,
+    };
+  } catch (e) {
+    return {
+      ok: false,
+      sympyAvailable: false,
+      issues: [],
+      error: `python_output_parse_failed: ${e instanceof Error ? e.message : String(e)}`,
+    };
+  }
+}
+
 async function rewriteMergedForExport(
   workdirAbs: string,
   enableContentGate: boolean,
@@ -475,6 +545,17 @@ async function rewriteMergedForExport(
 
   if (enableContentGate) {
     const issues = runContentGate(drafts);
+    const pyGate = runPythonMathGate(drafts);
+    if (pyGate.ok && pyGate.sympyAvailable && pyGate.issues.length > 0) {
+      issues.push(...pyGate.issues);
+    } else if (pyGate.ok && !pyGate.sympyAvailable) {
+      console.warn("[content gate] Python/sympy 미설치로 고급 검산 게이트를 건너뜁니다.");
+    } else if (!pyGate.ok) {
+      console.warn(
+        `[content gate] Python 검산 게이트 실행 실패(기존 규칙 게이트는 계속 진행): ${pyGate.error ?? "unknown"}`,
+      );
+    }
+
     const fatals = issues.filter((x) => x.severity === "fatal");
     if (issues.length > 0) {
       console.error("══ content gate 결과 ══");
@@ -582,7 +663,7 @@ async function main() {
   const startedAtMs = Date.now();
   const inputAbs = path.isAbsolute(cli.inputDir) ? cli.inputDir : path.join(cwd, cli.inputDir);
   console.log(
-    `[설정] input=${cli.inputDir} mode=${cli.generationMode} profile=${cli.solverProfile} gate=${cli.strictGate ? "strict" : "fast"}`,
+    `[설정] input=${cli.inputDir} mode=${cli.generationMode} profile=${cli.solverProfile} gate=${cli.strictGate ? "strict" : "fast"} mathpix=${cli.mathpix ? "on" : "off"}`,
   );
   try {
     const st = await fs.stat(inputAbs);

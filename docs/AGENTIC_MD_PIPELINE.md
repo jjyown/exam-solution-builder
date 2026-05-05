@@ -45,10 +45,13 @@ npm run build:md -- --workdir "./해설 작업중/[TEST] TEST1.pdf" --write-docx
   3) `write-final-docx --workdir <자동선택폴더>` 실행  
 - 즉, **입력 폴더 지정만으로 최종 DOCX까지** 연속 실행한다.
 - 기본값은 **strict gate**(구조검사 포함)다.
+- 기본값은 **Mathpix ON**(해설 입력 보강)이다.
+- Mathpix를 끄려면 `--no-mathpix`를 사용한다.
 - 빠른 즉시 산출이 필요하면 `--fast`를 사용한다(구조검사 생략).
 - 예시:
   - `npm run final:from-input -- --input "./크롭된 시험지" --solver-profile balanced`
   - `npm run final:from-input -- --input "./크롭된 시험지" --fast`
+  - `npm run final:from-input -- --input "./크롭된 시험지" --no-mathpix`
   - `npm run final:from-input -- --input "./크롭된 시험지" --mathpix --mathpix-min-confidence 0.7`
 
 ## AST 엄격 헤더 (`n) [문제]` …)

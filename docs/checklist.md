@@ -33,7 +33,13 @@
 - [x] content gate 4차 적용: 부등식 체인(`A<B<C`, `A<=B<=C`) 인접 항 비교 검증
 - [x] 원클릭 합본 `[문제]`에 원본 문항 이미지 자동 주입 확인
 - [x] OMML 수식 런 bold 적용 패치 및 DOCX 생성 스모크 확인
+- [x] Railway 배포 로그 기준 TypeScript 실패(`MathRun` 인자 타입 불일치) 복구 후 `npm run build` 재통과
+- [x] Supabase 우측 미리보기 0건 오탐(시험명 표기 차이) 복구: `exam_name` 정규화 폴백 매칭 + 빌드 통과
+- [x] Supabase 해설 미리보기에서 `\(...\)`, `\[...\]` 정규화 적용으로 KaTeX 렌더 품질 개선 + 빌드 통과
+- [x] 원클릭 strict 검수에 Python(sympy) 보조 수식 검산 게이트 추가(미설치 시 경고 폴백) + 빌드 통과
+- [x] Supabase 스냅샷 비교 도구 추가: `npm run snapshot:compare -- --workdir "./해설 작업중/[TEST] TEST1"` 실행 및 리포트 생성 확인
 - [x] HML 양식 zip(`Downloads.Zip`) 분석 후 선행 학생명 태그 제거 규칙 반영
+- [x] 원클릭 `final:from-input` Mathpix 기본 ON 전환 및 `--no-mathpix` 비활성화 옵션 반영
 - [ ] DOCX 보내기 후: 문제 박스 수식 굵기·해설 OMML 모양·보기 잘림·페이지 끊김 — `05` §3 체크리스트로 육안 확인
 - [x] `npm run build` 통과 (Turbopack NFT 경고는 별도 이슈)
 - [x] Mathpix: `.env.local` 키 설정 후 `npm run dev` + `POST /api/mathpix-text` 또는 배치 `--mathpix`; MCP는 Cursor에 `MATHPIX_APP_ID`/`MATHPIX_APP_KEY` 등록 후 `mathpix_recognize` 스모크

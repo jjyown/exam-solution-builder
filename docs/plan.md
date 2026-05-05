@@ -38,6 +38,12 @@
 - [x] content gate 4차: 부등식 체인(`A<B<C`, `A<=B<=C`) 인접 항 자동 비교 검증
 - [x] 원클릭 `[문제]`에 원본 이미지 자동 주입(문항XX_문제원본.* 생성 및 연결)
 - [x] OMML 수식 런 bold 적용 및 HML 선행 학생명 태그 제거 규칙 반영
+- [x] 원클릭 Mathpix 기본 ON 전환(`--no-mathpix`로만 비활성화)
+- [x] Railway 빌드 실패 복구: `MathRun` 타입 호환 수정 후 `npm run build` 통과
+- [x] Supabase 우측 미리보기: `exam_name` 표기 차이(괄호/pdf) 폴백 매칭 추가
+- [x] Supabase 해설 미리보기: 수식 구분자 정규화로 최종 DOCX와 렌더 체감 정합성 개선
+- [x] 원클릭 strict 게이트: Python(sympy) 보조 수식 검산 추가(미설치 시 경고 폴백)
+- [x] Supabase 스냅샷 비교 도구: 로컬 초안 vs DB 본문 문항별 diff 리포트(`snapshot:compare`)
 
 ## 최근 완료 작업 (요약)
 
@@ -60,6 +66,7 @@
 - [ ] content gate 5차: 내용검수 결과를 단계별_진행상황.txt에 코드별 누적 기록
 - [ ] 원본 이미지 + OCR 발문 병기(문제 본문 가독성 강화)
 - [ ] 수식 볼드 시각 확인용 기준 샘플(사용자 제공 이미지와 대조) 자동 스냅샷 절차 정의
+- [ ] `snapshot:compare`를 원클릭 파이프라인 후처리 옵션으로 연결할지 결정(자동 실행 vs 수동 실행)
 - [ ] Mathpix: UI 단건에서 OCR 미리보기 버튼, 또는 `generate-explanation` 내부 자동 선호출(옵션 플래그) — 현재는 배치·API·MCP만
 - [ ] 자동 크롭: 다중 페이지 일괄·저장 품질 메트릭(박스 면적·겹침) — 현재는 페이지별 수동 실행 + 저장 전 사용자 확인 전제
 - [ ] DOCX: 해설 구간까지 **OMML 유지 + 시각적 볼드**를 목표로 한 저수준 OMML 실험(A/B) — 전제는 `docs/obsidian-mcp/05_세션종합_다음작업_토의록.md` §1 P2
