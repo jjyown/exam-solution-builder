@@ -7,6 +7,13 @@
         "matcher": "generate_math_explanation"
       }
     ],
+    "afterAgentResponse": [
+      {
+        "command": "node .cursor/hooks/auto-docs-worklog-after-response.mjs",
+        "timeout": 8,
+        "failClosed": false
+      }
+    ],
     "afterFileEdit": [
       {
         "command": "node .cursor/hooks/auto-upload-supabase-after-edit.mjs",

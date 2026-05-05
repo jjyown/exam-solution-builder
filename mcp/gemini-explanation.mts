@@ -2,15 +2,15 @@
  * Cursor MCP stdio 서버: Gemini / OpenAI 로 수학 해설 초안 텍스트만 반환합니다.
  * 최종 검수·DOCX 저장은 Cursor 또는 `npm run write-final-docx`가 담당합니다.
  *
- * 시스템 지시: 웹 `/api/generate-explanation` 과 동일한 `buildMcpSystemInstruction` 을
- * 항상 적용합니다(Cursor가 task 에 짧게만 써도 규칙이 빠지지 않음).
+ * 시스템 지시: MCP 런타임 번들 안정성을 위해 로컬 빌더를 사용합니다.
+ * (Next 라우트 모듈 export 변화의 영향을 받지 않도록 분리)
  */
 import "./0-bootstrap.mjs";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { buildMcpSystemInstruction } from "../src/app/api/generate-explanation/prompts";
+import { recognizeMathpixFromImageBase64Mcp } from "./mathpixClient.mts";
 /** `src/lib/geminiDefaultModels.ts` 와 동일한 값. tsx MCP 엔트리 번들 시 `../src/lib/...` import 가 실패하므로 여기서 복제. */
 const DEFAULT_GEMINI_COST_MODELS: readonly string[] = [
   "gemini-2.5-flash-lite",
@@ -35,6 +35,24 @@ function mcpSolverProfile(): "easy" | "balanced" | "killer" {
   const raw = process.env.GEMINI_MCP_SOLVER_PROFILE?.trim().toLowerCase();
   if (raw === "easy" || raw === "killer" || raw === "balanced") return raw;
   return "balanced";
+}
+
+function buildMcpSystemInstruction(profile: "easy" | "balanced" | "killer"): string {
+  const profileHint =
+    profile === "easy"
+      ? "난이도: easy(핵심 계산 위주, 과전개 금지)"
+      : profile === "killer"
+        ? "난이도: killer(핵심 논리 유지, 장황함 금지)"
+        : "난이도: balanced(정석 전개, 간결 유지)";
+  return [
+    "당신은 한국 고교 수학 해설 편집자입니다.",
+    "출력 형식은 반드시 [문제] [빠른 정답] [해설] 순서를 지킵니다.",
+    "객관식이면 [빠른 정답]은 1~5 번호만 쓰고 해설 결론과 일치시킵니다.",
+    "포기/회피 문장(판독불가/풀 수 없음/오류 추정 등)은 금지합니다.",
+    "해설은 식 중심으로 쓰되 불필요한 장황함을 줄입니다.",
+    "문항 하나만 처리하고, 다른 문항을 섞지 않습니다.",
+    profileHint,
+  ].join("\n");
 }
 
 async function generateWithGemini(
@@ -151,10 +169,10 @@ async function generateWithOpenAI(
 }
 
 const server = new McpServer(
-  { name: "highroad-gemini-explanation", version: "1.4.0" },
+  { name: "highroad-gemini-explanation", version: "1.5.0" },
   {
     instructions:
-      "하이로드 수학 시험 해설 초안(Gemini·OpenAI). 모든 호출에 웹 앱과 동일한 시스템 프롬프트(buildMcpSystemInstruction)가 자동 적용된다. task에는 난이도·특이 요청만 짧게 적어도 된다. 이미지: imageBase64+imageMimeType. 출력: [문제] 선택, [정답], [해설]. 객관식: [정답]은 1~5만. 프로필: env GEMINI_MCP_SOLVER_PROFILE=easy|balanced|killer (기본 balanced).",
+      "하이로드 수학 시험 해설 초안(Gemini·OpenAI·Mathpix). 해설 도구: task+선택 이미지 → [정답]/[해설]. Mathpix: mathpix_recognize 도구로 OCR만(키는 MATHPIX_APP_ID/KEY). 이미지: imageBase64+imageMimeType. 객관식 [정답]은 1~5만. 프로필: GEMINI_MCP_SOLVER_PROFILE=easy|balanced|killer (기본 balanced).",
   },
 );
 
@@ -201,6 +219,47 @@ server.registerTool(
       : undefined;
     const text = await generateWithGemini(task, model, image);
     return { content: [{ type: "text" as const, text }] };
+  },
+);
+
+server.registerTool(
+  "mathpix_recognize",
+  {
+    description:
+      "Mathpix v3/text로 크롭 이미지에서 수식·텍스트를 OCR한다. 해설 생성은 generate_math_explanation_* 에서 task에 이 결과를 붙이거나, 배치는 --mathpix 로 자동 주입한다. 환경: MATHPIX_APP_ID, MATHPIX_APP_KEY.",
+    inputSchema: z.object({
+      imageBase64: z
+        .string()
+        .describe("data:image/...;base64,... 또는 순수 base64. Mathpix base64 한도(약 2MB) 준수."),
+      imageMimeType: z.string().optional().describe("기본 image/png"),
+    }),
+  },
+  async ({ imageBase64, imageMimeType }) => {
+    const base64 = normalizeImageBase64(imageBase64);
+    const mime = (imageMimeType?.trim() || "image/png").toLowerCase();
+    const result = await recognizeMathpixFromImageBase64Mcp(base64, mime);
+    if (!result.ok) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify({ ok: false, status: result.status, error: result.message }, null, 2),
+          },
+        ],
+      };
+    }
+    const d = result.data;
+    const payload = {
+      ok: true,
+      text: d.text ?? "",
+      latex_styled: d.latex_styled,
+      confidence: d.confidence,
+      confidence_rate: d.confidence_rate,
+      request_id: d.request_id,
+      image_width: d.image_width,
+      image_height: d.image_height,
+    };
+    return { content: [{ type: "text" as const, text: JSON.stringify(payload, null, 2) }] };
   },
 );
 

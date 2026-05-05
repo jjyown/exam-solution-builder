@@ -5,7 +5,7 @@
  *
  * 입력: 폴더의 PNG/JPEG/Webp 또는 `.zip`(내부 ZIP·이미지 재귀 — 기존 로직).
  *
- * 전제: `npm run dev` + `.env.local` (GEMINI_API_KEY 등 — 서버 라우트와 동일).
+ * 전제: `npm run dev` + `.env.local` (GEMINI_API_KEY 등 — 서버 라우트와 동일). `--mathpix` 사용 시 같은 파일에 MATHPIX_APP_ID / MATHPIX_APP_KEY.
  *
  * 사용:
  *   npm run batch:crops-to-docx
@@ -18,6 +18,10 @@
  *   --exam-name <이름>  합본 DOCX 시험지 표제(생략 시 zip/폴더명 추정)
  *   --split-docx          문항마다 DOCX **분리**(구 동작). 생략 시 **합본 1개(기본)**.
  *   --drafts-only       **DOCX 생성 안 함.** API 초안만 `해설 작업중/<시험명>/` 에 텍스트로 저장 → Cursor·MCP 중재 후 `npm run write-final-docx`.
+ *   --mathpix           해설 요청 전에 `/api/mathpix-text` 로 OCR → `questionText`로 Gemini에 전달(이미지와 불일치 시 이미지 우선 지시).
+ *   --mathpix-min-confidence <0~1>  Mathpix confidence 미만이면 questionText 생략(기본 0 = 미사용).
+ *   --mathpix-strict    Mathpix 실패·한도 초과 시 해당 문항을 실패 처리(기본은 경고만 하고 이미지만으로 진행).
+ *   --mathpix-no-cache  Mathpix 결과 파일 캐시(.cache/mathpix) 무시.
  *   --base-url <url>    기본: http://localhost:3000
  *   --recursive / --no-recursive
  *   --delay-ms <n>      기본 800
@@ -102,6 +106,12 @@ type Cli = {
   examName: string;
   /** true면 DOCX 생략, 해설 작업중 폴더에 초안 텍스트만 */
   draftsOnly: boolean;
+  /** Mathpix OCR로 questionText 보강 */
+  mathpix: boolean;
+  /** 0이면 신뢰도 필터 없음. 0~1 사이면 Mathpix confidence가 이보다 작을 때 questionText 생략 */
+  mathpixMinConfidence: number;
+  mathpixStrict: boolean;
+  mathpixNoCache: boolean;
 };
 
 function parseArgs(argv: string[]): Cli {
@@ -115,6 +125,10 @@ function parseArgs(argv: string[]): Cli {
   let splitDocx = false;
   let examName = "";
   let draftsOnly = false;
+  let mathpix = false;
+  let mathpixMinConfidence = 0;
+  let mathpixStrict = false;
+  let mathpixNoCache = false;
 
   for (let i = 2; i < argv.length; i += 1) {
     const a = argv[i];
@@ -148,6 +162,16 @@ function parseArgs(argv: string[]): Cli {
       i += 1;
     } else if (a === "--drafts-only" || a === "--no-docx") {
       draftsOnly = true;
+    } else if (a === "--mathpix") {
+      mathpix = true;
+    } else if (a === "--mathpix-min-confidence" && argv[i + 1]) {
+      const n = Number(argv[i + 1]);
+      if (Number.isFinite(n) && n >= 0 && n <= 1) mathpixMinConfidence = n;
+      i += 1;
+    } else if (a === "--mathpix-strict") {
+      mathpixStrict = true;
+    } else if (a === "--mathpix-no-cache") {
+      mathpixNoCache = true;
     }
   }
 
@@ -166,6 +190,10 @@ function parseArgs(argv: string[]): Cli {
     splitDocx,
     examName,
     draftsOnly,
+    mathpix,
+    mathpixMinConfidence,
+    mathpixStrict,
+    mathpixNoCache,
   };
 }
 
@@ -235,6 +263,13 @@ function safeDraftFolderName(name: string): string {
 /** ZIP 안에 ZIP이 한 번 더 들어 있는 묶음(이중 압축)까지 재귀 처리, 깊이 최대 5 */
 const MAX_ZIP_NEST = 5;
 
+type CropManifest = {
+  items?: Array<{
+    questionNo?: string;
+    file?: string;
+  }>;
+};
+
 async function extractJobsFromZipBuffer(
   zipBuf: Buffer,
   examPathPrefix: string,
@@ -250,10 +285,32 @@ async function extractJobsFromZipBuffer(
   const allNames = Object.keys(zip.files)
     .filter((n) => !zip.files[n]?.dir)
     .sort((a, b) => a.localeCompare(b, "ko"));
+  let manifestMainFiles: Set<string> | null = null;
+
+  const manifestEntry = zip.file("manifest.json");
+  if (manifestEntry) {
+    try {
+      const manifestRaw = await manifestEntry.async("string");
+      const manifest = JSON.parse(manifestRaw) as CropManifest;
+      const files = (manifest.items ?? [])
+        .map((x) => String(x.file ?? "").trim())
+        .filter((x) => x.length > 0);
+      if (files.length > 0) {
+        manifestMainFiles = new Set(files);
+      }
+    } catch (err) {
+      console.warn(
+        `manifest.json 파싱 실패(계속 진행): ${relLabelPrefix} (${err instanceof Error ? err.message : String(err)})`,
+      );
+    }
+  }
 
   for (const name of allNames) {
     const base = path.basename(name);
     if (/\.(png|jpe?g|webp)$/i.test(base)) {
+      if (manifestMainFiles && !manifestMainFiles.has(base)) {
+        continue;
+      }
       const f = zip.file(name);
       if (!f) continue;
       const buffer = Buffer.from(await f.async("uint8array"));
@@ -338,6 +395,88 @@ function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+/** generate-explanation 의 `[문제 텍스트]` 블록에 넣을 Mathpix 안내 + 본문 */
+const MATHPIX_QUESTION_PREFIX = `[문항 OCR 참고 — Mathpix]
+아래는 크롭 이미지에 대한 OCR·수식 추출 결과이다. **이미지와 충돌하면 이미지 판독을 우선**하고, OCR은 식·문장 확인용 보조로만 쓴다.
+
+`;
+
+type MathpixRouteResult =
+  | { ok: true; questionText: string | undefined; note?: string }
+  | { ok: false; detail: string };
+
+async function callMathpixRoute(
+  mathpixUrl: string,
+  cli: Cli,
+  job: BatchImageJob,
+): Promise<MathpixRouteResult> {
+  const rel = job.relLabel;
+  const imageBase64 = job.buffer.toString("base64");
+  const imageMimeType = job.mimeType;
+
+  let res: Response;
+  try {
+    res = await fetch(mathpixUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        imageBase64,
+        imageMimeType,
+        skipCache: cli.mathpixNoCache,
+      }),
+    });
+  } catch (e) {
+    return {
+      ok: false,
+      detail: `Mathpix 요청 실패: ${e instanceof Error ? e.message : String(e)}`,
+    };
+  }
+
+  const raw = await res.text();
+  let data: {
+    ok?: boolean;
+    error?: string;
+    text?: string;
+    confidence?: number;
+    confidence_rate?: number;
+    fromCache?: boolean;
+  };
+  try {
+    data = JSON.parse(raw) as typeof data;
+  } catch {
+    return { ok: false, detail: `Mathpix 응답 파싱 실패 HTTP ${res.status} — ${raw.slice(0, 200)}` };
+  }
+
+  if (!res.ok || data.ok === false) {
+    const msg = typeof data.error === "string" ? data.error : `HTTP ${res.status}`;
+    return { ok: false, detail: msg };
+  }
+
+  const text = data.text?.trim() ?? "";
+  if (!text) {
+    return { ok: true, questionText: undefined, note: "Mathpix가 빈 텍스트를 반환했습니다." };
+  }
+
+  const conf =
+    typeof data.confidence === "number" && Number.isFinite(data.confidence) ?
+      data.confidence
+    : undefined;
+  if (cli.mathpixMinConfidence > 0 && conf !== undefined && conf < cli.mathpixMinConfidence) {
+    return {
+      ok: true,
+      questionText: undefined,
+      note: `Mathpix confidence ${conf} < ${cli.mathpixMinConfidence} — questionText 생략`,
+    };
+  }
+
+  const cacheNote = data.fromCache ? " (캐시)" : "";
+  return {
+    ok: true,
+    questionText: `${MATHPIX_QUESTION_PREFIX}${text}`,
+    note: `Mathpix OCR 적용${cacheNote}${conf !== undefined ? `, confidence≈${conf.toFixed(3)}` : ""}`,
+  };
+}
+
 type GenerateExplanationResult =
   | {
       ok: true;
@@ -349,12 +488,27 @@ type GenerateExplanationResult =
 
 async function postGenerateExplanation(
   generateUrl: string,
+  mathpixUrl: string | null,
   cli: Cli,
   job: BatchImageJob,
 ): Promise<GenerateExplanationResult> {
   const rel = job.relLabel;
   const imageBase64 = job.buffer.toString("base64");
   const imageMimeType = job.mimeType;
+
+  let questionText: string | undefined;
+  if (cli.mathpix && mathpixUrl) {
+    const mp = await callMathpixRoute(mathpixUrl, cli, job);
+    if (!mp.ok) {
+      if (cli.mathpixStrict) {
+        return { ok: false, rel, detail: `[Mathpix] ${mp.detail}` };
+      }
+      console.warn(`[Mathpix] ${rel}: ${mp.detail} — strict 아님: 이미지만으로 진행`);
+    } else {
+      if (mp.note) console.warn(`[Mathpix] ${rel}: ${mp.note}`);
+      questionText = mp.questionText;
+    }
+  }
 
   let res: Response;
   try {
@@ -364,6 +518,7 @@ async function postGenerateExplanation(
       body: JSON.stringify({
         imageBase64,
         imageMimeType,
+        ...(questionText ? { questionText } : {}),
         generationMode: cli.generationMode,
         solverModelProfile: cli.solverProfile,
         includeDiagramExplanation: true,
@@ -457,8 +612,11 @@ async function main() {
     : cli.splitDocx
       ? "문항별 분리"
       : "합본 1개(해설지 최종본)";
+  const mathpixLabel = cli.mathpix
+    ? ` Mathpix=ON(minConf=${cli.mathpixMinConfidence}${cli.mathpixStrict ? ",strict" : ""}${cli.mathpixNoCache ? ",no-cache" : ""})`
+    : "";
   console.log(
-    `발견 ${jobs.length}개 문항 이미지 — baseUrl=${cli.baseUrl} mode=${cli.generationMode} profile=${cli.solverProfile} 출력=${docModeLabel}${cli.dryRun ? " (dry-run)" : ""}`,
+    `발견 ${jobs.length}개 문항 이미지 — baseUrl=${cli.baseUrl} mode=${cli.generationMode} profile=${cli.solverProfile} 출력=${docModeLabel}${mathpixLabel}${cli.dryRun ? " (dry-run)" : ""}`,
   );
 
   if (cli.dryRun) {
@@ -475,6 +633,7 @@ async function main() {
   }
 
   const generateUrl = `${cli.baseUrl}/api/generate-explanation`;
+  const mathpixUrl = cli.mathpix ? `${cli.baseUrl}/api/mathpix-text` : null;
   const outDir = path.join(process.cwd(), FINAL_EXPLANATION_DIR_NAME);
 
   if (cli.splitDocx && cli.draftsOnly) {
@@ -487,7 +646,7 @@ async function main() {
     for (let i = 0; i < jobs.length; i += 1) {
       const job = jobs[i]!;
       if (i > 0 && cli.delayMs > 0) await sleep(cli.delayMs);
-      const result = await postGenerateExplanation(generateUrl, cli, job);
+      const result = await postGenerateExplanation(generateUrl, mathpixUrl, cli, job);
       if (!result.ok) {
         console.error(`해설 생성 실패: ${result.rel} — ${result.detail}`);
         process.exit(1);
@@ -536,7 +695,7 @@ async function main() {
     for (let i = 0; i < jobs.length; i += 1) {
       const job = jobs[i]!;
       if (i > 0 && cli.delayMs > 0) await sleep(cli.delayMs);
-      const result = await postGenerateExplanation(generateUrl, cli, job);
+      const result = await postGenerateExplanation(generateUrl, mathpixUrl, cli, job);
       if (!result.ok) {
         console.error(`해설 생성 실패(합본 중단, DOCX 미저장): ${result.rel} — ${result.detail}`);
         process.exit(1);
@@ -646,7 +805,7 @@ async function main() {
 
     if (i > 0 && cli.delayMs > 0) await sleep(cli.delayMs);
 
-    const gen = await postGenerateExplanation(generateUrl, cli, job);
+    const gen = await postGenerateExplanation(generateUrl, mathpixUrl, cli, job);
     if (!gen.ok) {
       console.error(`해설 생성 실패: ${gen.rel} — ${gen.detail}`);
       fail += 1;

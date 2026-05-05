@@ -52,8 +52,13 @@ yarn-error.log*
 *.bat
 *.sh
 
+# Mathpix OCR 캐시(로컬)
+/.cache/
+
 # scratch / 로컬만 쓰는 작업 폴더
 /work/
+# cursor hook runtime stamp
+.cursor/hooks/.worklog-auto-stamp.json
 # typescript
 *.tsbuildinfo
 next-env.d.ts

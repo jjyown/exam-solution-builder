@@ -10,12 +10,17 @@
 2. **`npm run build:md`** 가 manifest 기준으로 이미지 경로를 주입하고 **`합본_편집용.md`** 작성
 3. **`[해설]`** 직후 **`![참고 도형 …]`** 는 `<div align="center">` 로 감싸서 주입
 4. **기존 `explanationExportGate`** 로 구조·LaTeX 잔존 등 이중 검수 (exit 1)
-5. **(선택)** `--preflight-openai` 로 OpenAI에 “그림 권장” 표 받아 `export_preflight_openai.md` 저장 → **Cursor·원장님이 최종 검토** 후 DOCX
+5. **(선택)** `--preflight-openai` 로 OpenAI에 “그림 권장” 표 받아 `export_preflight_openai.md` 저장 → **Cursor·원장님이 최종 검토** 후 DOCX  
+   - 키/네트워크 문제 시 기본은 **경고 후 계속 진행**(대체 리포트 저장)  
+   - OpenAI 검수를 반드시 통과해야 하면 `--preflight-openai-strict` 사용
 6. **(선택)** `--write-docx` 로 **`npm` 대신 `npx tsx write-final-docx.mts`** 호출 — 수식은 기존 **`docx` + OMML** (`examExplanationDocx`) 경로. Pandoc 전환은 토큰·환경 의존도가 커서 기본 경로는 유지한다.
 
 ## 명령 예시
 
 ```bash
+# 파일 넣고 최종본까지 한 번에 (권장 기본 동선, strict 기본)
+npm run final:from-input -- --input "./크롭된 시험지"
+
 # 기존과 동일(병합 + 게이트만)
 npm run build:md -- --workdir "./해설 작업중/[TEST] TEST1.pdf"
 
@@ -25,9 +30,26 @@ npm run build:md:agentic -- --workdir "./해설 작업중/[TEST] TEST1.pdf"
 # OpenAI 그림 필요 검수표까지(OPENAI_API_KEY 필요)
 npm run build:md -- --workdir "./해설 작업중/[TEST] TEST1.pdf" --preflight-openai
 
+# OpenAI 검수 실패 시 중단(엄격 모드)
+npm run build:md -- --workdir "./해설 작업중/[TEST] TEST1.pdf" --preflight-openai-strict
+
 # DOCX까지(빠른정답은 파일 또는 인자)
 npm run build:md -- --workdir "./해설 작업중/[TEST] TEST1.pdf" --write-docx --exam-name "TEST1"
 ```
+
+### 원클릭 최종본 (`final:from-input`)
+
+- 실행 순서:
+  1) `batch-crops-to-docx --drafts-only`로 `해설 작업중/<시험>/` 초안 생성  
+  2) 방금 생성된 최신 `합본_편집용.md`를 자동 선택  
+  3) `write-final-docx --workdir <자동선택폴더>` 실행  
+- 즉, **입력 폴더 지정만으로 최종 DOCX까지** 연속 실행한다.
+- 기본값은 **strict gate**(구조검사 포함)다.
+- 빠른 즉시 산출이 필요하면 `--fast`를 사용한다(구조검사 생략).
+- 예시:
+  - `npm run final:from-input -- --input "./크롭된 시험지" --solver-profile balanced`
+  - `npm run final:from-input -- --input "./크롭된 시험지" --fast`
+  - `npm run final:from-input -- --input "./크롭된 시험지" --mathpix --mathpix-min-confidence 0.7`
 
 ## AST 엄격 헤더 (`n) [문제]` …)
 

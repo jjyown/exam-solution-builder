@@ -71,6 +71,8 @@ MCP 도구 **`generate_math_explanation`** / **`generate_math_explanation_openai
 
 에이전트가 **`generate_math_explanation`** / **`generate_math_explanation_openai`** 를 호출해 성공하면, Cursor가 **`postToolUse`** 훅을 돌리고 스크립트(`.cursor/hooks/mcp-explanation-post-tool.mjs`)가 **`additional_context`** 로 **필수 다듬기 체크리스트**를 대화에 붙인다. (객관식 `[정답]` 표기, 서술형 `해설참고`, LaTeX·`$` 짝, 정답–해설 일치, 회피 문구·재풀이, **검수 완료본만** `문항##_API초안.md`·`합본_편집용.md` 저장, 마무리 보고 문장.)
 
+추가로, 훅은 답변 마지막에 **`요청 개선 피드백`** 섹션을 강제한다. (다음 호출용 프롬프트, 어떤 이미지를 더 붙이면 좋은지, 오답 방지 체크포인트, 자동 개선안 1개). 운영 상세는 [MCP_REQUEST_FEEDBACK_PLAYBOOK.md](./MCP_REQUEST_FEEDBACK_PLAYBOOK.md).
+
 | 위치 | 용도 |
 |------|------|
 | 저장소 `highroad-math-solution/.cursor/hooks.json` | 폴더를 Cursor **프로젝트 루트**로 열었을 때 |

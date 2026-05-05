@@ -23,6 +23,15 @@ import { EXAM_DOCX_BODY_SIZE_HALF_PT, EXAM_DOCX_FONT } from "./examDocxTheme";
 import { explanationLatexToPlain } from "./latexToPlainText";
 import { normalizeLatexSourceText } from "./latexSourceNormalize";
 
+function boldMathRun(text: string): MathRun {
+  return new MathRun({
+    text,
+    bold: true,
+    font: EXAM_DOCX_FONT,
+    size: EXAM_DOCX_BODY_SIZE_HALF_PT,
+  });
+}
+
 /**
  * `2^{5/2}`, `4^{1/3}` 등 지수 안의 `숫자/숫자`를 OMML에서 **가로 분수**로 쌓이게 `\frac` 로 바꾼다.
  * (그대로 두면 윗첨자에 `5`, `/`, `2`가 따로 나와 LaTeX·플레인텍스트처럼 보인다.)
@@ -151,7 +160,7 @@ function extractScriptAfterMarker(
     return [parseConcat(tb[0]), tb[1]];
   }
   if (r.length) {
-    return [[new MathRun(r[0]!)], r.slice(1)];
+    return [[boldMathRun(r[0]!)], r.slice(1)];
   }
   return null;
 }
@@ -213,7 +222,7 @@ function buildLogLikeFunctionName(
   sub?: MathComponent[],
   sup?: MathComponent[],
 ): MathComponent[] {
-  const baseName = new MathRun(cmd === "Pr" ? "Pr" : cmd);
+  const baseName = boldMathRun(cmd === "Pr" ? "Pr" : cmd);
   if (sub?.length && sup?.length) {
     return [
       new MathPreSubSuperScript({
@@ -238,7 +247,7 @@ function buildLogLikeFunctionName(
  */
 function buildStandardFunction(nameParts: MathComponent[], args: MathComponent[]): MathComponent {
   if (args.length === 0) {
-    if (nameParts.length === 0) return new MathRun("");
+    if (nameParts.length === 0) return boldMathRun("");
     if (nameParts.length === 1) return nameParts[0]!;
     return new MathRoundBrackets({ children: nameParts });
   }
@@ -365,7 +374,7 @@ const TRIG_LIKE = new Set([
 ]);
 
 function wrapCurlyGroup(children: MathComponent[]): MathComponent {
-  if (children.length === 0) return new MathRun("");
+  if (children.length === 0) return boldMathRun("");
   if (children.length === 1) return children[0]!;
   return new MathCurlyBrackets({ children });
 }
@@ -412,15 +421,15 @@ function parseBackslashCommand(s: string): [MathComponent, string] | null {
   if (!s.startsWith("\\")) return null;
   const m = s.match(/^\\([A-Za-z]+)/);
   if (!m) {
-    if (s.startsWith("\\{")) return [new MathRun("{"), s.slice(2)];
-    if (s.startsWith("\\}")) return [new MathRun("}"), s.slice(2)];
-    if (s.startsWith("\\%")) return [new MathRun("%"), s.slice(2)];
-    if (s.startsWith("\\_")) return [new MathRun("_"), s.slice(2)];
-    if (s.startsWith("\\ ")) return [new MathRun(" "), s.slice(2)];
-    if (s.startsWith("\\,")) return [new MathRun(" "), s.slice(2)];
-    if (s.startsWith("\\;")) return [new MathRun(" "), s.slice(2)];
-    if (s.startsWith("\\quad")) return [new MathRun("  "), s.slice(5)];
-    if (s.startsWith("\\qquad")) return [new MathRun("    "), s.slice(6)];
+    if (s.startsWith("\\{")) return [boldMathRun("{"), s.slice(2)];
+    if (s.startsWith("\\}")) return [boldMathRun("}"), s.slice(2)];
+    if (s.startsWith("\\%")) return [boldMathRun("%"), s.slice(2)];
+    if (s.startsWith("\\_")) return [boldMathRun("_"), s.slice(2)];
+    if (s.startsWith("\\ ")) return [boldMathRun(" "), s.slice(2)];
+    if (s.startsWith("\\,")) return [boldMathRun(" "), s.slice(2)];
+    if (s.startsWith("\\;")) return [boldMathRun(" "), s.slice(2)];
+    if (s.startsWith("\\quad")) return [boldMathRun("  "), s.slice(5)];
+    if (s.startsWith("\\qquad")) return [boldMathRun("    "), s.slice(6)];
     return null;
   }
   const cmd = m[1];
@@ -452,15 +461,15 @@ function parseBackslashCommand(s: string): [MathComponent, string] | null {
     return parseNaryOperator("int", afterCmd);
   }
   if (cmd === "oint") {
-    return [new MathRun("∮"), afterCmd];
+    return [boldMathRun("∮"), afterCmd];
   }
   if (cmd === "prod") {
-    return [new MathRun("∏"), afterCmd];
+    return [boldMathRun("∏"), afterCmd];
   }
   if (cmd === "text" || cmd === "mathrm" || cmd === "textrm") {
     const t = parseTextArg(afterCmd);
     if (!t) return null;
-    return [new MathRun(t[0]), t[1]];
+    return [boldMathRun(t[0]), t[1]];
   }
 
   if (cmd === "log" || cmd === "ln" || cmd === "lg") {
@@ -478,15 +487,15 @@ function parseBackslashCommand(s: string): [MathComponent, string] | null {
       }
     }
     return [
-      buildStandardFunction([new MathRun(cmd === "Pr" ? "Pr" : cmd)], children),
+      buildStandardFunction([boldMathRun(cmd === "Pr" ? "Pr" : cmd)], children),
       rest,
     ];
   }
 
   const sym = SYMBOL_CMD[cmd];
-  if (sym !== undefined) return [new MathRun(sym), afterCmd];
+  if (sym !== undefined) return [boldMathRun(sym), afterCmd];
 
-  return [new MathRun(cmd), afterCmd];
+  return [boldMathRun(cmd), afterCmd];
 }
 
 function parseBase(s: string): [MathComponent, string] | null {
@@ -519,7 +528,7 @@ function parseBase(s: string): [MathComponent, string] | null {
     i += 1;
   }
   if (i === 0) return null;
-  return [new MathRun(t.slice(0, i)), t.slice(i)];
+  return [boldMathRun(t.slice(0, i)), t.slice(i)];
 }
 
 /**
@@ -573,7 +582,7 @@ function parseConcat(s: string): MathComponent[] {
     const [node, r2] = parseOneWithScripts(rest);
     if (!node) {
       if (rest[0] === "}") break;
-      out.push(new MathRun(rest[0]!));
+      out.push(boldMathRun(rest[0]!));
       rest = rest.slice(1);
       continue;
     }
@@ -589,7 +598,7 @@ function mathFromInner(inner: string): MathComponent[] {
   return parseConcat(cleaned);
 }
 
-function mathZoneToParagraphChild(inner: string): ParagraphChild {
+function mathZoneToParagraphChild(inner: string, opts?: { bold?: boolean }): ParagraphChild {
   const trimmed = inner.trim();
   if (!trimmed.length)
     return new TextRun({ text: "", font: EXAM_DOCX_FONT, size: EXAM_DOCX_BODY_SIZE_HALF_PT });
@@ -601,6 +610,7 @@ function mathZoneToParagraphChild(inner: string): ParagraphChild {
   }
   return new TextRun({
     text: explanationLatexToPlain(`$${trimmed}$`),
+    bold: Boolean(opts?.bold),
     font: EXAM_DOCX_FONT,
     size: EXAM_DOCX_BODY_SIZE_HALF_PT,
   });
@@ -715,7 +725,7 @@ export function explanationLineToParagraphChildren(
     const t = normalizedLine.trim();
     if (t && lineLooksLikeBareLatexCommand(t)) {
       try {
-        const child = mathZoneToParagraphChild(t);
+        const child = mathZoneToParagraphChild(t, { bold });
         if (child instanceof Math) return [child];
       } catch {
         /* OMML 실패 시 아래 평문 폴백 */
@@ -743,7 +753,7 @@ export function explanationLineToParagraphChildren(
           }),
         );
     } else if (seg.value.trim().length) {
-      children.push(mathZoneToParagraphChild(seg.value));
+      children.push(mathZoneToParagraphChild(seg.value, { bold }));
     }
   }
   if (children.length === 0) {

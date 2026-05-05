@@ -24,7 +24,8 @@
     "build:md:agentic": "tsx scripts/build-markdown-assembly.mts --run-python-graphs",
     "validate:format": "tsx scripts/validate-format.mts",
     "validate:explanation": "tsx scripts/validate-explanation-format.mts",
-    "batch:payloads": "tsx scripts/batch-explanations-from-payloads.mts"
+    "batch:payloads": "tsx scripts/batch-explanations-from-payloads.mts",
+    "final:from-input": "tsx scripts/make-final-from-input.mts"
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.1",

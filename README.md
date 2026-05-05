@@ -43,6 +43,17 @@ Windows: `실행.bat` · 브라우저 [http://localhost:3000](http://localhost:3
 
 ## 코드 위치
 
-- UI: `src/app/page.tsx`
+- UI: `src/app/page.tsx` (2단계 크롭: 「비전으로 박스 채우기」→ `POST /api/detect-question-layout`)
 - 해설: `src/app/api/generate-explanation/route.ts`
+- Mathpix OCR(선택): `src/app/api/mathpix-text/route.ts`, `src/lib/mathpixV3Text.ts`
 - DOCX: `src/lib/examExplanationDocx.ts`
+
+### Mathpix로 배치 품질 보강(선택)
+
+`.env.local`에 `MATHPIX_APP_ID`, `MATHPIX_APP_KEY`를 넣은 뒤 `npm run dev`를 켜고:
+
+```bash
+npm run batch:crops-to-docx -- --drafts-only --mathpix
+```
+
+문항마다 먼저 `/api/mathpix-text`로 OCR 텍스트를 얻어 `questionText`로 넘기고, 이어서 기존과 같이 `/api/generate-explanation`을 호출합니다. Cursor MCP `gemini-gpt`에는 `mathpix_recognize` 도구가 별도로 있습니다(MCP 프로세스에도 동일 키 환경변수 필요).

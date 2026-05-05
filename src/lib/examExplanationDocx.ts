@@ -3,6 +3,7 @@ import {
   Document,
   ImageRun,
   Packer,
+  PageBreak,
   Paragraph,
   ParagraphChild,
   TextRun,
@@ -47,6 +48,10 @@ function bodyTextRun(opts: { text: string; bold?: boolean; size?: number }) {
 
 export function safeExamFileName(value: string) {
   return value.replace(/[<>:"/\\|?*\u0000-\u001F]/g, "_").trim();
+}
+
+function sanitizeLeadingStudentNameTag(value: string): string {
+  return value.replace(/^\[[가-힣]{2,4}\]\s*/u, "").trim();
 }
 
 type ExplanationBlock = {
@@ -134,6 +139,25 @@ function segmentProblemLinesForChoicesBox(rawLines: string[]): ProblemLineSegmen
     i += 1;
   }
   return out;
+}
+
+function estimateProblemBlockWeight(rawLines: string[]): number {
+  const segs = segmentProblemLinesForChoicesBox(rawLines);
+  let score = 0;
+  for (const seg of segs) {
+    if (seg.type === "choices") {
+      score += 2 + seg.lines.length * 1.6;
+      continue;
+    }
+    const t = seg.line.trim();
+    if (!t) continue;
+    if (MD_IMAGE_LINE.test(t)) {
+      score += 4.5;
+      continue;
+    }
+    score += t.length > 70 ? 1.6 : 1.0;
+  }
+  return score;
 }
 
 /** `[문제]…[빠른 정답]/[정답]` 선행이 있으면 분리한다. `[문항 n]` 직후 `![](...)` 줄은 문제 블록 앞에 붙인다. */
@@ -300,12 +324,17 @@ async function paragraphChildrenForProblemDocxLine(
   assetBaseDir: string | undefined,
 ): Promise<ParagraphChild[] | null> {
   if (isDocxOmittedTypingReferenceCropMarkdownLine(line)) return null;
-  return paragraphChildrenForDocxLine(line, assetBaseDir, { boldContent: true });
+  return paragraphChildrenForDocxLine(line, assetBaseDir, {
+    boldContent: true,
+    forcePlainBoldMath: true,
+  });
 }
 
 type DocxLineRenderOpts = {
   /** [문제]·[해설] 본문: 평문·한글 구간 굵게 */
   boldContent?: boolean;
+  /** 수식 굵기 체감 우선: 수식을 평문화해 한 줄 전체를 굵게 */
+  forcePlainBoldMath?: boolean;
 };
 
 async function paragraphChildrenForDocxLine(
@@ -334,6 +363,16 @@ async function paragraphChildrenForDocxLine(
         text: `〔그림 파일 없음〕 ${img.src}`,
         italics: true,
         bold: renderOpts?.boldContent,
+        font: EXAM_DOCX_FONT,
+        size: EXAM_DOCX_BODY_SIZE_HALF_PT,
+      }),
+    ];
+  }
+  if (renderOpts?.forcePlainBoldMath) {
+    return [
+      new TextRun({
+        text: explanationLatexToPlain(line),
+        bold: true,
         font: EXAM_DOCX_FONT,
         size: EXAM_DOCX_BODY_SIZE_HALF_PT,
       }),
@@ -396,7 +435,8 @@ async function buildDocxChoicesBoxTable(lines: string[], assetBaseDir?: string):
         children: [
           new TableCell({
             width: { size: colW, type: WidthType.DXA },
-            margins: { top: 120, bottom: 120, left: 200, right: 200 },
+            /** 보기 박스 안쪽 좌우 여백을 줄여 긴 보기/수식 줄 잘림 완화 */
+            margins: { top: 120, bottom: 120, left: 120, right: 120 },
             children: cellChildren,
           }),
         ],
@@ -414,15 +454,16 @@ function quickAnswerDisplayText(block: ExplanationBlock): string {
     (/번/u.test(rawAnswer) || /\([^)]+\)/u.test(rawAnswer) || rawAnswer.replace(/\s/g, "").length > 2);
   if (answerKind === "essay") return "해설참고";
   if (objectiveWithExtra) return quickAnswerToPlainLine(block.answer || "-");
-  if (objective) return toCircledObjectiveAnswer(objective);
+  /** 편집본 요청: 객관식도 ①~⑤ 대신 숫자(1~5) 표기를 기본으로 사용 */
+  if (objective) return objective;
   return quickAnswerToPlainLine(block.answer || "-");
 }
 
 /**
  * HML·`[TEST] TEST1.hml` 과 같은 **대역 순서**(편집본 DOCX와 동일한 **구분 폼**):
  * 1) 문항 순서대로 **문제** 전체(섹션·2단) — `N. 발문…`, 문항은 `w:cantSplit` 표로 묶어 페이지 가운데에서 잘리지 않게 함
- * 2) **다음 면**에서 **`[빠른정답]`**(1단·전체 너비) — 문항마다 `N.` → `[정답]` → 값
- * 3) **그다음 면**에서 **`[해설]`**(2단) — 문항마다 `N.` → `[정답]` → 값 → `[해설]` → 해설 본문 줄
+ * 2) **다음 면**에서 **`[빠른정답]`**(1단·전체 너비) — 문항마다 `N. [정답] 값` 한 줄
+ * 3) **그다음 면**에서 **`[해설]`**(2단) — 문항마다 `N. [정답] 값` 다음 줄에 `[해설]` 후 본문
  */
 type ExamExplanationSectionChildren = {
   /** 2단 본문 — 문항 단위 `cantSplit` 표로 감싼 블록 */
@@ -488,6 +529,20 @@ async function buildExplanationSectionChildren(
       );
     }
     if (inner.length > 0) {
+      /**
+       * 강한 잘림 방지:
+       * - `cantSplit` 표로 감싸도 컬럼 하단에서 긴 문항이 시각적으로 답답해지는 경우가 있어,
+       * - 문제량이 큰 문항은 시작 전에 강제 페이지 넘김해 “문항 전체가 다음 페이지에서 시작”되게 한다.
+       */
+      const problemWeight = estimateProblemBlockWeight(block.problemLinesRaw);
+      if (idx > 0 && problemWeight >= 13) {
+        problemChildren.push(
+          new Paragraph({
+            children: [new PageBreak()],
+            spacing: { ...EXAM_DOCX_BODY_PARAGRAPH_SPACING, before: 0, after: 0 },
+          }),
+        );
+      }
       problemChildren.push(wrapQuestionBlockInCantSplitTable(inner));
     }
   }
@@ -508,24 +563,12 @@ async function buildExplanationSectionChildren(
     const quickAnswerText = quickAnswerDisplayText(block);
     quickAnswerChildren.push(
       new Paragraph({
-        children: [bodyTextRun({ text: `${block.questionLabel}.`, bold: true })],
+        children: [bodyTextRun({ text: `${block.questionLabel}. [정답] ${quickAnswerText}`, bold: true })],
         spacing: {
           ...EXAM_DOCX_BODY_PARAGRAPH_SPACING,
           before: idx === 0 ? 80 : 160,
-          after: 60,
+          after: 220,
         },
-      }),
-    );
-    quickAnswerChildren.push(
-      new Paragraph({
-        children: [bodyTextRun({ text: "[정답]", bold: true })],
-        spacing: { ...EXAM_DOCX_BODY_PARAGRAPH_SPACING, after: 60 },
-      }),
-    );
-    quickAnswerChildren.push(
-      new Paragraph({
-        children: [bodyTextRun({ text: quickAnswerText, bold: true })],
-        spacing: { ...EXAM_DOCX_BODY_PARAGRAPH_SPACING, after: 220 },
       }),
     );
   }
@@ -548,27 +591,13 @@ async function buildExplanationSectionChildren(
     const quickAnswerText = quickAnswerDisplayText(block);
     explanationChildren.push(
       new Paragraph({
-        children: [bodyTextRun({ text: `${block.questionLabel}.`, bold: true })],
+        children: [bodyTextRun({ text: `${block.questionLabel}. [정답] ${quickAnswerText}`, bold: true })],
         indent: explIndent,
         spacing: {
           ...EXAM_DOCX_BODY_PARAGRAPH_SPACING,
           before: idx === 0 ? 100 : 240,
           after: 60,
         },
-      }),
-    );
-    explanationChildren.push(
-      new Paragraph({
-        children: [bodyTextRun({ text: "[정답]", bold: true })],
-        indent: explIndent,
-        spacing: { ...EXAM_DOCX_BODY_PARAGRAPH_SPACING, after: 60 },
-      }),
-    );
-    explanationChildren.push(
-      new Paragraph({
-        children: [bodyTextRun({ text: quickAnswerText, bold: true })],
-        indent: explIndent,
-        spacing: { ...EXAM_DOCX_BODY_PARAGRAPH_SPACING, after: 60 },
       }),
     );
     explanationChildren.push(
@@ -649,7 +678,8 @@ export async function buildExamExplanationDocxBuffer(params: BuildExamExplanatio
       spacing: EXAM_DOCX_BODY_PARAGRAPH_SPACING,
     }),
   ];
-  const headerTitle = `${path.parse(examName).name}(해설)`;
+  const displayExamName = sanitizeLeadingStudentNameTag(path.parse(examName).name) || path.parse(examName).name;
+  const headerTitle = `${displayExamName}(해설)`;
   const docDate = `${now.getFullYear()}.${String(now.getMonth() + 1).padStart(2, "0")}.${String(
     now.getDate(),
   ).padStart(2, "0")}`;

@@ -77,6 +77,26 @@ export function findEquationPeriodViolations(
   return hits;
 }
 
+function findLatexResidueWords(
+  text: string,
+  section: string,
+): Array<{ section: string; lineOffset: number; line: string; token: string }> {
+  const hits: Array<{ section: string; lineOffset: number; line: string; token: string }> = [];
+  const re = /(?<!\\)\b(Leftrightarrow|Rightarrow|Leftarrow|quad|qquad|mapsto)\b/g;
+  linesOf(text).forEach((line, i) => {
+    if (!line.trim() || line.trim().startsWith("![")) return;
+    const m = line.match(re);
+    if (!m?.[0]) return;
+    hits.push({
+      section,
+      lineOffset: i + 1,
+      line: line.trim().slice(0, 140),
+      token: m[0],
+    });
+  });
+  return hits;
+}
+
 export function findMembershipIntervalNotation(text: string, section: string): StrayLatexHit[] {
   const hits: StrayLatexHit[] = [];
   const ls = linesOf(text);
@@ -256,6 +276,16 @@ export function validateExportReadiness(rawInput: string): MergedStructureCheckR
     for (const h of findEquationPeriodViolations(explBody, `${disp} [해설] 본문`)) {
       errors.push(
         `${disp}: 수식 끝 마침표 위반 (${h.section} ${h.lineOffset}행). 수식만 있는 줄·표시 수식 블록 안에서는 마침표를 쓰지 마세요(숫자 뒤 마침표는 소수점으로 오인됩니다). 문장을 맺을 때만 한글과 함께 마침표를 쓰세요.`,
+      );
+    }
+    for (const h of findLatexResidueWords(problemBody, `${disp} [문제] 본문`)) {
+      warnings.push(
+        `${disp}: LaTeX 잔여 토큰 의심 (${h.section} ${h.lineOffset}행, ${h.token}). DOCX에서 문자 찌꺼기로 보일 수 있으니 명령어를 기호/문장으로 치환하세요.`,
+      );
+    }
+    for (const h of findLatexResidueWords(explBody, `${disp} [해설] 본문`)) {
+      warnings.push(
+        `${disp}: LaTeX 잔여 토큰 의심 (${h.section} ${h.lineOffset}행, ${h.token}). DOCX에서 문자 찌꺼기로 보일 수 있으니 명령어를 기호/문장으로 치환하세요.`,
       );
     }
     warnings.push(...findFigureMarkdownInExplanation(explBody, disp));

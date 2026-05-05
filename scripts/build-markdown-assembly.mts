@@ -42,6 +42,7 @@ type Cli = {
   skipExportGate: boolean;
   runPythonGraphs: boolean;
   preflightOpenai: boolean;
+  preflightOpenaiStrict: boolean;
   writeDocx: boolean;
   docxExamName: string;
   docxQuickAnswer: string;
@@ -56,6 +57,7 @@ function parseArgs(argv: string[]): Cli {
   let skipExportGate = false;
   let runPythonGraphs = false;
   let preflightOpenai = false;
+  let preflightOpenaiStrict = false;
   let writeDocx = false;
   let docxExamName = "";
   let docxQuickAnswer = "";
@@ -81,6 +83,9 @@ function parseArgs(argv: string[]): Cli {
       runPythonGraphs = true;
     } else if (a === "--preflight-openai") {
       preflightOpenai = true;
+    } else if (a === "--preflight-openai-strict") {
+      preflightOpenai = true;
+      preflightOpenaiStrict = true;
     } else if (a === "--write-docx") {
       writeDocx = true;
     } else if (a === "--exam-name" && argv[i + 1]) {
@@ -112,6 +117,7 @@ function parseArgs(argv: string[]): Cli {
     skipExportGate,
     runPythonGraphs,
     preflightOpenai,
+    preflightOpenaiStrict,
     writeDocx,
     docxExamName,
     docxQuickAnswer,
@@ -388,8 +394,28 @@ Agentic / 그래프 / OpenAI / DOCX (선택):
       );
       console.log(`OpenAI preflight 저장: ${prePath}`);
     } catch (e) {
-      console.error(e instanceof Error ? e.message : e);
-      process.exit(1);
+      const msg = e instanceof Error ? e.message : String(e);
+      if (cli.preflightOpenaiStrict) {
+        console.error(msg);
+        process.exit(1);
+      }
+      const prePath = path.join(cli.workdir, "export_preflight_openai.md");
+      await fs.writeFile(
+        prePath,
+        [
+          "<!-- OpenAI preflight 스킵(자동 fallback) -->",
+          "",
+          "## 상태",
+          "- OpenAI preflight를 실행하지 못해 규칙 기반 게이트만 적용했습니다.",
+          `- 사유: ${msg}`,
+          "",
+          "## 조치",
+          "- OPENAI_API_KEY 설정 후 `--preflight-openai-strict`로 재실행하면 OpenAI 검수까지 강제할 수 있습니다.",
+        ].join("\n"),
+        "utf8",
+      );
+      console.warn(`OpenAI preflight 건너뜀(계속 진행): ${msg}`);
+      console.log(`OpenAI preflight 대체 리포트 저장: ${prePath}`);
     }
   }
 

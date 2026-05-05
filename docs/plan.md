@@ -1,6 +1,6 @@
 # 하이로드 수학 해설지 제작기 — 작업 계획서
 
-- 문서 기준일: 2026-05-02
+- 문서 기준일: 2026-05-05
 
 ## 프로젝트 목표
 
@@ -20,6 +20,24 @@
 - [x] 로컬 최종 산출 폴더 `해설지 최종본` 상수화
 - [x] `NEXT_PUBLIC_UI_MODE=crop` 크롭 전용 UI
 - [x] 문서 세트: `enterprise_workflow`, `context`, `plan`, `checklist`
+- [x] Agentic 합본 파이프라인(`build:md` + preflight + python graph + validate:format)
+- [x] OpenAI preflight soft/strict 분리(기본 계속 진행, 필요 시 엄격 차단)
+- [x] Supabase 미리보기 성능 개선(목록/본문 분리 로드) + 전체 삭제
+- [x] 작업 이력 자동 누적(`docs/worklog.md`, Cursor `afterAgentResponse` 훅)
+- [x] 크롭 ZIP 문항 집계 보정(`manifest.items.file` 기반 본문 문항만 배치 처리)
+- [x] Obsidian MCP 권위 문서 세트(`docs/obsidian-mcp`) 구축
+- [x] 세션 핸드오프 문서 `docs/obsidian-mcp/05_세션종합_다음작업_토의록.md` + `README` 6단계 반영
+- [x] Mathpix v3 OCR: `/api/mathpix-text`, 배치 `--mathpix`, MCP `mathpix_recognize`(로컬 `mcp/mathpixClient.mts`)
+- [x] 크롭 2단계: Gemini 비전 문항 박스 자동 채우기(`/api/detect-question-layout`, 번호 필터 `1,5,7-9`)
+- [x] 원클릭 최종본 파이프라인 `final:from-input` 추가 (입력 폴더 -> 초안 -> 최종 DOCX 자동 연속 실행)
+- [x] 전문가 합의 반영: 원클릭 기본값 strict gate, 예외 fast(`--fast`) 분기
+- [x] strict 통과율 보강: 수식 구분자 자동 정규화(`\\[\\]`,`\\(\\)`, 닫는 구분자 직전 마침표 제거)
+- [x] strict content gate 도입: 해설 길이/포기문구/결론-정답 불일치 치명 규칙 검사
+- [x] content gate 2차: 변수 없는 단순 산술 등식(`lhs=rhs`) 자동 계산 검증
+- [x] content gate 3차: 체인 등식(`A=B=C`) 인접 항 자동 비교 검증
+- [x] content gate 4차: 부등식 체인(`A<B<C`, `A<=B<=C`) 인접 항 자동 비교 검증
+- [x] 원클릭 `[문제]`에 원본 이미지 자동 주입(문항XX_문제원본.* 생성 및 연결)
+- [x] OMML 수식 런 bold 적용 및 HML 선행 학생명 태그 제거 규칙 반영
 
 ## 최근 완료 작업 (요약)
 
@@ -39,5 +57,13 @@
 
 ## 다음 단계 (후보)
 
+- [ ] content gate 5차: 내용검수 결과를 단계별_진행상황.txt에 코드별 누적 기록
+- [ ] 원본 이미지 + OCR 발문 병기(문제 본문 가독성 강화)
+- [ ] 수식 볼드 시각 확인용 기준 샘플(사용자 제공 이미지와 대조) 자동 스냅샷 절차 정의
+- [ ] Mathpix: UI 단건에서 OCR 미리보기 버튼, 또는 `generate-explanation` 내부 자동 선호출(옵션 플래그) — 현재는 배치·API·MCP만
+- [ ] 자동 크롭: 다중 페이지 일괄·저장 품질 메트릭(박스 면적·겹침) — 현재는 페이지별 수동 실행 + 저장 전 사용자 확인 전제
+- [ ] DOCX: 해설 구간까지 **OMML 유지 + 시각적 볼드**를 목표로 한 저수준 OMML 실험(A/B) — 전제는 `docs/obsidian-mcp/05_세션종합_다음작업_토의록.md` §1 P2
 - [ ] 크롭 세션 영속화 또는 묶음 내보내기(필요 시 PRD-lite 작성 후 Gate A)
 - [ ] Turbopack NFT 경고(`next.config` ↔ `save-result` 추적) 정리 여부 검토
+- [ ] `worklog.md` 자동 항목에 커밋 해시 연결(선택)
+- [ ] 릴리즈 전 `docs/checklist.md`를 기준으로 운영 점검 루틴화

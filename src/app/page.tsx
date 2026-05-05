@@ -21,6 +21,7 @@ import { MethodBlocksMarkdown } from "@/components/ExplanationMarkdownMath";
 import { buildSelectedExplanationBody, splitMethodBlocks } from "@/lib/explanationBlocks";
 import { CROPPED_EXAMS_DIR_NAME, FINAL_EXPLANATION_DIR_NAME } from "@/lib/outputPaths";
 import { isCropOnlyUi } from "@/lib/uiMode";
+import { parseQuestionNumbersSpec } from "@/lib/parseQuestionNumbersSpec";
 import { ExamSolutionReviewProvider } from "@/components/examSolutionReview/ExamSolutionReviewContext";
 import { CropExamSolutionsPreviewPanel } from "@/components/examSolutionReview/CropExamSolutionsPreviewPanel";
 import { ExamSolutionsSupabaseQuickPanel } from "@/components/examSolutionReview/ExamSolutionsSupabaseQuickPanel";
@@ -594,6 +595,22 @@ function cropImageToBase64(
   return canvas.toDataURL(normalizedMimeType, 0.92).split(",")[1] ?? "";
 }
 
+/** img 표시 크기 그대로 캡처 — 좌표계가 `cropImageToBase64`·비전 검출과 일치해야 함 */
+function exportImageElementDisplayToBase64(image: HTMLImageElement, mimeType: string): string {
+  const w = image.width;
+  const h = image.height;
+  if (w < 2 || h < 2) return "";
+  const canvas = document.createElement("canvas");
+  canvas.width = w;
+  canvas.height = h;
+  const context = canvas.getContext("2d");
+  if (!context) return "";
+  context.drawImage(image, 0, 0, w, h);
+  const normalizedMimeType =
+    mimeType && mimeType.startsWith("image/") ? mimeType : "image/png";
+  return canvas.toDataURL(normalizedMimeType, 0.92).split(",")[1] ?? "";
+}
+
 function normalizeCrop(candidate?: Crop | PixelCrop | null): PixelCrop | null {
   if (!candidate) return null;
   const width = Number(candidate.width ?? 0);
@@ -782,6 +799,9 @@ export default function Home() {
   const [pendingDiagramBoxes, setPendingDiagramBoxes] = useState<DiagramBox[]>([]);
   /** 다음 드래그 크롭이 문항 본문인지, 직전 문항에 붙는 도형·그래프인지 */
   const [cropAttachmentMode, setCropAttachmentMode] = useState<DiagramBoxKind>("problem");
+  /** 비전 자동 크롭: 비우면 페이지 전체 문항, "1,5,7-9" 형식이면 해당 번호만 */
+  const [autoLayoutQuestionSpec, setAutoLayoutQuestionSpec] = useState("");
+  const [autoLayoutBusy, setAutoLayoutBusy] = useState(false);
   const [batchResults, setBatchResults] = useState<BatchResult[]>([]);
   const [isBatchGenerating, setIsBatchGenerating] = useState(false);
   const [isExportChecking, setIsExportChecking] = useState(false);
@@ -2151,6 +2171,127 @@ export default function Home() {
     setCropAttachmentMode("problem");
   };
 
+  /** Gemini 비전으로 stem·도형 박스를 채운 뒤 기존 수동 크롭 파이프라인과 동일한 `pendingDiagramBoxes` 구성 */
+  const applyVisionQuestionLayout = async () => {
+    if (!imageRef.current) {
+      setErrorMessage("이미지를 먼저 불러와 주세요.");
+      return;
+    }
+    if (autoLayoutBusy) return;
+    const img = imageRef.current;
+    if (img.width < 20 || img.height < 20) {
+      setErrorMessage("이미지 표시 크기가 준비되지 않았습니다. 로드 후 다시 시도해 주세요.");
+      return;
+    }
+    const mimeType = sourceFile?.type || "image/png";
+    const b64 = exportImageElementDisplayToBase64(img, mimeType);
+    if (!b64) {
+      setErrorMessage("현재 페이지 캡처에 실패했습니다.");
+      return;
+    }
+    const questionNumbers = parseQuestionNumbersSpec(autoLayoutQuestionSpec);
+    const W = img.width;
+    const H = img.height;
+
+    const intersectCropWithColumnByCenter = (crop: PixelCrop): PixelCrop => {
+      const cxRatio = (crop.x + crop.width / 2) / W;
+      const segIdx = getSegmentIndexByXRatio(cxRatio);
+      const seg = getSegmentBounds(segIdx);
+      const leftPx = seg.left * W;
+      const rightPx = seg.right * W;
+      const ix = Math.max(crop.x, leftPx);
+      const rightEdge = Math.min(crop.x + crop.width, rightPx);
+      const iw = Math.max(8, rightEdge - ix);
+      return clampPixelCropToSize({ unit: "px", x: ix, y: crop.y, width: iw, height: crop.height }, W, H);
+    };
+
+    setAutoLayoutBusy(true);
+    setErrorMessage("");
+    setSuccessMessage("");
+    try {
+      const res = await fetch("/api/detect-question-layout", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          imageBase64: b64,
+          imageMimeType: mimeType,
+          questionNumbers: questionNumbers ?? undefined,
+        }),
+      });
+      const data = (await res.json()) as {
+        ok?: boolean;
+        items?: Array<{
+          printedNo: number;
+          stem: { x: number; y: number; w: number; h: number };
+          diagrams: Array<{ x: number; y: number; w: number; h: number }>;
+        }>;
+        warnings?: string[];
+        error?: string;
+      };
+      if (!res.ok || !data.items || data.items.length === 0) {
+        throw new Error(data.error || "문항 자동 검출에 실패했습니다.");
+      }
+
+      type NormRect = { x: number; y: number; w: number; h: number };
+      const normToPx = (r: NormRect): PixelCrop =>
+        clampPixelCropToSize(
+          {
+            unit: "px",
+            x: r.x * W,
+            y: r.y * H,
+            width: r.w * W,
+            height: r.h * H,
+          },
+          W,
+          H,
+        );
+
+      const nextBoxes: DiagramBox[] = [];
+      for (const it of data.items) {
+        const stemPx = intersectCropWithColumnByCenter(normToPx(it.stem));
+        const stemRatio = pixelCropToRatioCrop(stemPx, W, H);
+        nextBoxes.push({
+          id: `diagram-${diagramIdRef.current++}`,
+          labelNo: it.printedNo,
+          kind: "problem",
+          crop: stemPx,
+          cropRatio: stemRatio,
+          imageBase64: cropImageToBase64(img, stemPx, mimeType),
+          mimeType,
+        });
+        for (const d of it.diagrams) {
+          const dPx = intersectCropWithColumnByCenter(normToPx(d));
+          const dRatio = pixelCropToRatioCrop(dPx, W, H);
+          nextBoxes.push({
+            id: `diagram-${diagramIdRef.current++}`,
+            labelNo: it.printedNo,
+            kind: "diagram",
+            crop: dPx,
+            cropRatio: dRatio,
+            imageBase64: cropImageToBase64(img, dPx, mimeType),
+            mimeType,
+          });
+        }
+      }
+
+      setDividerMarkers([]);
+      setPendingLineCrop(null);
+      setPendingDiagramBoxes(nextBoxes);
+      setCrop(undefined);
+      setCompletedCrop(undefined);
+      const nProblem = data.items.length;
+      const warn =
+        data.warnings && data.warnings.length > 0 ? ` (${data.warnings.join(" · ")})` : "";
+      setSuccessMessage(
+        `비전 자동 크롭: ${nProblem}개 문항 본문 + 도형 박스를 채웠습니다. 미리보기에서 박스를 손질한 뒤 「현재 페이지 작업 저장」하세요.${warn}`,
+      );
+    } catch (e) {
+      setErrorMessage(e instanceof Error ? e.message : String(e));
+    } finally {
+      setAutoLayoutBusy(false);
+    }
+  };
+
   const savePageDraft = (pageNumber: number) => {
     if (!isPdfSource) return;
     setPageDrafts((prev) => ({
@@ -3391,6 +3532,31 @@ export default function Home() {
                     )}
                   </div>
                 )}
+                <div className="mt-2 rounded-md border border-emerald-200 bg-emerald-50/90 p-2">
+                  <p className="text-[11px] font-semibold text-emerald-950">문항 자동 크롭 (Gemini 비전)</p>
+                  <p className="mt-0.5 text-[10px] leading-snug text-emerald-900">
+                    현재 페이지 이미지를 분석해 문항 본문(stem)과 그래프·도형 박스를 자동으로 채웁니다. 2단 시험지는 아래「세로
+                    가이드」로 열을 나눈 뒤 실행하면 열 안에서만 잘립니다. 결과는 반드시 육안으로 확인하세요.
+                  </p>
+                  <div className="mt-1.5 flex flex-col gap-1.5 sm:flex-row sm:items-center">
+                    <input
+                      type="text"
+                      value={autoLayoutQuestionSpec}
+                      onChange={(e) => setAutoLayoutQuestionSpec(e.target.value)}
+                      placeholder="비우면 전체 · 예: 1, 5, 7-9, 18"
+                      disabled={autoLayoutBusy || !hasImage}
+                      className="min-w-0 flex-1 rounded border border-emerald-300/80 bg-white px-2 py-1 text-xs"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => void applyVisionQuestionLayout()}
+                      disabled={autoLayoutBusy || !hasImage || linePlacementMode}
+                      className="shrink-0 rounded border border-emerald-800 bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-45"
+                    >
+                      {autoLayoutBusy ? "검출 중…" : "비전으로 박스 채우기"}
+                    </button>
+                  </div>
+                </div>
                 <div className="mt-2 rounded-md border border-slate-200 bg-slate-50/80 p-2">
                   <p className="text-[11px] font-semibold text-slate-800">다음 크롭 종류</p>
                   <div className="mt-1 flex flex-wrap gap-2">
