@@ -54,10 +54,6 @@ async function callGemini(prompt: string): Promise<string> {
       generationConfig: {
         responseMimeType: 'application/json',
         temperature: 0.2,
-        thinkingConfig: {
-          type: 'EXTENDED_THINKING',
-          budgetTokens: 2000,
-        },
       },
     }),
   });
