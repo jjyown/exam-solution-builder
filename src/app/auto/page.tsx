@@ -23,14 +23,39 @@ type ParsedExplanation = {
 
 type TraceEvent = { stage: string; [k: string]: unknown };
 
-type PipelineResponse = {
-  ok: boolean;
+type RunRow = {
+  questionNo: string;
+  questionText: string;
   parsed: ParsedExplanation | null;
   attempts: number;
   errors: string[];
   trace: TraceEvent[];
   manualReviewChecklist: string[];
   runId: string | null;
+  persistError?: string;
+};
+
+type ExtractedMeta = {
+  totalQuestions: number;
+  selectedNumbers: number[];
+  source: string;
+};
+
+type PipelineResponse = {
+  ok: boolean;
+  // 단일 문항 모드 (텍스트 입력 또는 1문항만 추출): top-level 필드 채워짐
+  parsed?: ParsedExplanation | null;
+  attempts?: number;
+  errors?: string[];
+  trace?: TraceEvent[];
+  manualReviewChecklist?: string[];
+  runId?: string | null;
+  persistError?: string;
+  // 항상 채워짐: runs[0] = 단일 모드 결과, runs[N] = 다중 모드
+  runs: RunRow[];
+  partialFailures?: number;
+  extracted?: ExtractedMeta;
+  error?: string;
 };
 
 type RunHistoryRow = {
@@ -60,6 +85,7 @@ export default function AutoPipelinePage() {
   const [questionNo, setQuestionNo] = useState('');
   const [maxRetries, setMaxRetries] = useState(2);
   const [showTrace, setShowTrace] = useState(false);
+  const [activeIdx, setActiveIdx] = useState(0);
 
   const handleFileUpload = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -115,6 +141,13 @@ export default function AutoPipelinePage() {
     loadHistory();
   }, [loadHistory]);
 
+  // 탭 전환 시 피드백 상태 리셋 (각 문항은 별개)
+  useEffect(() => {
+    setRating(null);
+    setFeedbackNote('');
+    setFeedbackSaved(false);
+  }, [activeIdx]);
+
   async function run() {
     if (!questionText.trim() && !uploadedFile) return;
     setRunning(true);
@@ -122,6 +155,7 @@ export default function AutoPipelinePage() {
     setRating(null);
     setFeedbackNote('');
     setFeedbackSaved(false);
+    setActiveIdx(0);
     const t0 = performance.now();
 
     try {
@@ -157,14 +191,27 @@ export default function AutoPipelinePage() {
       const data = (await res.json()) as PipelineResponse;
       setResult(data);
     } catch (e) {
+      const msg = (e as Error).message;
       setResult({
         ok: false,
         parsed: null,
         attempts: 0,
-        errors: [(e as Error).message],
+        errors: [msg],
         trace: [],
         manualReviewChecklist: [],
         runId: null,
+        runs: [
+          {
+            questionNo: questionNo || '?',
+            questionText: questionText || '(파일)',
+            parsed: null,
+            attempts: 0,
+            errors: [msg],
+            trace: [],
+            manualReviewChecklist: [`[네트워크/클라이언트 오류] ${msg}`],
+            runId: null,
+          },
+        ],
       });
     } finally {
       setElapsed(Math.round(performance.now() - t0));
@@ -177,15 +224,19 @@ export default function AutoPipelinePage() {
     await run();
   }
 
+  // 활성 문항 (다중 모드일 땐 탭 선택, 단일 모드는 runs[0])
+  const activeRun = result?.runs?.[activeIdx] ?? null;
+
   async function saveFeedback() {
-    if (!result?.runId) return;
+    const runId = activeRun?.runId;
+    if (!runId) return;
     setFeedbackSaving(true);
     try {
       const res = await fetch('/api/auto-pipeline/feedback', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          runId: result.runId,
+          runId,
           userRating: rating ?? undefined,
           userFeedback: feedbackNote || undefined,
         }),
@@ -198,21 +249,21 @@ export default function AutoPipelinePage() {
   }
 
   function downloadJson() {
-    if (!result?.parsed) return;
-    const blob = new Blob([JSON.stringify(result.parsed, null, 2)], {
+    if (!activeRun?.parsed) return;
+    const blob = new Blob([JSON.stringify(activeRun.parsed, null, 2)], {
       type: 'application/json',
     });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `${examName || 'explanation'}_${questionNo || 'q'}.json`;
+    a.download = `${examName || 'explanation'}_${activeRun.questionNo || 'q'}.json`;
     a.click();
     URL.revokeObjectURL(url);
   }
 
   function copyAsMarkdown() {
-    if (!result?.parsed) return;
-    const md = renderAsMarkdown(result.parsed, examName, questionNo);
+    if (!activeRun?.parsed) return;
+    const md = renderAsMarkdown(activeRun.parsed, examName, activeRun.questionNo);
     void navigator.clipboard.writeText(md);
   }
 
@@ -440,91 +491,196 @@ export default function AutoPipelinePage() {
 
       {/* 결과 영역 */}
       {result && (
-        <section className="mt-6 grid grid-cols-1 gap-4 lg:grid-cols-2">
-          <div className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
-            <div className="mb-2 flex items-center justify-between">
-              <h2 className="text-base font-semibold text-slate-900">
-                결과 {result.ok ? '✓' : '✗'}
-              </h2>
-              <div className="flex gap-1">
-                <button
-                  onClick={downloadJson}
-                  disabled={!result.parsed}
-                  className="rounded border border-slate-300 bg-white px-2 py-1 text-[11px] font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-40"
-                >
-                  JSON
-                </button>
-                <button
-                  onClick={copyAsMarkdown}
-                  disabled={!result.parsed}
-                  className="rounded border border-slate-300 bg-white px-2 py-1 text-[11px] font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-40"
-                >
-                  MD 복사
-                </button>
-              </div>
-            </div>
-
-            {result.ok && result.parsed ? (
-              <ResultView parsed={result.parsed} />
-            ) : (
-              <div className="rounded border border-rose-300 bg-rose-50 p-3 text-sm text-rose-900">
-                <p className="font-semibold">실패 ({result.attempts}회 시도)</p>
-                <ul className="mt-1 list-disc space-y-0.5 pl-4 text-xs">
-                  {result.errors.map((e, i) => (
-                    <li key={i}>{e}</li>
-                  ))}
-                </ul>
-              </div>
-            )}
-
-            {result.manualReviewChecklist.length > 0 && (
-              <div className="mt-3 rounded-md border border-amber-300 bg-amber-50 p-3 text-xs text-amber-950">
-                <p className="font-semibold">수동 검수 권장</p>
-                <ul className="mt-1 list-disc space-y-0.5 pl-4">
-                  {result.manualReviewChecklist.map((c, i) => (
-                    <li key={i}>{c}</li>
-                  ))}
-                </ul>
-              </div>
-            )}
-
-            {/* 피드백 */}
-            {result.runId && result.ok && (
-              <FeedbackPanel
-                rating={rating}
-                onRating={setRating}
-                note={feedbackNote}
-                onNote={setFeedbackNote}
-                saving={feedbackSaving}
-                saved={feedbackSaved}
-                onSave={saveFeedback}
-              />
-            )}
-          </div>
-
-          <div className="rounded-lg border border-slate-200 bg-slate-900 p-4 text-slate-100 shadow-sm">
-            <div className="mb-2 flex items-center justify-between">
-              <h2 className="text-base font-semibold text-slate-100">실행 로그</h2>
-              <button
-                onClick={() => setShowTrace((v) => !v)}
-                className="rounded border border-slate-600 bg-slate-800 px-2 py-1 text-[11px] font-semibold text-slate-200 hover:bg-slate-700"
-              >
-                {showTrace ? '요약' : '전체 JSON'}
-              </button>
-            </div>
-            <div className="max-h-[480px] overflow-auto font-mono text-[11px] leading-relaxed">
-              {showTrace
-                ? result.trace.map((t, i) => (
-                    <div key={i} className="border-b border-slate-700 py-1">
-                      {JSON.stringify(t)}
-                    </div>
-                  ))
-                : result.trace.map((t, i) => <TraceLine key={i} event={t} />)}
-            </div>
-          </div>
-        </section>
+        <ResultsSection
+          result={result}
+          activeIdx={activeIdx}
+          onActiveIdx={setActiveIdx}
+          showTrace={showTrace}
+          onToggleTrace={() => setShowTrace((v) => !v)}
+          rating={rating}
+          onRating={setRating}
+          feedbackNote={feedbackNote}
+          onFeedbackNote={setFeedbackNote}
+          feedbackSaving={feedbackSaving}
+          feedbackSaved={feedbackSaved}
+          onSaveFeedback={saveFeedback}
+          onDownloadJson={downloadJson}
+          onCopyMd={copyAsMarkdown}
+        />
       )}
     </div>
+  );
+}
+
+function ResultsSection(props: {
+  result: PipelineResponse;
+  activeIdx: number;
+  onActiveIdx: (idx: number) => void;
+  showTrace: boolean;
+  onToggleTrace: () => void;
+  rating: number | null;
+  onRating: (n: number) => void;
+  feedbackNote: string;
+  onFeedbackNote: (s: string) => void;
+  feedbackSaving: boolean;
+  feedbackSaved: boolean;
+  onSaveFeedback: () => void;
+  onDownloadJson: () => void;
+  onCopyMd: () => void;
+}) {
+  const { result, activeIdx, onActiveIdx } = props;
+  const runs = result.runs ?? [];
+  const isMulti = runs.length > 1;
+  const successCount = runs.filter((r) => r.parsed).length;
+  const active = runs[activeIdx] ?? runs[0];
+
+  // 응답이 최상위 error만 있는 경우 (예: invalid body)
+  if (!active && result.error) {
+    return (
+      <div className="mt-6 rounded-lg border border-rose-300 bg-rose-50 p-4 text-sm text-rose-900">
+        <p className="font-semibold">요청 거부</p>
+        <p className="mt-1 text-xs">{result.error}</p>
+      </div>
+    );
+  }
+
+  if (!active) return null;
+
+  return (
+    <section className="mt-6 space-y-4">
+      {/* 다중 문항 헤더 */}
+      {isMulti && (
+        <div className="rounded-lg border border-indigo-200 bg-indigo-50 p-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="text-sm font-semibold text-indigo-950">
+              다중 문항 결과 — {successCount}/{runs.length} 성공
+              {result.partialFailures && result.partialFailures > 0
+                ? ` · ${result.partialFailures}개 검수 필요`
+                : ''}
+            </p>
+            {result.extracted && (
+              <span className="text-[11px] text-indigo-800">
+                추출: 총 {result.extracted.totalQuestions}문항 ·
+                {' '}처리 {result.extracted.selectedNumbers.join(', ')} ·
+                {' '}소스 {result.extracted.source}
+              </span>
+            )}
+          </div>
+          {/* 문항 탭 */}
+          <div className="mt-2 flex flex-wrap gap-1">
+            {runs.map((r, i) => (
+              <button
+                key={r.runId || `${r.questionNo}-${i}`}
+                onClick={() => onActiveIdx(i)}
+                className={`rounded-md px-2.5 py-1 text-[11px] font-semibold ${
+                  i === activeIdx
+                    ? 'bg-indigo-700 text-white'
+                    : r.parsed
+                      ? 'border border-emerald-400 bg-white text-emerald-900 hover:bg-emerald-50'
+                      : 'border border-rose-400 bg-white text-rose-900 hover:bg-rose-50'
+                }`}
+              >
+                {r.parsed ? '✓' : '✗'} {r.questionNo}번
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* 활성 문항 결과 + Trace */}
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+        <div className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+          <div className="mb-2 flex items-center justify-between">
+            <h2 className="text-base font-semibold text-slate-900">
+              {isMulti ? `[${active.questionNo}번] ` : ''}
+              결과 {active.parsed ? '✓' : '✗'}
+            </h2>
+            <div className="flex gap-1">
+              <button
+                onClick={props.onDownloadJson}
+                disabled={!active.parsed}
+                className="rounded border border-slate-300 bg-white px-2 py-1 text-[11px] font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-40"
+              >
+                JSON
+              </button>
+              <button
+                onClick={props.onCopyMd}
+                disabled={!active.parsed}
+                className="rounded border border-slate-300 bg-white px-2 py-1 text-[11px] font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-40"
+              >
+                MD 복사
+              </button>
+            </div>
+          </div>
+
+          {active.parsed ? (
+            <ResultView parsed={active.parsed} />
+          ) : (
+            <div className="rounded border border-rose-300 bg-rose-50 p-3 text-sm text-rose-900">
+              <p className="font-semibold">실패 ({active.attempts}회 시도)</p>
+              <ul className="mt-1 list-disc space-y-0.5 pl-4 text-xs">
+                {active.errors.map((e, i) => (
+                  <li key={i}>{e}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {active.manualReviewChecklist.length > 0 && (
+            <div className="mt-3 rounded-md border border-amber-300 bg-amber-50 p-3 text-xs text-amber-950">
+              <p className="font-semibold">수동 검수 권장</p>
+              <ul className="mt-1 list-disc space-y-0.5 pl-4">
+                {active.manualReviewChecklist.map((c, i) => (
+                  <li key={i}>{c}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {active.persistError && (
+            <div className="mt-2 rounded border border-amber-300 bg-amber-50 px-2 py-1 text-[11px] text-amber-900">
+              영속화 실패: {active.persistError}
+            </div>
+          )}
+
+          {/* 피드백 — 활성 문항의 별점·메모. 탭 전환 시 자동 리셋. */}
+          {active.runId && active.parsed && (
+            <FeedbackPanel
+              rating={props.rating}
+              onRating={props.onRating}
+              note={props.feedbackNote}
+              onNote={props.onFeedbackNote}
+              saving={props.feedbackSaving}
+              saved={props.feedbackSaved}
+              onSave={props.onSaveFeedback}
+            />
+          )}
+        </div>
+
+        <div className="rounded-lg border border-slate-200 bg-slate-900 p-4 text-slate-100 shadow-sm">
+          <div className="mb-2 flex items-center justify-between">
+            <h2 className="text-base font-semibold text-slate-100">
+              실행 로그 {isMulti ? `· ${active.questionNo}번` : ''}
+            </h2>
+            <button
+              onClick={props.onToggleTrace}
+              className="rounded border border-slate-600 bg-slate-800 px-2 py-1 text-[11px] font-semibold text-slate-200 hover:bg-slate-700"
+            >
+              {props.showTrace ? '요약' : '전체 JSON'}
+            </button>
+          </div>
+          <div className="max-h-[480px] overflow-auto font-mono text-[11px] leading-relaxed">
+            {props.showTrace
+              ? active.trace.map((t, i) => (
+                  <div key={i} className="border-b border-slate-700 py-1">
+                    {JSON.stringify(t)}
+                  </div>
+                ))
+              : active.trace.map((t, i) => <TraceLine key={i} event={t} />)}
+          </div>
+        </div>
+      </div>
+    </section>
   );
 }
 

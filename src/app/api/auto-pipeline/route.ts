@@ -1,77 +1,35 @@
 /**
  * src/app/api/auto-pipeline/route.ts
  * ────────────────────────────────────────────────────────────────────────────
- *  단일 엔드포인트 — 문제 텍스트(또는 OCR된 텍스트)를 받아 자동으로:
- *    검색 → 프롬프트 → 생성 → 검증 → 재시도 → (선택) Supabase 영속화.
+ *  POST: 텍스트 또는 파일(PDF/이미지)을 받아 자동 파이프라인을 실행한다.
  *
- *  POST body:
- *    {
- *      "questionText": "...",
- *      "examName"?: string,
- *      "questionNo"?: string,
- *      "topK"?: 3,
- *      "maxRetries"?: 2,
- *      "model"?: "gemini" | "openai",
- *      "persist"?: boolean   // 기본 true (Supabase 키 있을 때만 동작)
- *    }
+ *  ◇ 단일 문항 모드: questionText 또는 파일에서 문항 1개만 추출됐을 때
+ *      → 응답: { ok, parsed, attempts, trace, errors, manualReviewChecklist, runId, extracted }
  *
- *  응답:
- *    { ok, parsed, attempts, trace, errors, manualReviewChecklist, runId? }
+ *  ◇ 다중 문항 모드: 파일에서 2개 이상 문항이 추출된 경우 (전체 해설 또는 다수 선택)
+ *      → 각 문항을 순차 호출. 응답:
+ *      {
+ *        ok,                    // 모두 성공이면 true, 하나라도 실패면 false
+ *        runs: [
+ *          { questionNo, questionText, parsed, attempts, errors, trace, manualReviewChecklist, runId }
+ *        ],
+ *        extracted,
+ *        partialFailures: number
+ *      }
+ *
+ *  GET: 헬스체크 (kb_size 반환)
  * ────────────────────────────────────────────────────────────────────────────
  */
 import { NextResponse } from 'next/server';
 import path from 'node:path';
 import { ReferenceRetriever } from '@/lib/referenceRetriever';
-import { runAutoPipeline } from '@/lib/autoPipeline';
+import { runAutoPipeline, type PipelineResult } from '@/lib/autoPipeline';
 import { buildAutoChecklist } from '@/lib/autoPipelineChecklist';
 import { recordAutoPipelineRun } from '@/lib/autoPipelineLog';
+import { extractTextFromUploadedFile } from '@/lib/fileExtraction';
+import { extractQuestionsFromText, type ExtractedQuestion } from '@/lib/questionSplit';
 
-// ── 파일 처리 유틸리티 ──────────────────────────────────────────────────────
-async function processUploadedFile(fileData: string, fileName: string, fileType: string): Promise<string> {
-  // TODO: 실제 PDF/이미지 처리 라이브러리 추가 (pdf-parse, tesseract.js 등)
-  // 현재는 임시 구현 - base64 데이터를 텍스트로 변환 시도
-
-  if (fileType === 'application/pdf') {
-    // PDF 처리 로직 (추후 구현)
-    return `[PDF 파일: ${fileName}] - PDF 처리 기능은 추후 추가 예정입니다.`;
-  } else if (fileType.startsWith('image/')) {
-    // 이미지 OCR 로직 (추후 구현)
-    return `[이미지 파일: ${fileName}] - OCR 기능은 추후 추가 예정입니다.`;
-  }
-
-  return `[지원하지 않는 파일 형식: ${fileType}]`;
-}
-
-function extractQuestionsFromText(text: string): { index: number; content: string }[] {
-  // 간단한 문제 분리 로직 (개선 필요)
-  const questions: { index: number; content: string }[] = [];
-  const lines = text.split('\n');
-
-  let currentQuestion = '';
-  let questionIndex = 0;
-
-  for (const line of lines) {
-    // 문제 번호 패턴 감지 (예: "1.", "1번", "(1)" 등)
-    const questionMatch = line.match(/^(\d+)[\.\s번\)]\s*(.+)$/);
-    if (questionMatch) {
-      if (currentQuestion) {
-        questions.push({ index: questionIndex, content: currentQuestion.trim() });
-      }
-      questionIndex = parseInt(questionMatch[1]);
-      currentQuestion = questionMatch[2];
-    } else {
-      currentQuestion += ' ' + line;
-    }
-  }
-
-  if (currentQuestion) {
-    questions.push({ index: questionIndex, content: currentQuestion.trim() });
-  }
-
-  return questions;
-}
-
-// 런타임 1회 인덱싱, 이후 재사용 (Vercel/Railway 동일하게 동작)
+// ── KB 1회 인덱싱 후 재사용 ─────────────────────────────────────────────────
 let retrieverPromise: Promise<ReferenceRetriever> | null = null;
 function getRetriever() {
   if (!retrieverPromise) {
@@ -83,14 +41,12 @@ function getRetriever() {
   return retrieverPromise;
 }
 
-// ── LLM 호출 어댑터 ─────────────────────────────────────────────────────────
+// ── LLM 어댑터 ─────────────────────────────────────────────────────────────
 async function callGemini(prompt: string): Promise<string> {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) throw new Error('GEMINI_API_KEY 미설정');
-
   const model = process.env.GEMINI_MODEL || 'gemini-2.5-pro';
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
-
   const res = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -102,14 +58,11 @@ async function callGemini(prompt: string): Promise<string> {
       },
     }),
   });
-  if (!res.ok) {
-    throw new Error(`Gemini ${res.status}: ${await res.text()}`);
-  }
+  if (!res.ok) throw new Error(`Gemini ${res.status}: ${await res.text()}`);
   const data = await res.json();
-  const text =
-    data?.candidates?.[0]?.content?.parts?.map((p: { text?: string }) => p.text).join('') ||
-    '';
-  return text;
+  return (
+    data?.candidates?.[0]?.content?.parts?.map((p: { text?: string }) => p.text).join('') || ''
+  );
 }
 
 async function callOpenAI(prompt: string): Promise<string> {
@@ -136,26 +89,184 @@ async function callOpenAI(prompt: string): Promise<string> {
 }
 
 function pickLlmCall(model: string | undefined) {
-  if ((model || '').toLowerCase() === 'openai') return callOpenAI;
-  return callGemini;
+  return (model || '').toLowerCase() === 'openai' ? callOpenAI : callGemini;
+}
+
+// ── 입력 → 처리할 문항 리스트 결정 ─────────────────────────────────────────
+type InputBody = {
+  questionText?: string;
+  fileData?: string;
+  fileName?: string;
+  fileType?: string;
+  explanationMode?: 'full' | 'partial';
+  selectedQuestions?: number[];
+};
+
+type ResolvedItem = { questionNo: string; questionText: string };
+type ExtractedMeta = {
+  totalQuestions: number;
+  selectedNumbers: number[];
+  source: string;
+};
+
+type Resolved =
+  | { ok: true; items: ResolvedItem[]; extracted?: ExtractedMeta }
+  | { ok: false; error: string };
+
+const MAX_QUESTIONS_PER_REQUEST = 10; // LLM 한도·시간 보호 — 한 번에 최대 10문항
+
+async function resolveItems(body: InputBody): Promise<Resolved> {
+  // 1) 텍스트 직접 입력 — 항상 단일 문항
+  if (body.questionText && body.questionText.trim().length >= 5) {
+    return {
+      ok: true,
+      items: [{ questionNo: '1', questionText: body.questionText.trim() }],
+    };
+  }
+
+  // 2) 파일 업로드
+  if (body.fileData && body.fileName && body.fileType) {
+    const extracted = await extractTextFromUploadedFile({
+      fileData: body.fileData,
+      fileName: body.fileName,
+      fileType: body.fileType,
+    });
+    if (!extracted.ok) return { ok: false, error: extracted.error };
+
+    const questions = extractQuestionsFromText(extracted.text);
+
+    // 부분 해설: 선택된 문항만
+    if (
+      body.explanationMode === 'partial' &&
+      body.selectedQuestions &&
+      body.selectedQuestions.length > 0
+    ) {
+      const wanted = new Set(body.selectedQuestions);
+      const picked = questions.filter((q) => wanted.has(q.number));
+      if (picked.length === 0) {
+        return {
+          ok: false,
+          error: `선택한 문항(${body.selectedQuestions.join(', ')})을 추출 결과에서 찾지 못했습니다. (인식된 문항: ${questions.map((q) => q.number).join(', ') || '없음'})`,
+        };
+      }
+      return {
+        ok: true,
+        items: picked.slice(0, MAX_QUESTIONS_PER_REQUEST).map(toResolvedItem),
+        extracted: {
+          totalQuestions: questions.length,
+          selectedNumbers: picked.map((q) => q.number),
+          source: extracted.source,
+        },
+      };
+    }
+
+    // 전체 해설
+    if (questions.length > 0) {
+      const limit = Math.min(questions.length, MAX_QUESTIONS_PER_REQUEST);
+      const truncated = questions.slice(0, limit);
+      return {
+        ok: true,
+        items: truncated.map(toResolvedItem),
+        extracted: {
+          totalQuestions: questions.length,
+          selectedNumbers: truncated.map((q) => q.number),
+          source: extracted.source,
+        },
+      };
+    }
+
+    // 문항 분리 실패 → 전체 텍스트를 한 문항처럼
+    return {
+      ok: true,
+      items: [{ questionNo: '?', questionText: extracted.text }],
+      extracted: {
+        totalQuestions: 0,
+        selectedNumbers: [],
+        source: extracted.source,
+      },
+    };
+  }
+
+  return { ok: false, error: 'questionText (>=5 chars) or fileData is required' };
+}
+
+function toResolvedItem(q: ExtractedQuestion): ResolvedItem {
+  return { questionNo: String(q.number), questionText: q.content };
+}
+
+// ── 한 문항 실행 + 영속화 (다중 모드 공용) ──────────────────────────────────
+type RunRow = {
+  questionNo: string;
+  questionText: string;
+  parsed: PipelineResult['parsed'];
+  attempts: number;
+  errors: string[];
+  trace: PipelineResult['trace'];
+  manualReviewChecklist: string[];
+  runId: string | null;
+  persistError?: string;
+};
+
+async function executeOne(params: {
+  retriever: ReferenceRetriever;
+  llmCall: (prompt: string) => Promise<string>;
+  topK: number;
+  maxRetries: number;
+  examName?: string;
+  model: string;
+  persist: boolean;
+  item: ResolvedItem;
+}): Promise<RunRow> {
+  const result = await runAutoPipeline(params.item.questionText, {
+    retriever: params.retriever,
+    llmCall: params.llmCall,
+    topK: params.topK,
+    maxRetries: params.maxRetries,
+  });
+
+  const checklist = buildAutoChecklist(result);
+  let runId: string | null = null;
+  let persistError: string | undefined;
+
+  if (params.persist) {
+    const log = await recordAutoPipelineRun(
+      {
+        questionText: params.item.questionText,
+        examName: params.examName,
+        questionNo: params.item.questionNo,
+        model: params.model,
+        topK: params.topK,
+        maxRetries: params.maxRetries,
+      },
+      result,
+      checklist,
+    );
+    runId = log.id;
+    persistError = log.error;
+  }
+
+  return {
+    questionNo: params.item.questionNo,
+    questionText: params.item.questionText,
+    parsed: result.parsed,
+    attempts: result.attempts,
+    errors: result.errors,
+    trace: result.trace,
+    manualReviewChecklist: checklist,
+    runId,
+    persistError,
+  };
 }
 
 // ── 핸들러 ─────────────────────────────────────────────────────────────────
 export async function POST(req: Request) {
-  let body: {
-    questionText?: string;
+  let body: InputBody & {
     examName?: string;
     questionNo?: string;
     topK?: number;
     maxRetries?: number;
     model?: string;
     persist?: boolean;
-    // 파일 업로드 지원
-    fileData?: string; // base64 encoded file
-    fileName?: string;
-    fileType?: string;
-    explanationMode?: 'full' | 'partial';
-    selectedQuestions?: number[];
   };
   try {
     body = await req.json();
@@ -163,15 +274,9 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, error: 'invalid JSON body' }, { status: 400 });
   }
 
-  // 입력 검증: 텍스트 또는 파일 중 하나는 필수
-  const hasTextInput = body.questionText && body.questionText.trim().length >= 5;
-  const hasFileInput = body.fileData && body.fileName && body.fileType;
-
-  if (!hasTextInput && !hasFileInput) {
-    return NextResponse.json(
-      { ok: false, error: 'questionText (>=5 chars) or fileData is required' },
-      { status: 400 }
-    );
+  const resolved = await resolveItems(body);
+  if (!resolved.ok) {
+    return NextResponse.json({ ok: false, error: resolved.error }, { status: 400 });
   }
 
   const model = (body.model || 'gemini').toLowerCase();
@@ -179,70 +284,89 @@ export async function POST(req: Request) {
   const maxRetries = body.maxRetries ?? 2;
   const persist = body.persist !== false;
 
+  // 텍스트 입력으로 들어왔지만 사용자가 questionNo를 지정한 경우 그걸로 덮어쓴다
+  if (body.questionText && body.questionNo) {
+    resolved.items[0].questionNo = body.questionNo;
+  }
+
   try {
     const retriever = await getRetriever();
     const llmCall = pickLlmCall(model);
 
-    // 입력 처리: 텍스트 또는 파일
-    let processedQuestionText = body.questionText || '';
+    // ─── 단일 문항 모드 ──────────────────────────────────────────────────
+    if (resolved.items.length === 1) {
+      const row = await executeOne({
+        retriever,
+        llmCall,
+        topK,
+        maxRetries,
+        examName: body.examName,
+        model,
+        persist,
+        item: resolved.items[0],
+      });
 
-    if (hasFileInput && body.fileData && body.fileName && body.fileType) {
-      // 파일에서 텍스트 추출
-      processedQuestionText = await processUploadedFile(body.fileData, body.fileName, body.fileType);
+      // 추출 메타가 0문항이면 분리 실패 경고 추가
+      if (resolved.extracted && resolved.extracted.totalQuestions === 0) {
+        row.manualReviewChecklist.push(
+          '[문항 분리 실패] 추출된 텍스트에서 문항 번호를 인식하지 못했습니다 — 전체를 1문항으로 처리. PDF 품질·OCR 결과를 확인하세요.',
+        );
+      }
 
-      // 부분 해설 모드인 경우 선택된 문제만 필터링
-      if (body.explanationMode === 'partial' && body.selectedQuestions && body.selectedQuestions.length > 0) {
-        const allQuestions = extractQuestionsFromText(processedQuestionText);
-        const selectedQuestionsText = allQuestions
-          .filter(q => body.selectedQuestions!.includes(q.index))
-          .map(q => `${q.index}. ${q.content}`)
-          .join('\n\n');
+      return NextResponse.json({
+        ok: row.parsed !== null && row.errors.length === 0,
+        parsed: row.parsed,
+        attempts: row.attempts,
+        errors: row.errors,
+        trace: row.trace,
+        manualReviewChecklist: row.manualReviewChecklist,
+        runId: row.runId,
+        persistError: row.persistError,
+        extracted: resolved.extracted,
+        // 단일 모드도 runs[]에 동일 정보를 넣어 UI가 일관된 뷰를 그릴 수 있게
+        runs: [row],
+      });
+    }
 
-        if (selectedQuestionsText) {
-          processedQuestionText = `선택된 문제들:\n\n${selectedQuestionsText}`;
-        }
+    // ─── 다중 문항 모드: 순차 실행 ────────────────────────────────────────
+    const runs: RunRow[] = [];
+    for (const item of resolved.items) {
+      // 한 문항이라도 throw 나도 다른 문항은 계속 진행
+      try {
+        const row = await executeOne({
+          retriever,
+          llmCall,
+          topK,
+          maxRetries,
+          examName: body.examName,
+          model,
+          persist,
+          item,
+        });
+        runs.push(row);
+      } catch (e) {
+        runs.push({
+          questionNo: item.questionNo,
+          questionText: item.questionText,
+          parsed: null,
+          attempts: 0,
+          errors: [`예외: ${(e as Error).message}`],
+          trace: [],
+          manualReviewChecklist: [`[문항 ${item.questionNo}] 예외 발생: ${(e as Error).message}`],
+          runId: null,
+        });
       }
     }
 
-    if (!processedQuestionText || processedQuestionText.trim().length < 5) {
-      return NextResponse.json(
-        { ok: false, error: 'processed question text is too short' },
-        { status: 400 }
-      );
-    }
-
-    const result = await runAutoPipeline(processedQuestionText, {
-      retriever,
-      llmCall,
-      topK,
-      maxRetries,
+    const partialFailures = runs.filter((r) => !r.parsed).length;
+    return NextResponse.json({
+      ok: partialFailures === 0,
+      runs,
+      partialFailures,
+      extracted: resolved.extracted,
     });
-
-    const manualReviewChecklist = buildAutoChecklist(result);
-
-    let runId: string | null = null;
-    if (persist) {
-      const log = await recordAutoPipelineRun(
-        {
-          questionText: processedQuestionText,
-          examName: body.examName,
-          questionNo: body.questionNo,
-          model,
-          topK,
-          maxRetries,
-        },
-        result,
-        manualReviewChecklist,
-      );
-      runId = log.id;
-    }
-
-    return NextResponse.json({ ...result, manualReviewChecklist, runId });
   } catch (e) {
-    return NextResponse.json(
-      { ok: false, error: (e as Error).message },
-      { status: 500 }
-    );
+    return NextResponse.json({ ok: false, error: (e as Error).message }, { status: 500 });
   }
 }
 
@@ -252,9 +376,6 @@ export async function GET() {
     const r = await getRetriever();
     return NextResponse.json({ ok: true, kb_size: r.size() });
   } catch (e) {
-    return NextResponse.json(
-      { ok: false, error: (e as Error).message },
-      { status: 500 }
-    );
+    return NextResponse.json({ ok: false, error: (e as Error).message }, { status: 500 });
   }
 }

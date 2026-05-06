@@ -26,7 +26,10 @@ export async function recordAutoPipelineRun(
   manualReviewChecklist: string[],
 ): Promise<{ id: string | null; persisted: boolean; error?: string }> {
   const client = getSupabaseServiceClient();
-  if (!client) return { id: null, persisted: false };
+  if (!client) {
+    console.warn("[autoPipelineLog] Supabase 클라이언트 생성 실패 — 환경변수 미설정");
+    return { id: null, persisted: false };
+  }
 
   const { data, error } = await client
     .from(TABLE)
@@ -47,7 +50,10 @@ export async function recordAutoPipelineRun(
     .select("id")
     .single();
 
-  if (error) return { id: null, persisted: false, error: error.message };
+  if (error) {
+    console.warn(`[autoPipelineLog] insert 실패: ${error.message}`);
+    return { id: null, persisted: false, error: error.message };
+  }
   return { id: data?.id ?? null, persisted: true };
 }
 
