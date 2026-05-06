@@ -2,24 +2,29 @@
  * src/app/api/auto-pipeline/route.ts
  * ────────────────────────────────────────────────────────────────────────────
  *  단일 엔드포인트 — 문제 텍스트(또는 OCR된 텍스트)를 받아 자동으로:
- *    검색 → 프롬프트 → 생성 → 검증 → 재시도까지 한 번에 처리.
+ *    검색 → 프롬프트 → 생성 → 검증 → 재시도 → (선택) Supabase 영속화.
  *
  *  POST body:
  *    {
- *      "questionText": "둘레의 길이가 16인 부채꼴 중에서 ...",
+ *      "questionText": "...",
+ *      "examName"?: string,
+ *      "questionNo"?: string,
  *      "topK"?: 3,
  *      "maxRetries"?: 2,
- *      "model"?: "gemini" | "openai"
+ *      "model"?: "gemini" | "openai",
+ *      "persist"?: boolean   // 기본 true (Supabase 키 있을 때만 동작)
  *    }
  *
  *  응답:
- *    { ok, parsed, attempts, trace, errors }
+ *    { ok, parsed, attempts, trace, errors, manualReviewChecklist, runId? }
  * ────────────────────────────────────────────────────────────────────────────
  */
 import { NextResponse } from 'next/server';
 import path from 'node:path';
 import { ReferenceRetriever } from '@/lib/referenceRetriever';
 import { runAutoPipeline } from '@/lib/autoPipeline';
+import { buildAutoChecklist } from '@/lib/autoPipelineChecklist';
+import { recordAutoPipelineRun } from '@/lib/autoPipelineLog';
 
 // 런타임 1회 인덱싱, 이후 재사용 (Vercel/Railway 동일하게 동작)
 let retrieverPromise: Promise<ReferenceRetriever> | null = null;
@@ -98,9 +103,12 @@ function pickLlmCall(model: string | undefined) {
 export async function POST(req: Request) {
   let body: {
     questionText?: string;
+    examName?: string;
+    questionNo?: string;
     topK?: number;
     maxRetries?: number;
     model?: string;
+    persist?: boolean;
   };
   try {
     body = await req.json();
@@ -115,16 +123,41 @@ export async function POST(req: Request) {
     );
   }
 
+  const model = (body.model || 'gemini').toLowerCase();
+  const topK = body.topK ?? 3;
+  const maxRetries = body.maxRetries ?? 2;
+  const persist = body.persist !== false;
+
   try {
     const retriever = await getRetriever();
-    const llmCall = pickLlmCall(body.model);
+    const llmCall = pickLlmCall(model);
     const result = await runAutoPipeline(body.questionText, {
       retriever,
       llmCall,
-      topK: body.topK ?? 3,
-      maxRetries: body.maxRetries ?? 2,
+      topK,
+      maxRetries,
     });
-    return NextResponse.json(result);
+
+    const manualReviewChecklist = buildAutoChecklist(result);
+
+    let runId: string | null = null;
+    if (persist) {
+      const log = await recordAutoPipelineRun(
+        {
+          questionText: body.questionText,
+          examName: body.examName,
+          questionNo: body.questionNo,
+          model,
+          topK,
+          maxRetries,
+        },
+        result,
+        manualReviewChecklist,
+      );
+      runId = log.id;
+    }
+
+    return NextResponse.json({ ...result, manualReviewChecklist, runId });
   } catch (e) {
     return NextResponse.json(
       { ok: false, error: (e as Error).message },
@@ -133,7 +166,7 @@ export async function POST(req: Request) {
   }
 }
 
-// 헬스체크용
+// 헬스체크용 (Railway 배포 후 GET으로 KB 크기 확인)
 export async function GET() {
   try {
     const r = await getRetriever();

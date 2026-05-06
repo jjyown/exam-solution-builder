@@ -1,5 +1,10 @@
 # 해설지 파이프라인 — 확정 동선
 
+> **⚠️ 2026-05-06 갱신:** 메인 동선이 **Railway 배포 + `/auto` 자동 파이프라인**으로 이전되었습니다.
+> Cursor IDE / MCP 동선은 [_archive/cursor-legacy/](../_archive/cursor-legacy/)로 보관되었으며, 이 문서의
+> 「Cursor」「MCP」 언급은 구 동선 기준입니다. 새 운영 가이드는 루트 [README.md](../README.md)와
+> [INTEGRATION.md](../INTEGRATION.md)를 보세요.
+
 - 문서 기준일: 2026-05-02
 - **해설집 품질 최우선 시:** [BEST_QUALITY_WORKFLOW.md](./BEST_QUALITY_WORKFLOW.md)를 먼저 본 뒤 이 문서의 전체 동선을 따라간다.
 - **작업 전·중·후 `docs` 습관:** [POST_WORK_DOCS.md](./POST_WORK_DOCS.md) — **작업 시작 전에는 이 세트를 먼저 읽고**, 작업할 때마다 기록·작업 후 대조표까지 따른다.

@@ -1,130 +1,79 @@
-# Auto Pipeline 업그레이드 — Cursor 없이 돌아가는 라인
+# 자동 해설 라인 — 설계 메모
 
-이 패키지는 **`exam-solution-builder` 저장소에 그대로 추가하는 추가 모듈** 입니다.
-기존 코드는 건드리지 않고 새 파일만 얹으면 동작합니다.
+이 문서는 "Cursor 채팅이 사람을 거쳐 검수하던 동선"을 어떻게 코드 안으로 흡수했는지 정리한 것이다.
+운영 시작점은 [README.md](README.md), 환경 변수는 [.env.local.example](.env.local.example).
 
----
+## 이전 동선 vs 현재 동선
 
-## 핵심 변경 사항
+| 단계 | 이전 (Cursor) | 현재 (Railway 자동 라인) |
+|---|---|---|
+| 1차 풀이 | MCP `generate_math_explanation` (Gemini) | `/api/auto-pipeline` POST → autoPipeline.ts |
+| 형식·정답 검증 | Cursor 채팅에서 사람이 확인 | `explanationValidator.ts` (V1~V6 자동) |
+| 2차 교차검증 | Cursor가 OpenAI 도구를 다시 호출 | `EXPLANATION_CROSS_VERIFY=true` 자동 |
+| 재시도 | 사람이 다시 호출 | autoPipeline 루프가 retryHint로 자동 재시도 |
+| 검수 체크리스트 | postToolUse 훅이 채팅에 주입 | 응답의 `manualReviewChecklist[]` (UI 표시) |
+| 결과 저장 | 사람이 .md 파일로 저장 | Supabase `auto_pipeline_runs` 테이블 |
+| 피드백 | 채팅 메모 (휘발성) | 별점 + 코멘트, runId에 영속 |
 
-| 기존 워크플로 | 새 워크플로 |
-|---|---|
-| 문제 크롭 → 해설 생성 → **Cursor에서 수동 검수/재호출** → DOCX | 문제 입력 → **자동 검색 + 생성 + 검증 + 재시도** → 결과 |
-| LLM이 LaTeX raw로 출력해도 그대로 통과 | **검증기가 잡아내고 자동 교정** 요청 |
-| 프롬프트 품질을 수작업으로 다듬음 | 수학비서 53개 예시를 **few-shot으로 자동 주입** |
-
----
-
-## 추가/변경 파일 목록
+## 구성 요소
 
 ```
-exam-solution-builder/
-├── reference/
-│   └── kb.jsonl                          ← 수학비서 HML에서 추출한 53개 참고 예시 (이미 빌드됨)
-├── scripts/
-│   └── build-reference-kb.mjs            ← 추가 HML 자료 들어올 때 KB 갱신용
-├── src/
-│   ├── lib/
-│   │   ├── referenceRetriever.ts         ← 참고 예시 검색 (TF-IDF)
-│   │   ├── promptBuilder.ts              ← few-shot 프롬프트 조립
-│   │   ├── explanationValidator.ts       ← 출력 검증 (raw LaTeX, 단계 부족 등)
-│   │   └── autoPipeline.ts               ← 검색→생성→검증→재시도 오케스트레이터
-│   └── app/
-│       ├── api/
-│       │   └── auto-pipeline/route.ts    ← 단일 엔드포인트 POST/GET
-│       └── auto/
-│           └── page.tsx                  ← 사용자 UI (/auto)
-└── INTEGRATION.md                         ← 이 문서
+src/
+├── lib/
+│   ├── autoPipeline.ts            ← retrieve → generate → validate → retry 루프
+│   ├── autoPipelineChecklist.ts   ← Cursor 「중재 검수 체크리스트」를 코드로
+│   ├── autoPipelineLog.ts         ← Supabase insert/update/list
+│   ├── explanationValidator.ts    ← V1~V6 자동 검증 + retryHint 생성
+│   ├── promptBuilder.ts           ← few-shot 프롬프트 조립
+│   ├── referenceRetriever.ts      ← TF-IDF 검색 (KB 53개)
+│   └── supabaseServiceClient.ts   ← service role 클라이언트
+└── app/
+    ├── auto/page.tsx              ← 메인 UI (Railway 진입점)
+    ├── api/auto-pipeline/route.ts ← POST 자동 실행, GET 헬스체크
+    └── api/auto-pipeline/feedback/route.ts ← POST 별점·메모 저장, GET 이력 조회
 ```
 
----
+## "Cursor가 하던 일" 흡수 매핑
 
-## 설치 (5분)
+### 1. 근사·회피 표현 거르기 (`autoPipelineChecklist.ts`)
 
-### 1단계: 파일 복사
-받으신 압축 파일의 모든 폴더를 `exam-solution-builder` 루트에 그대로 풀기.
+이전: 사람이 채팅에서 "≈, 어림, 가장 가까운" 같은 표현을 발견하면 재요청.
 
-### 2단계: 환경 변수 (`.env.local`)
-```bash
-GEMINI_API_KEY=...           # 기존 키 그대로
-GEMINI_MODEL=gemini-2.5-pro  # (선택) 기본값
-OPENAI_API_KEY=...           # (선택) OpenAI도 쓰려면
-REFERENCE_KB_PATH=./reference/kb.jsonl  # (선택, 기본값 그대로 OK)
-```
+현재: `APPROX_PATTERNS` 정규식이 자동 검사 → `manualReviewChecklist`에 항목으로 추가 → UI에 노란 박스로 노출. 사용자는 「재시도」 버튼 한 번으로 재호출.
 
-### 3단계: 의존성 — **추가 설치 불필요**
-모두 Node 표준 모듈만 사용. `package.json` 안 건드림.
+### 2. 객관식 보기 번호 일치 (`autoPipelineChecklist.ts`)
 
-### 4단계: 로컬 검증
-```bash
-npm run dev
-# 다른 터미널에서:
-curl http://localhost:3000/api/auto-pipeline
-# → { "ok": true, "kb_size": 53 } 나오면 정상
+이전: 사람이 풀이의 ①~⑤와 정답란이 일치하는지 확인.
 
-# 실제 생성 테스트:
-curl -X POST http://localhost:3000/api/auto-pipeline \
-  -H 'Content-Type: application/json' \
-  -d '{"questionText":"둘레의 길이가 16인 부채꼴 중에서 넓이가 최대인 부채꼴의 반지름의 길이를 구하시오."}'
-```
+현재: 풀이 텍스트에 보기 마커가 있는데 `answer` 필드엔 숫자/식만 있으면 체크리스트에 자동 추가.
 
-### 5단계: 브라우저에서 사용
-`http://localhost:3000/auto` 접속 → 문제 붙여넣기 → 「실행」
+### 3. raw LaTeX 잔재 (`explanationValidator.ts` V6)
 
----
+이전: Cursor에서 `\frac`, `\theta` 같은 평문 노출을 발견하면 재호출.
 
-## Railway 배포
+현재: 검증기 V6가 `RAW_LATEX_PATTERNS`로 평문/equation 분리 위반을 잡고, retryHint에 "수식은 equation 필드로 분리하라"를 포함해 자동 재시도.
 
-기존 Railway 프로젝트가 이미 `next build && next start`로 돌고 있다면 **추가 설정 불필요**.
+### 4. 자동 2차 교차검증 (`/api/generate-explanation` `EXPLANATION_CROSS_VERIFY`)
 
-체크리스트:
-- [ ] `reference/kb.jsonl` 가 git에 커밋됐는지 (Railway는 빌드 시점 파일을 사용)
-- [ ] Railway Variables에 `GEMINI_API_KEY` 들어 있는지
-- [ ] 배포 후 `https://<your-app>.railway.app/api/auto-pipeline` (GET)으로 헬스체크 → `kb_size: 53` 확인
-- [ ] `https://<your-app>.railway.app/auto` 접속해서 UI 동작 확인
+이전: 사람이 Gemini 결과 받고 OpenAI 도구를 다시 호출.
 
-> 💡 **수학비서 자료 추가 갱신**: 새 HML 파일이 생기면
-> ```bash
-> node scripts/build-reference-kb.mjs ./수학비서_원본자료/ ./reference/kb.jsonl
-> git commit -am "kb: refresh"
-> git push  # Railway가 자동 재배포
-> ```
-> 검색 풀이 풍부해질수록 LLM 결과 품질이 향상됩니다.
+현재: 환경변수 `true`면 1차 통과 후 OpenAI 모델로 자동 검산. 결과 불일치 시 `progressReport.phases.phase2_crossVerify.detail`에 사유 기록.
 
----
+### 5. 영속 피드백 루프 (`auto_pipeline_runs` 테이블 + Feedback API)
 
-## 사용자가 호소하던 두 문제, 어떻게 해결되는가
+이전: Cursor 채팅 종료 시 휘발. 어떤 문제에 어떤 풀이가 통했는지 추적 불가.
 
-### 문제 1: "문제 부분이 안 들어간다"
-- **원인:** 기존 DOCX 빌더가 해설만 출력
-- **해결:** API 응답이 `{ answer, explanation_steps[] }` 구조로 정형화. UI/DOCX 단계에서 `explanation_steps`를 그대로 채우면 빠짐없이 들어감. 검증기 V4가 본문이 50자 미만이면 자동 재시도 트리거.
+현재: 모든 실행이 Supabase에 저장. 별점 1~5 + 자유 메모를 `user_rating`/`user_feedback` 컬럼에 업데이트. 시간이 지나면 어떤 프롬프트/모델 조합이 좋았는지 SQL로 조회 가능.
 
-### 문제 2: "해설의 수식이 LaTeX로 그대로 나온다"
-- **원인:** LLM이 `\frac{}`, `\theta` 같은 raw LaTeX를 평문에 섞어 출력
-- **해결:** 출력 스키마를 `{text, equation}` 페어로 강제 → 평문(text)과 수식(equation) 분리. 검증기 V6이 평문에 `\frac`, `\sqrt`, `\theta` 등이 섞여 있으면 자동 재시도. DOCX 빌더에서는 `equation` 필드를 KaTeX/OMML로 따로 렌더하면 깨짐 없이 표시됨.
+## 운영 팁
 
-### 보너스: "Cursor에서 매번 API 호출 보고 조율"
-- **원인:** 실패 사유를 사람만 볼 수 있어서 매번 개입 필요
-- **해결:** `/auto` 페이지의 Trace 패널이 모든 단계(retrieve / llm_call / validate / retry)를 실시간 표시. 무엇이 왜 실패했는지 즉시 보임 → 프롬프트나 모델만 바꾸고 재실행하면 끝.
+- **Supabase 미설정 환경**도 동작 — 모든 영속화 호출이 조용히 무시되고 메모리만 사용.
+- **Crop 전용 인스턴스**(시험 입력만 받는 페이지)를 띄우려면 `NEXT_PUBLIC_UI_MODE=crop`. 이 경우 `/legacy`로 직접 가야 풀 UI가 보임.
+- **로컬 DOCX 생성**은 여전히 `npm run write-final-docx` CLI로 가능 — Railway 인스턴스에서는 `auto_pipeline_runs.final_body`를 가져와 같은 빌더로 변환 가능.
 
----
+## 다음 단단계 (필요 시)
 
-## 다음 개선 단추 (필요시 추가)
-
-1. **PDF 업로드 → 자동 크롭 → 일괄 처리**: 기존 크롭 UI와 이 파이프라인을 잇는 어댑터 추가 (1~2일)
-2. **DOCX 자동 생성**: `parsed.explanation_steps`를 기존 `examExplanationDocx.ts`에 넘기고 KaTeX 렌더 추가 (반나절)
-3. **Supabase 로그 영속화**: `trace`를 DB에 저장 → 시간이 지나도 어떤 문제가 어떻게 풀렸는지 추적 (반나절)
-4. **임베딩 검색**: KB가 1,000개를 넘기면 TF-IDF→OpenAI embedding으로 교체 (반나절)
-
-먼저 1, 2번을 끝내면 진짜로 "PDF 올림 → DOCX 떨어짐" 무인 라인이 완성됩니다.
-
----
-
-## 트러블슈팅
-
-| 증상 | 원인 / 조치 |
-|---|---|
-| `kb_size: 0` 응답 | `reference/kb.jsonl` 가 빌드 산출물에 포함 안 됨 → git commit 후 재배포 |
-| 모든 시도가 V1(JSON 파싱)에서 실패 | Gemini 응답이 markdown으로 감싸짐 → `validator`의 `stripCodeFences`가 처리하므로 보통 통과. 그래도 실패하면 `temperature`를 0.1로 낮출 것 |
-| 결과 품질이 들쑥날쑥 | `topK` 를 5로 올리거나, 비슷한 단원 자료를 KB에 더 추가 |
-| Railway에서 빌드 실패 | `tsconfig.json`의 `paths`에 `"@/*": ["./src/*"]` 가 있는지 확인 (기존 프로젝트는 이미 있을 것) |
+1. **`/auto`에서 PDF/이미지 업로드** — 현재는 텍스트 입력만. `/api/mathpix-text` 어댑터 붙이면 즉시 가능.
+2. **DOCX 한 번에** — `/auto` 우측에 "DOCX 다운로드" 버튼 (`/api/save-result`로 라우팅).
+3. **별점 통계** — `auto_pipeline_runs` 집계로 모델·프로필별 만족도 그래프.
+4. **임베딩 검색** — KB가 1,000개 넘기면 TF-IDF → OpenAI embedding.

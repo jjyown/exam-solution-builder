@@ -8,7 +8,7 @@
  *   4) 검증 → 실패시 retryHint와 함께 최대 N회 자동 재시도
  *   5) 최종 ParsedExplanation 반환
  *
- *  Cursor를 거치지 않고도 스스로 교정·재생성을 수행한다.
+ *  외부 IDE 채팅 검수를 거치지 않고도 스스로 교정·재생성을 수행한다.
  * ────────────────────────────────────────────────────────────────────────────
  */
 import { ReferenceRetriever } from './referenceRetriever';

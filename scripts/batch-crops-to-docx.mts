@@ -11,13 +11,13 @@
  *   npm run batch:crops-to-docx
  *   npm run batch:crops-to-docx -- --exam-name "2026 모의고사"
  *   npm run batch:crops-to-docx -- --split-docx
- *   npm run batch:crops-to-docx -- --drafts-only   # DOCX 안 만듦 → 해설 작업중/ 초안만 (MCP·Cursor 중재 후 write-final-docx)
+ *   npm run batch:crops-to-docx -- --drafts-only   # DOCX 안 만듦 → 해설 작업중/ 초안만 (수동 검수 후 write-final-docx)
  *
  * 옵션:
  *   --input <dir>       기본: ./크롭된 시험지
  *   --exam-name <이름>  합본 DOCX 시험지 표제(생략 시 zip/폴더명 추정)
  *   --split-docx          문항마다 DOCX **분리**(구 동작). 생략 시 **합본 1개(기본)**.
- *   --drafts-only       **DOCX 생성 안 함.** API 초안만 `해설 작업중/<시험명>/` 에 텍스트로 저장 → Cursor·MCP 중재 후 `npm run write-final-docx`.
+ *   --drafts-only       **DOCX 생성 안 함.** API 초안만 `해설 작업중/<시험명>/` 에 텍스트로 저장 → 수동 검수 후 `npm run write-final-docx`.
  *   --mathpix           해설 요청 전에 `/api/mathpix-text` 로 OCR → `questionText`로 Gemini에 전달(이미지와 불일치 시 이미지 우선 지시).
  *   --mathpix-min-confidence <0~1>  Mathpix confidence 미만이면 questionText 생략(기본 0 = 미사용).
  *   --mathpix-strict    Mathpix 실패·한도 초과 시 해당 문항을 실패 처리(기본은 경고만 하고 이미지만으로 진행).
@@ -55,7 +55,7 @@ function formatProgressReportKo(
       };
       phase2_crossVerify: { applied: boolean; detail: string };
     };
-    cursorManualChecklist: string[];
+    manualReviewChecklist: string[];
   },
 ): string {
   const p = report.phases;
@@ -77,9 +77,9 @@ function formatProgressReportKo(
     `          부정 메타(못 푼다 등): ${p.phase1b_autoChecks.unsolvableOrNegativeMeta ? "감지됨" : "없음"}`,
   );
   lines.push(`[2차] 교차검증: ${p.phase2_crossVerify.applied ? "적용" : "미적용/유지"} — ${p.phase2_crossVerify.detail}`);
-  if (report.cursorManualChecklist.length > 0) {
-    lines.push(`[Cursor 수동 확인 권장]`);
-    report.cursorManualChecklist.forEach((c) => lines.push(`  · ${c}`));
+  if (report.manualReviewChecklist.length > 0) {
+    lines.push(`[수동 검수 권장]`);
+    report.manualReviewChecklist.forEach((c) => lines.push(`  · ${c}`));
   }
   lines.push("");
   return lines.join("\n");
@@ -88,7 +88,7 @@ function formatProgressReportKo(
 /** `src/lib/outputPaths.ts` 의 `CROPPED_EXAMS_DIR_NAME` 과 동일 */
 const CROPPED_EXAMS_DIR_NAME = "크롭된 시험지";
 const FINAL_EXPLANATION_DIR_NAME = "해설지 최종본";
-/** `--drafts-only` 시 초안 텍스트만 저장 (DOCX 전 Cursor·MCP 중재용) */
+/** `--drafts-only` 시 초안 텍스트만 저장 (DOCX 전 수동 검수용) */
 const DRAFT_WORK_DIR_NAME = "해설 작업중";
 
 const IMAGE_EXT = /\.(png|jpe?g|webp)$/i;

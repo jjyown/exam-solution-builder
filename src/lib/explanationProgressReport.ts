@@ -3,7 +3,7 @@ import { validateObjectiveMcAnswer } from "./explanationAnswerValidators";
 export type SolverProfile = "easy" | "balanced" | "killer";
 
 export type ExplanationProgressReport = {
-  /** 단계 요약 (UI·Cursor·배치 로그 공용) */
+  /** 단계 요약 (UI·배치 로그 공용) */
   phases: {
     phase1_gemini: {
       label: string;
@@ -26,8 +26,8 @@ export type ExplanationProgressReport = {
       detail: string;
     };
   };
-  /** Cursor에서 수동 수정 시 우선 볼 체크리스트 */
-  cursorManualChecklist: string[];
+  /** 운영자가 수동 수정 시 우선 볼 체크리스트 */
+  manualReviewChecklist: string[];
   /** API가 넘기던 경고 문자열 그대로 */
   rawQualityWarnings: string[];
 };
@@ -63,34 +63,34 @@ export function buildExplanationProgressReport(params: {
 
   const modelHint = params.model.split("+")[0]?.trim() || params.model;
 
-  const cursorManualChecklist: string[] = [];
+  const manualReviewChecklist: string[] = [];
   if (!mc.ok) {
-    mc.issues.forEach((s) => cursorManualChecklist.push(`[객관식·정답 형식] ${s}`));
+    mc.issues.forEach((s) => manualReviewChecklist.push(`[객관식·정답 형식] ${s}`));
   }
   if (truncatedSuspected) {
-    cursorManualChecklist.push(
+    manualReviewChecklist.push(
       "[잘림·미완성 의심] 해설이 짧거나 끝이 연산자/불완전 괄호 → 재생성·토큰·이미지 확인",
     );
   }
   if (explanationTooLongForProfile) {
-    cursorManualChecklist.push(
+    manualReviewChecklist.push(
       `[분량] 해설 약 ${expl.length}자 (이번 프로필 권장 상한 ${maxChars}자 초과) → 킬러급·압축 필요 여부 검토`,
     );
   } else if (killerStyleSuspected) {
-    cursorManualChecklist.push(
+    manualReviewChecklist.push(
       "[분량] 일반 프로필인데 해설이 매우 김 → 난이도·중복 서술·킬러 여부 확인",
     );
   }
   if (unsolvableOrNegativeMeta) {
-    cursorManualChecklist.push(
+    manualReviewChecklist.push(
       "[톤] 불가·출제오류·모순류 표현 → 교과서형 정석 풀이로 교체 검토",
     );
   }
   (params.qualityWarnings ?? []).forEach((w) => {
-    cursorManualChecklist.push(`[자동 경고] ${w}`);
+    manualReviewChecklist.push(`[자동 경고] ${w}`);
   });
   if (params.verifyWarning) {
-    cursorManualChecklist.push(`[2차 교차검증] ${params.verifyWarning}`);
+    manualReviewChecklist.push(`[2차 교차검증] ${params.verifyWarning}`);
   }
 
   return {
@@ -122,7 +122,7 @@ export function buildExplanationProgressReport(params: {
             : "교차검증 미적용·실패 시 1차 초안 유지"),
       },
     },
-    cursorManualChecklist,
+    manualReviewChecklist,
     rawQualityWarnings: params.qualityWarnings ?? [],
   };
 }
@@ -151,9 +151,9 @@ export function formatProgressReportKo(
     `          부정 메타(못 푼다 등): ${p.phase1b_autoChecks.unsolvableOrNegativeMeta ? "감지됨" : "없음"}`,
   );
   lines.push(`[2차] 교차검증: ${p.phase2_crossVerify.applied ? "적용" : "미적용/유지"} — ${p.phase2_crossVerify.detail}`);
-  if (report.cursorManualChecklist.length > 0) {
-    lines.push(`[Cursor 수동 확인 권장]`);
-    report.cursorManualChecklist.forEach((c) => lines.push(`  · ${c}`));
+  if (report.manualReviewChecklist.length > 0) {
+    lines.push(`[수동 검수 권장]`);
+    report.manualReviewChecklist.forEach((c) => lines.push(`  · ${c}`));
   }
   lines.push("");
   return lines.join("\n");

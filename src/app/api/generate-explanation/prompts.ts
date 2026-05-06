@@ -154,7 +154,7 @@ export function getProfileExamples(profile: "easy" | "balanced" | "killer") {
   return EXAMPLES_BALANCED;
 }
 
-/** Cursor MCP·스크립트 등 Next 라우트 밖에서 웹과 동일한 시스템 지시를 쓸 때 */
+/** 스크립트·외부 호출에서 웹과 동일한 시스템 지시를 쓸 때 */
 export function buildMcpSystemInstruction(
   profile: "easy" | "balanced" | "killer" = "balanced",
 ): string {

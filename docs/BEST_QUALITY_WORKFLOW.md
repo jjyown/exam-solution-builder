@@ -1,6 +1,11 @@
 # 최상의 해설집 우선 워크플로
 
-- 문서 기준일: 2026-05-03 (Base64·채팅 첨부·에이전트 MCP 차이: [CURSOR_MCP_WORKFLOW.md](./CURSOR_MCP_WORKFLOW.md) 상단 Q&A)
+> **⚠️ 2026-05-06 갱신:** Cursor IDE 의존을 제거하고 Railway `/auto` 자동 파이프라인으로 전환했습니다.
+> 본 문서의 Cursor 채팅 검수 단계는 이제 [src/lib/autoPipelineChecklist.ts](../src/lib/autoPipelineChecklist.ts)
+> 와 `/auto` UI의 별점 피드백 루프가 흡수합니다. 운영 가이드는 [README.md](../README.md)와
+> [INTEGRATION.md](../INTEGRATION.md) 참조.
+
+- 문서 기준일: 2026-05-03 (구 Cursor·MCP 운영 문서: [_archive/cursor-legacy/docs/CURSOR_MCP_WORKFLOW.md](../_archive/cursor-legacy/docs/CURSOR_MCP_WORKFLOW.md))
 - **품질 최우선 시 모델·env:** [models.md](./models.md) 「해설 품질 최우선」절
 - **목표:** 자동화·배치보다 **해설 품질·교과 적합성·정답 신뢰도**를 최우선으로 둔다.
 

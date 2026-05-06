@@ -1,59 +1,93 @@
 # 하이로드 수학 해설지 제작기
 
-로컬 Next.js 앱으로 **Gemini / OpenAI** 해설을 만들고 **`해설지 최종본` 폴더에 DOCX**를 저장합니다.
+문제 입력 → **자동 검색 · 생성 · 검증 · 재시도** → 해설 산출. Railway 배포로 어디서든 동작.
 
-**해설집 품질을 최우선으로 할 때:** 먼저 [docs/BEST_QUALITY_WORKFLOW.md](docs/BEST_QUALITY_WORKFLOW.md)만 읽고 동선을 잡는 것을 권장합니다. (자동화·배치는 그 다음입니다.)
+## 두 가지 동선
 
-## 전체 동선(권장)
+| 동선 | 진입점 | 용도 |
+|---|---|---|
+| **자동 파이프라인** (메인) | `/auto` | 문제 텍스트/이미지 → 즉시 해설 + 수동 검수 체크리스트 + 별점 피드백 |
+| 크롭 풀 UI (보조) | `/legacy` | PDF 영역 지정·크롭, 묶음 생성, DOCX 일괄 출력 |
 
-1. **Railway** — PDF에서 영역 지정·**크롭** → 묶음 생성 (`NEXT_PUBLIC_UI_MODE=crop` 이면 **크롭 전용 UI**)  
-2. **Google Drive** — 그 묶음을 **입력용 폴더**에 저장(Railway 연동)  
-3. **Cursor + 본 앱** — Cursor는 보조(프롬프트·검수), 앱에서 생성·배치·편집  
-4. **로컬 `해설지 최종본`** — 최종 DOCX 저장. **이 폴더를 다른 PC로 복사**해도 같은 구조로 사용 가능  
+루트 `/`는 `/auto`로 자동 리다이렉트됩니다.
 
-자세한 동선·Drive(입력만): [docs/PIPELINE.md](docs/PIPELINE.md) — **DOCX는 Drive에 올리지 않고 로컬 `해설지 최종본`만 사용합니다.**
-
-## 문서·기록 (academy_manager `docs` 패턴)
-
-변경 작업 후에는 [docs/PIPELINE.md](docs/PIPELINE.md) 상단에 안내된 **문서 4종**(`enterprise_workflow`, `context`, `plan`, `checklist`)을 함께 갱신하는 것을 권장합니다.
-
-## 기능 요약
-
-- 시험지: 로컬 `시험지` / `exams` 또는 **Drive 입력 폴더** 연동(`.env.local`)
-- PDF · 이미지 · 크롭 대기열 · 배치 해설
-- 내보내기: 빠른 정답 + 2단 해설 DOCX
-- 모델: [docs/models.md](docs/models.md)
-
-## 실행
+## 빠른 시작 (로컬)
 
 ```bash
 npm install
+cp .env.local.example .env.local
+# 키 채우기 (GEMINI_API_KEY, OPENAI_API_KEY, Supabase URL/키)
 npm run dev
 ```
 
-Windows: `실행.bat` · 브라우저 [http://localhost:3000](http://localhost:3000)  
-`.env.local` 템플릿: `.env.local.example`
+브라우저에서 [http://localhost:3000](http://localhost:3000) 접속.
 
-## 앱 안에서의 작업 순서(로컬)
+## Railway 배포
 
-1. `시험지`에 파일 두기(또는 Drive 연동 시 목록에서 선택)  
-2. 파일 선택 → PDF면 페이지 이동  
-3. 문항별 영역 저장 → 해설 대기열  
-4. 배치/단건 생성 → 「해설 제작 (DOCX)」→ **`해설지 최종본`**
+1. **Repo 연결** — GitHub repo 연결 또는 `railway up`
+2. **Variables** — `.env.example`의 값 복사:
+   - `GEMINI_API_KEY`, `OPENAI_API_KEY` (필수)
+   - `NEXT_PUBLIC_SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` (영속화 권장)
+   - `EXPLANATION_CROSS_VERIFY=true` (자동 2차 검증)
+3. **Supabase 테이블 생성** — Supabase SQL Editor에서:
+   - `supabase/auto_pipeline_runs.sql` (자동 파이프라인 실행 이력)
+   - `supabase/explanation_reviews.sql` (검수본 저장)
+4. **빌드** — Railway가 `next build` → `next start` 자동 감지. `next.config.ts`의 `output: 'standalone'`으로 컨테이너 가벼움.
+5. **헬스체크** — `https://<your-app>.railway.app/api/auto-pipeline` (GET) → `{ ok: true, kb_size: 53 }`
+
+## 자동 파이프라인이 하는 일
+
+```
+입력 → ① 참고 예시 검색 (TF-IDF, KB 53개)
+     → ② 프롬프트 조립 (few-shot)
+     → ③ Gemini/OpenAI 호출
+     → ④ 검증 (JSON·필드·LaTeX·단계 수)
+     → ⑤ 실패 시 retryHint와 함께 자동 재시도 (최대 N회)
+     → ⑥ Supabase 영속화 + 수동 검수 체크리스트 산출
+     → ⑦ 사용자 별점·코멘트 → 다음 호출에 반영
+```
+
+이전 워크플로(Cursor 채팅에서 사람이 한 벌로 합치고 검수)를 코드 안의 자동 검증 + UI의 별점 피드백 루프로 대체했습니다. 자세한 설계는 [INTEGRATION.md](INTEGRATION.md).
+
+## 환경변수 핵심
+
+| 변수 | 용도 | 기본 |
+|---|---|---|
+| `GEMINI_API_KEY` | 1차 비전 풀이 | 필수 |
+| `OPENAI_API_KEY` | 2차 교차검증·폴백 | 필수 |
+| `NEXT_PUBLIC_SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY` | 실행 이력·피드백 영속화 | 권장 |
+| `EXPLANATION_CROSS_VERIFY` | 자동 2차 검증 활성화 | `true` |
+| `NEXT_PUBLIC_UI_MODE=crop` | 크롭 전용 인스턴스로 띄울 때 | 빈값 |
+
+전체 목록은 [.env.local.example](.env.local.example).
 
 ## 코드 위치
 
-- UI: `src/app/page.tsx` (2단계 크롭: 「비전으로 박스 채우기」→ `POST /api/detect-question-layout`)
-- 해설: `src/app/api/generate-explanation/route.ts`
-- Mathpix OCR(선택): `src/app/api/mathpix-text/route.ts`, `src/lib/mathpixV3Text.ts`
-- DOCX: `src/lib/examExplanationDocx.ts`
+- 자동 파이프라인 코어: [src/lib/autoPipeline.ts](src/lib/autoPipeline.ts)
+- 검증 + 재시도 힌트: [src/lib/explanationValidator.ts](src/lib/explanationValidator.ts)
+- 검수 체크리스트 (Cursor 검수 대체): [src/lib/autoPipelineChecklist.ts](src/lib/autoPipelineChecklist.ts)
+- Supabase 영속화: [src/lib/autoPipelineLog.ts](src/lib/autoPipelineLog.ts)
+- 메인 UI: [src/app/auto/page.tsx](src/app/auto/page.tsx)
+- API: [src/app/api/auto-pipeline/route.ts](src/app/api/auto-pipeline/route.ts), [src/app/api/auto-pipeline/feedback/route.ts](src/app/api/auto-pipeline/feedback/route.ts)
+- DOCX 생성: [src/lib/examExplanationDocx.ts](src/lib/examExplanationDocx.ts)
+- 레거시 풀 UI: [src/app/legacy/page.tsx](src/app/legacy/page.tsx)
 
-### Mathpix로 배치 품질 보강(선택)
-
-`.env.local`에 `MATHPIX_APP_ID`, `MATHPIX_APP_KEY`를 넣은 뒤 `npm run dev`를 켜고:
+## CLI 배치 (선택)
 
 ```bash
-npm run batch:crops-to-docx -- --drafts-only --mathpix
+# 크롭 폴더 → 해설 DOCX 일괄
+npm run batch:crops-to-docx -- --exam-name "2026 모의고사 1회"
+
+# 초안만 (수동 검수 후 write-final-docx)
+npm run batch:crops-drafts
+
+# 검수 끝난 .md → 최종 DOCX
+npm run write-final-docx -- --exam-name "..." --quick-answer "..." --body-file ./path.txt
+
+# Supabase 키 점검
+npm run check-supabase
 ```
 
-문항마다 먼저 `/api/mathpix-text`로 OCR 텍스트를 얻어 `questionText`로 넘기고, 이어서 기존과 같이 `/api/generate-explanation`을 호출합니다. Cursor MCP `gemini-gpt`에는 `mathpix_recognize` 도구가 별도로 있습니다(MCP 프로세스에도 동일 키 환경변수 필요).
+## Cursor 잔재
+
+이전 Cursor IDE + MCP 동선 파일은 [_archive/cursor-legacy/](_archive/cursor-legacy/) 에 보관 중입니다. 새 라인이 안정되면 통째로 삭제 가능.

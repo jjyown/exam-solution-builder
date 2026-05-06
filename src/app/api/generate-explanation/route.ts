@@ -208,7 +208,7 @@ function mergeConsistencyIssues(text: string) {
   };
 }
 
-/** 성공 응답에 단계별 progressReport(JSON)를 붙여 Cursor·UI·배치 로그에서 활용한다. */
+/** 성공 응답에 단계별 progressReport(JSON)를 붙여 UI·배치 로그에서 활용한다. */
 function jsonSuccessWithProgress(
   body: {
     result: string;

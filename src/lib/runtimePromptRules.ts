@@ -1,5 +1,5 @@
 /**
- * 초기 단계: 외부 DB 없이 동작. 프롬프트 규칙은 코드(`generate-explanation` prompts)와 Cursor에서 관리.
+ * 초기 단계: 외부 DB 없이 동작. 프롬프트 규칙은 코드(`generate-explanation` prompts)에서 관리.
  */
 export type RuntimePromptRules = {
   extraConstraints?: string;

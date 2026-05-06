@@ -1,6 +1,6 @@
 /**
  * 합본 마크다운을 OpenAI에 보내 **그림 필요 여부·검수 요약** 표를 받는다.
- * Cursor·원장님이 그 결과를 보고 최종 편집한 뒤 `write-final-docx` 하는 동선용.
+ * 운영자가 그 결과를 UI에서 보고 최종 편집한 뒤 `write-final-docx` 하는 동선용.
  */
 import {
   OPENAI_IMAGE_NECESSITY_CHECKLIST_SYSTEM,
