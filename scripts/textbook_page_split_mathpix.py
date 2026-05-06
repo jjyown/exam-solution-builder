@@ -8,6 +8,15 @@
   줄 단위 text를 얻을 수 있어, 문항 시작 패턴이 있는 줄을 기준으로 구간을 나누고
   구간별 bbox 합집합으로 원본 페이지를 크롭한다.
 
+2차: 해설 우선 필터 — quick_answer/unknown-only 페이지는 매핑 제외, 해설 세그먼트만 유지.
+
+3차(번호 혼입 완화): 세그먼트 내부에 "소유 번호 ≠ N"인 `N) [정답]` / `N. [정답]` 줄이 있으면
+  해당 줄에서 논리 분할하여 크롭 bbox가 섞이지 않도록 한다. (--no-foreign-answer-split 으로 끌 수 있음)
+
+5차(OCR 중복 블록): 동일 소유 번호에 대해 본문이 사실상 동일한 세그먼트가 비인접으로 남는 경우
+  union-find로 묶어 한 세그먼트로 병합한다(줄·bbox는 세로 순으로 재정렬).
+  병합 시 동일 텍스트의 line piece가 연속으로 남으면 bbox 합집합으로 1개로 합쳐 본문 이중 기재를 막는다.
+
 의존성: pip install pillow
 
 환경변수: MATHPIX_APP_ID, MATHPIX_APP_KEY (기존 배치 OCR과 동일)
@@ -44,6 +53,11 @@ _RE_Q_PAREN = re.compile(r"^(\d{1,3})\s*\)\s*\S")
 _RE_Q_DOT_LOOSE = re.compile(r"^(\d{1,3})\s*\.\s*")  # 끝이 수식만 있는 줄
 _RE_Q_PAREN_LOOSE = re.compile(r"^(\d{1,3})\s*\)\s*")
 
+# 3차: 정답 전용 헤더(타 문항 혼입 분리) — 보수적으로 [정답] 태그가 있는 줄만
+_RE_ANS_HDR_PAREN = re.compile(r"^(\d{1,3})\s*\)\s*(?:\[정답\]|정답\])")
+_RE_ANS_HDR_DOT = re.compile(r"^(\d{1,3})\s*\.\s+(?:\[정답\]|정답\])")
+_RE_DATE = re.compile(r"\b20\d{2}[./-]\d{1,2}[./-]\d{1,2}\b")
+
 
 def normalize_line_for_marker(raw: str) -> str:
     t = (raw or "").strip()
@@ -60,6 +74,17 @@ def extract_printed_question_number(line_text: str) -> Optional[int]:
     if m:
         return int(m.group(1))
     m = _RE_Q_DOT_LOOSE.match(t) or _RE_Q_PAREN_LOOSE.match(t)
+    if m:
+        return int(m.group(1))
+    return None
+
+
+def answer_header_number(line_text: str) -> Optional[int]:
+    """`7) [정답]` / `7. [정답]` 형태만 인정 (해설 본문 속 숫자 오탐 최소화)."""
+    t = normalize_line_for_marker(line_text)
+    if not t:
+        return None
+    m = _RE_ANS_HDR_PAREN.match(t) or _RE_ANS_HDR_DOT.match(t)
     if m:
         return int(m.group(1))
     return None
@@ -85,6 +110,20 @@ def union_bboxes(boxes: List[Tuple[int, int, int, int]]) -> Optional[Tuple[int, 
     x1 = max(b[2] for b in good)
     y1 = max(b[3] for b in good)
     return x0, y0, x1, y1
+
+
+def bbox_iou(a: Tuple[int, int, int, int], b: Tuple[int, int, int, int]) -> float:
+    ax0, ay0, ax1, ay1 = a
+    bx0, by0, bx1, by1 = b
+    ix0, iy0 = max(ax0, bx0), max(ay0, by0)
+    ix1, iy1 = min(ax1, bx1), min(ay1, by1)
+    iw, ih = max(0, ix1 - ix0), max(0, iy1 - iy0)
+    inter = iw * ih
+    if inter <= 0:
+        return 0.0
+    area_a = max(1, (ax1 - ax0) * (ay1 - ay0))
+    area_b = max(1, (bx1 - bx0) * (by1 - by0))
+    return inter / float(area_a + area_b - inter)
 
 
 def line_sort_key(line: Dict[str, Any]) -> Tuple[float, float]:
@@ -194,10 +233,301 @@ def call_mathpix_full(image_path: Path, max_retry: int = 4) -> Tuple[bool, str, 
 
 
 @dataclass
+class LinePiece:
+    """Mathpix line_data 한 줄에 대응. text/bbox 정렬 보존."""
+
+    text: str = ""
+    bbox: Optional[Tuple[int, int, int, int]] = None
+
+
+@dataclass
 class ProblemSegment:
     printed_number: Optional[int]
-    text_lines: List[str] = field(default_factory=list)
-    boxes: List[Tuple[int, int, int, int]] = field(default_factory=list)
+    pieces: List[LinePiece] = field(default_factory=list)
+
+
+def segment_join_body(seg: ProblemSegment) -> str:
+    return "\n\n".join((p.text for p in seg.pieces if (p.text or "").strip())).strip()
+
+
+def segment_text_char_count(seg: ProblemSegment) -> int:
+    return sum(len(p.text.strip()) for p in seg.pieces if p.text and p.text.strip())
+
+
+def segment_effective_owner(seg: ProblemSegment) -> Optional[int]:
+    if seg.printed_number is not None:
+        return seg.printed_number
+    for p in seg.pieces:
+        if p.text.strip():
+            ah = answer_header_number(p.text)
+            if ah is not None:
+                return ah
+            q = extract_printed_question_number(p.text)
+            if q is not None:
+                return q
+    return None
+
+
+def split_segment_on_foreign_answer_headers(seg: ProblemSegment) -> List[ProblemSegment]:
+    """
+    세그먼트 소유 번호와 다른 `N) [정답]` / `N. [정답]`이 나오면 해당 줄에서 분할.
+    """
+    if len(seg.pieces) < 2:
+        return [seg]
+    owner = segment_effective_owner(seg)
+    chunks: List[List[LinePiece]] = []
+    current: List[LinePiece] = []
+    current_owner = owner
+
+    for p in seg.pieces:
+        if current_owner is None and current:
+            q = extract_printed_question_number(p.text)
+            if q is not None:
+                current_owner = q
+        fa = answer_header_number(p.text)
+        if current_owner is None and fa is not None and not current:
+            current_owner = fa
+        if (
+            fa is not None
+            and current_owner is not None
+            and fa != current_owner
+            and current
+        ):
+            chunks.append(current)
+            current = []
+            current_owner = fa
+        current.append(p)
+
+    if current:
+        chunks.append(current)
+    if len(chunks) <= 1:
+        return [seg]
+
+    out: List[ProblemSegment] = []
+    for ch in chunks:
+        pn: Optional[int] = None
+        for p in ch:
+            ah = answer_header_number(p.text)
+            if ah is not None:
+                pn = ah
+                break
+            q = extract_printed_question_number(p.text)
+            if q is not None:
+                pn = q
+                break
+        out.append(
+            ProblemSegment(
+                printed_number=pn if pn is not None else seg.printed_number,
+                pieces=ch,
+            )
+        )
+    return out
+
+
+def split_all_segments_on_foreign_answer_headers(
+    segments: List[ProblemSegment],
+) -> List[ProblemSegment]:
+    flat: List[ProblemSegment] = []
+    for s in segments:
+        flat.extend(split_segment_on_foreign_answer_headers(s))
+    return flat
+
+
+def merge_adjacent_same_owner_segments(segments: List[ProblemSegment]) -> List[ProblemSegment]:
+    """인접 세그먼트의 실효 소유 번호가 같으면 병합해 중복 분할을 줄인다."""
+    if len(segments) <= 1:
+        return segments
+    out: List[ProblemSegment] = []
+    for seg in segments:
+        if not out:
+            out.append(seg)
+            continue
+        prev = out[-1]
+        p_owner = segment_effective_owner(prev)
+        c_owner = segment_effective_owner(seg)
+        pbox = union_bboxes([p.bbox for p in prev.pieces if p.bbox])
+        cbox = union_bboxes([p.bbox for p in seg.pieces if p.bbox])
+        high_overlap = (
+            pbox is not None
+            and cbox is not None
+            and bbox_iou(pbox, cbox) >= 0.75
+        )
+        if p_owner is not None and c_owner is not None and p_owner == c_owner and high_overlap:
+            prev.pieces.extend(seg.pieces)
+            prev.printed_number = p_owner
+            continue
+        out.append(seg)
+    return out
+
+
+def normalize_body_for_dedupe(seg: ProblemSegment) -> str:
+    """제로폭 공백·유니코드 공백 제거 후 공백 축약."""
+    t = segment_join_body(seg).strip()
+    t = re.sub(r"[\u200b\uFEFF\u00a0]+", "", t)
+    t = re.sub(r"\s+", " ", t)
+    return t
+
+
+def token_jaccard(a: str, b: str) -> float:
+    toks_a = set(re.findall(r"[\w가-힣]+", a, flags=re.UNICODE))
+    toks_b = set(re.findall(r"[\w가-힣]+", b, flags=re.UNICODE))
+    if not toks_a and not toks_b:
+        return 1.0 if a == b else 0.0
+    if not toks_a or not toks_b:
+        return 0.0
+    inter = len(toks_a & toks_b)
+    union = len(toks_a | toks_b)
+    return inter / float(union) if union else 0.0
+
+
+def bodies_near_duplicate(norm_a: str, norm_b: str) -> bool:
+    if norm_a == norm_b:
+        return True
+    if not norm_a or not norm_b:
+        return False
+    shorter, longer = (norm_a, norm_b) if len(norm_a) <= len(norm_b) else (norm_b, norm_a)
+    if shorter in longer and len(shorter) / max(len(longer), 1) >= 0.85:
+        return True
+    j = token_jaccard(norm_a, norm_b)
+    mx = max(len(norm_a), len(norm_b))
+    if mx < 200:
+        return j >= 0.88
+    return j >= 0.93
+
+
+def segment_min_y(seg: ProblemSegment) -> float:
+    ys = [float(p.bbox[1]) for p in seg.pieces if p.bbox]
+    return min(ys) if ys else 1e9
+
+
+def line_piece_sort_key(p: LinePiece) -> Tuple[float, float]:
+    if p.bbox:
+        return (float(p.bbox[1]), float(p.bbox[0]))
+    return (1e9, 1e9)
+
+
+def normalize_piece_text_for_dedupe(raw: str) -> str:
+    """줄 단위 조각 비교용(전역 병합 후 동일 OCR 블록이 piece 두 벌로 남는 경우 제거)."""
+    t = (raw or "").strip()
+    t = re.sub(r"[\u200b\uFEFF\u00a0]+", "", t)
+    t = re.sub(r"\s+", " ", t)
+    return t
+
+
+def dedupe_adjacent_identical_pieces(pieces: List[LinePiece]) -> List[LinePiece]:
+    """정렬된 pieces에서 인접·동일 본문 조각은 bbox만 합친 하나로 남긴다(OCR 이중 블록)."""
+    out: List[LinePiece] = []
+    for p in pieces:
+        nt = normalize_piece_text_for_dedupe(p.text)
+        if not nt:
+            continue
+        if out and normalize_piece_text_for_dedupe(out[-1].text) == nt:
+            prev = out[-1]
+            if p.bbox and prev.bbox:
+                a, b = prev.bbox, p.bbox
+                out[-1] = LinePiece(
+                    text=prev.text,
+                    bbox=(min(a[0], b[0]), min(a[1], b[1]), max(a[2], b[2]), max(a[3], b[3])),
+                )
+            continue
+        out.append(LinePiece(text=p.text, bbox=p.bbox))
+    return out
+
+
+def merge_segment_list_ordered(segs: List[ProblemSegment]) -> ProblemSegment:
+    ordered = sorted(segs, key=segment_min_y)
+    all_pieces: List[LinePiece] = []
+    for s in ordered:
+        all_pieces.extend(s.pieces)
+    all_pieces.sort(key=line_piece_sort_key)
+    all_pieces = dedupe_adjacent_identical_pieces(all_pieces)
+    owner: Optional[int] = None
+    for s in ordered:
+        o = segment_effective_owner(s)
+        if o is not None:
+            owner = o
+            break
+    return ProblemSegment(printed_number=owner, pieces=all_pieces)
+
+
+class _UnionFind:
+    def __init__(self, n: int) -> None:
+        self.p = list(range(n))
+
+    def find(self, x: int) -> int:
+        while self.p[x] != x:
+            self.p[x] = self.p[self.p[x]]
+            x = self.p[x]
+        return x
+
+    def union(self, a: int, b: int) -> None:
+        pa, pb = self.find(a), self.find(b)
+        if pa != pb:
+            self.p[pb] = pa
+
+
+def merge_duplicate_owner_segments_global(segments: List[ProblemSegment]) -> List[ProblemSegment]:
+    """
+    동일 소유 번호 + 사실상 동일 본문인 세그먼트를 비인접 포함 병합(OCR 이중 블록 완화).
+    """
+    if len(segments) <= 1:
+        return segments
+    n = len(segments)
+    bodies = [normalize_body_for_dedupe(s) for s in segments]
+    owners = [segment_effective_owner(s) for s in segments]
+    uf = _UnionFind(n)
+    for i in range(n):
+        for j in range(i + 1, n):
+            if owners[i] is None or owners[j] is None:
+                continue
+            if owners[i] != owners[j]:
+                continue
+            if bodies_near_duplicate(bodies[i], bodies[j]):
+                uf.union(i, j)
+    clusters: Dict[int, List[int]] = {}
+    for i in range(n):
+        r = uf.find(i)
+        clusters.setdefault(r, []).append(i)
+    out: List[ProblemSegment] = []
+    for r in sorted(clusters.keys(), key=lambda x: min(clusters[x])):
+        idxs = clusters[r]
+        if len(idxs) == 1:
+            out.append(segments[idxs[0]])
+        else:
+            group = [segments[k] for k in sorted(idxs, key=lambda idx: segment_min_y(segments[idx]))]
+            out.append(merge_segment_list_ordered(group))
+    return out
+
+
+def clear_stem_problem_outputs(out_dir: Path, stem: str) -> None:
+    """`--force` 재생성 시 이전 분할 개수가 더 많으면 남는 problemNN orphan 파일을 제거한다."""
+    for pattern in (
+        f"{stem}_problem*.md",
+        f"{stem}_problem*.png",
+        f"{stem}_problem*.jpg",
+        f"{stem}_problem*.jpeg",
+    ):
+        for p in list(out_dir.glob(pattern)):
+            try:
+                p.unlink()
+            except OSError:
+                pass
+
+
+def dedupe_adjacent_segments(segments: List[ProblemSegment]) -> List[ProblemSegment]:
+    """인접 중복 세그먼트(동일 owner + 동일 본문)는 1개만 유지."""
+    if len(segments) <= 1:
+        return segments
+    out: List[ProblemSegment] = []
+    last_sig: Optional[Tuple[Optional[int], str]] = None
+    for seg in segments:
+        body_norm = normalize_body_for_dedupe(seg)
+        sig = (segment_effective_owner(seg), body_norm)
+        if sig == last_sig:
+            continue
+        out.append(seg)
+        last_sig = sig
+    return out
 
 
 def should_start_new_problem(
@@ -241,10 +571,6 @@ def should_start_new_problem(
     return True
 
 
-def segment_text_char_count(seg: ProblemSegment) -> int:
-    return sum(len(t.strip()) for t in seg.text_lines if t and t.strip())
-
-
 def merge_small_neighbor_segments(segments: List[ProblemSegment]) -> List[ProblemSegment]:
     if len(segments) <= 1:
         return segments
@@ -253,7 +579,7 @@ def merge_small_neighbor_segments(segments: List[ProblemSegment]) -> List[Proble
     i = 0
     while i < len(segments):
         seg = segments[i]
-        line_count = len([t for t in seg.text_lines if t.strip()])
+        line_count = len([p for p in seg.pieces if (p.text or "").strip()])
         char_count = segment_text_char_count(seg)
 
         # 너무 짧은 조각(오탐 분할 가능성)은 이웃과 병합
@@ -265,8 +591,7 @@ def merge_small_neighbor_segments(segments: List[ProblemSegment]) -> List[Proble
             nxt = segments[i + 1]
             combined = ProblemSegment(
                 printed_number=seg.printed_number if seg.printed_number is not None else nxt.printed_number,
-                text_lines=seg.text_lines + nxt.text_lines,
-                boxes=seg.boxes + nxt.boxes,
+                pieces=seg.pieces + nxt.pieces,
             )
             segments[i + 1] = combined
             i += 1
@@ -279,7 +604,7 @@ def merge_small_neighbor_segments(segments: List[ProblemSegment]) -> List[Proble
 
 
 def classify_segment_type(seg: ProblemSegment) -> str:
-    body = "\n".join(seg.text_lines)
+    body = segment_join_body(seg)
     has_expl = "[해설]" in body or "해설]" in body
     has_ans = "[정답]" in body or "정답]" in body
     if has_expl and has_ans:
@@ -289,6 +614,38 @@ def classify_segment_type(seg: ProblemSegment) -> str:
     if has_ans:
         return "quick_answer"
     return "unknown"
+
+
+def is_intro_noise_segment(seg: ProblemSegment) -> bool:
+    """
+    표지/머리말 조각 판정(보수적):
+    - 매우 짧고(<= 6줄, < 80자)
+    - 정답 헤더가 없고
+    - 본문성 수식/문항 단서가 거의 없으며
+    - '해설', 과목명, 날짜 같은 머리말 토큰 위주인 경우
+    """
+    lines = [(p.text or "").strip() for p in seg.pieces if (p.text or "").strip()]
+    if not lines:
+        return False
+    if len(lines) > 6:
+        return False
+    body = "\n".join(lines)
+    if segment_text_char_count(seg) >= 80:
+        return False
+    if any(answer_header_number(ln) is not None for ln in lines):
+        return False
+    token_hits = 0
+    joined = " ".join(lines)
+    if "해설" in joined:
+        token_hits += 1
+    if "수학영역" in joined or "확률과 통계" in joined:
+        token_hits += 1
+    if _RE_DATE.search(joined):
+        token_hits += 1
+    has_math = "$" in body or "\\frac" in body or "\\sqrt" in body
+    if has_math:
+        return False
+    return token_hits >= 2
 
 
 def filter_segments_for_explanations(segments: List[ProblemSegment]) -> List[ProblemSegment]:
@@ -303,6 +660,9 @@ def filter_segments_for_explanations(segments: List[ProblemSegment]) -> List[Pro
             return []
         return segments
     out = [s for s, t in zip(segments, types) if t in {"explanation", "answer_and_explanation"}]
+    # 4차(노이즈 억제): 해설 페이지 맨 앞의 표지형 조각은 제거
+    if len(out) >= 2 and is_intro_noise_segment(out[0]):
+        out = out[1:]
     return out if out else segments
 
 
@@ -311,6 +671,7 @@ def build_segments_from_line_data(
     *,
     page_width: Optional[int],
     page_height: Optional[int],
+    foreign_answer_split: bool,
 ) -> List[ProblemSegment]:
     usable: List[Dict[str, Any]] = []
     for line in line_data:
@@ -342,7 +703,7 @@ def build_segments_from_line_data(
             page_width=page_width,
             page_height=page_height,
         ):
-            if current is not None and (current.text_lines or current.boxes):
+            if current is not None and current.pieces:
                 segments.append(current)
             current = ProblemSegment(printed_number=qn)
             prev_qn = qn
@@ -351,31 +712,32 @@ def build_segments_from_line_data(
         if current is None:
             current = ProblemSegment(printed_number=None)
 
-        if txt:
-            current.text_lines.append(txt)
-        if bbox:
-            current.boxes.append(bbox)
+        # 줄 단위 정렬: Mathpix 라인마다 정확히 하나의 LinePiece
+        current.pieces.append(LinePiece(text=txt if txt else "", bbox=bbox))
 
-    if current is not None and (current.text_lines or current.boxes):
+    if current is not None and current.pieces:
         segments.append(current)
 
     if len(segments) >= 2 and segments[0].printed_number is None:
         head, tail = segments[0], segments[1]
-        tail.text_lines = head.text_lines + tail.text_lines
-        tail.boxes = head.boxes + tail.boxes
+        tail.pieces = head.pieces + tail.pieces
         segments = segments[1:]
 
     # 안전장치: 비정상 과분할 시 페이지 단일 세그먼트 폴백
     if len(segments) > 20:
-        merged = ProblemSegment(printed_number=segments[0].printed_number)
+        merged = ProblemSegment(printed_number=segments[0].printed_number, pieces=[])
         for s in segments:
-            merged.text_lines.extend(s.text_lines)
-            merged.boxes.extend(s.boxes)
+            merged.pieces.extend(s.pieces)
         return [merged]
 
     segments = merge_small_neighbor_segments(segments)
 
-    return [s for s in segments if s.text_lines or s.boxes]
+    if foreign_answer_split:
+        segments = split_all_segments_on_foreign_answer_headers(segments)
+    segments = merge_adjacent_same_owner_segments(segments)
+    segments = dedupe_adjacent_segments(segments)
+
+    return [s for s in segments if s.pieces]
 
 
 def crop_with_padding(
@@ -430,6 +792,29 @@ def write_problem_md(
     path.write_text("\n".join(meta), encoding="utf-8")
 
 
+def infer_printed_number_for_output(seg: Optional[ProblemSegment], body: str) -> Optional[int]:
+    """
+    출력 frontmatter용 문항 번호 추정:
+    1) 세그먼트 소유번호(printed_number)
+    2) 세그먼트 내부 정답 헤더 번호 (N) [정답] / N. [정답])
+    3) 세그먼트 내부 문항 시작 번호 (N. / N))
+    4) 본문 라인 스캔(정답 헤더 우선, 그다음 문항 시작)
+    """
+    if seg is not None:
+        owner = segment_effective_owner(seg)
+        if owner is not None:
+            return owner
+    for raw in body.splitlines():
+        ah = answer_header_number(raw)
+        if ah is not None:
+            return ah
+    for raw in body.splitlines():
+        qn = extract_printed_question_number(raw)
+        if qn is not None:
+            return qn
+    return None
+
+
 def process_one_page(
     image_path: Path,
     out_dir: Path,
@@ -440,6 +825,7 @@ def process_one_page(
     type_: Optional[str],
     difficulty: Optional[str],
     explanation_priority: bool,
+    foreign_answer_split: bool,
 ) -> Tuple[bool, str]:
     stem = image_path.stem
     # 이미 문항 분할 산출물이 존재하면 Mathpix 재호출을 피한다.
@@ -468,15 +854,20 @@ def process_one_page(
             line_data,
             page_width=data.get("image_width") if isinstance(data.get("image_width"), int) else None,
             page_height=data.get("image_height") if isinstance(data.get("image_height"), int) else None,
+            foreign_answer_split=foreign_answer_split,
         )
         if isinstance(line_data, list)
         else []
     )
     if explanation_priority:
         segments = filter_segments_for_explanations(segments)
+    # 5차: 해설 필터 후에도 동일 번호·유사 본문 중복이 남을 수 있어 전역 병합
+    segments = merge_duplicate_owner_segments_global(segments)
+    if force:
+        clear_stem_problem_outputs(out_dir, stem)
 
     if len(segments) <= 1:
-        bbox = union_bboxes([b for s in segments for b in s.boxes]) if segments else None
+        bbox = union_bboxes([p.bbox for s in segments for p in s.pieces if p.bbox]) if segments else None
         if bbox is None and isinstance(line_data, list):
             boxes: List[Tuple[int, int, int, int]] = []
             for line in line_data:
@@ -489,7 +880,9 @@ def process_one_page(
         if segments:
             merged_lines: List[str] = []
             for seg in segments:
-                merged_lines.extend(seg.text_lines)
+                for p in seg.pieces:
+                    if (p.text or "").strip():
+                        merged_lines.append(p.text)
             body = "\n\n".join(merged_lines)
         else:
             body = full_text
@@ -512,7 +905,7 @@ def process_one_page(
             md_path,
             stem=stem,
             problem_index=idx,
-            printed=segments[0].printed_number if segments else None,
+            printed=infer_printed_number_for_output(segments[0] if segments else None, body),
             source_page=image_path.name,
             body=body,
             confidence=conf_f,
@@ -528,17 +921,18 @@ def process_one_page(
         md_path = out_dir / f"{stem}_problem{i:02d}.md"
         if md_path.exists() and png_path.exists() and not force:
             continue
-        ubox = union_bboxes(seg.boxes)
+        boxes_list = [p.bbox for p in seg.pieces if p.bbox]
+        ubox = union_bboxes([b for b in boxes_list if b])
         if not ubox:
             return False, f"{stem} 문항 {i}: bbox 없음"
         crop = crop_with_padding(work, ubox, padding_ratio)
         crop.save(png_path)
-        body = "\n\n".join(seg.text_lines).strip()
+        body = segment_join_body(seg)
         write_problem_md(
             md_path,
             stem=stem,
             problem_index=i,
-            printed=seg.printed_number,
+            printed=infer_printed_number_for_output(seg, body),
             source_page=image_path.name,
             body=body,
             confidence=conf_f,
@@ -575,6 +969,11 @@ def main() -> int:
         action="store_true",
         help="해설 우선 필터를 끄고 모든 세그먼트를 저장",
     )
+    parser.add_argument(
+        "--no-foreign-answer-split",
+        action="store_true",
+        help="3차: 타 문항 [정답] 줄에서의 강제 분할을 끔 (기본: 켜짐)",
+    )
     args = parser.parse_args()
 
     if not args.input.is_dir():
@@ -588,7 +987,11 @@ def main() -> int:
         return 1
 
     workers = max(1, min(int(args.max_workers), MAX_WORKERS_CAP))
-    print(f"[시작] 페이지 {len(images)}장, workers={workers}, 출력={args.output}")
+    foreign_split = not args.no_foreign_answer_split
+    print(
+        f"[시작] 페이지 {len(images)}장, workers={workers}, 출력={args.output}, "
+        f"foreign_answer_split={foreign_split}"
+    )
 
     results: List[Tuple[str, bool]] = []
     if workers <= 1:
@@ -602,6 +1005,7 @@ def main() -> int:
                 type_=args.type_,
                 difficulty=args.difficulty,
                 explanation_priority=not args.no_explanation_priority,
+                foreign_answer_split=foreign_split,
             )
             results.append((msg, ok))
             print(msg)
@@ -618,6 +1022,7 @@ def main() -> int:
                     type_=args.type_,
                     difficulty=args.difficulty,
                     explanation_priority=not args.no_explanation_priority,
+                    foreign_answer_split=foreign_split,
                 ): img
                 for img in images
             }

@@ -58,6 +58,10 @@
 - [x] 참고자료 전체 반영 강화: 태그 미지정 시에도 교재 md 전체를 기본 후보로 주입(`maxItems=12`)
 - [x] 참고용 문제 폴더 전체 OCR 완료: PDF 16건을 자동 변환(PDF→PNG) 후 `교재 참고자료` md 자산으로 생성
 - [x] 교재 1페이지 다문항: `scripts/textbook_page_split_mathpix.py`(bbox 크롭·문항 텍스트 분리) + `textbook:build-reference`의 PDF 분기에 자동 연동
+- [x] 교재 OCR 실험 산출 정리: 루트 `tmp_*` 대신 `scratch/ocr-mapping-runs/` 스테이징 + `parseMetaFromRelativePath`에서 파일명을 단원/유형/난이도 깊이에서 제외(2단 PDF 입력 시 유형 폴더는 stem)
+- [x] 교재 참고자료 트리 감사(`textbook:audit-tree`)·구버전 경로 정규화 스크립트(`textbook:normalize-ref`) 및 실데이터 stem 반영
+- [x] 분할 번호 보강: `infer_printed_number_for_output`로 `printedNumber n/a` 축소(세그먼트 owner→정답 헤더→문항 시작 패턴 fallback)
+- [~] 잔여 고분할(page64/page79): 4차(머리말·인접 병합·인접 dedupe) + **5차**(동일 번호·유사 본문 전역 union-find 병합, 병합 시 piece 중복 제거, `--force` 시 stem orphan 삭제)까지 반영. 샘플 수치는 Mathpix 전체 `--force` 재실행 후 `page64` 문항 수·`audit_textbook_split_md`로 재확인
 
 ## 최근 완료 작업 (요약)
 

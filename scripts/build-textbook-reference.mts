@@ -46,10 +46,39 @@ async function walkImages(dir: string, out: string[]) {
 
 function parseMetaFromRelativePath(relImagePath: string) {
   const normalized = relImagePath.replace(/\\/g, "/");
-  const parts = normalized.split("/");
-  const unit = parts[0] || "미분류단원";
-  const type = parts[1] || "미분류유형";
-  const difficulty = parts[2] || "미분류난이도";
+  const parts = normalized.split("/").filter((p) => p.length > 0);
+  if (parts.length === 0) {
+    return { unit: "미분류단원", type: "미분류유형", difficulty: "미분류난이도" };
+  }
+  const last = parts[parts.length - 1]!;
+  const isFile = SOURCE_EXT.test(last);
+  const fileStem = isFile ? path.parse(last).name : "";
+  const dirParts = isFile ? parts.slice(0, -1) : parts;
+
+  let unit = "미분류단원";
+  let type = "미분류유형";
+  let difficulty = "미분류난이도";
+
+  if (dirParts.length >= 3) {
+    unit = dirParts[0]!;
+    type = dirParts[1]!;
+    difficulty = dirParts[2]!;
+  } else if (dirParts.length === 2) {
+    unit = dirParts[0]!;
+    type = dirParts[1]!;
+    difficulty = "미분류난이도";
+  } else if (dirParts.length === 1) {
+    unit = dirParts[0]!;
+    if (isFile && fileStem) {
+      type = fileStem;
+      difficulty = "미분류난이도";
+    }
+  } else if (isFile && fileStem) {
+    unit = "미분류단원";
+    type = fileStem;
+    difficulty = "미분류난이도";
+  }
+
   return { unit, type, difficulty };
 }
 
