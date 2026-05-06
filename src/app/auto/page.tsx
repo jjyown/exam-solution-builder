@@ -58,12 +58,7 @@ export default function AutoPipelinePage() {
   const [elapsed, setElapsed] = useState(0);
   const [examName, setExamName] = useState('');
   const [questionNo, setQuestionNo] = useState('');
-  const [model, setModel] = useState<'gemini' | 'openai'>('gemini');
-  const [topK, setTopK] = useState(3);
   const [maxRetries, setMaxRetries] = useState(2);
-  const [running, setRunning] = useState(false);
-  const [result, setResult] = useState<PipelineResponse | null>(null);
-  const [elapsed, setElapsed] = useState(0);
   const [showTrace, setShowTrace] = useState(false);
 
   const handleFileUpload = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
