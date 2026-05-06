@@ -346,6 +346,41 @@ export default function AutoPipelinePage() {
     void navigator.clipboard.writeText(md);
   }
 
+  async function downloadDocx(scope: 'active' | 'all') {
+    if (!result) return;
+    const runs =
+      scope === 'all'
+        ? (result.runs ?? []).filter((r) => r.parsed)
+        : activeRun?.parsed
+          ? [activeRun]
+          : [];
+    if (runs.length === 0) return;
+    const res = await fetch('/api/auto-pipeline/docx', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        examName: examName || `해설지`,
+        runs: runs.map((r) => ({ questionNo: r.questionNo, parsed: r.parsed })),
+      }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      alert(`DOCX 생성 실패: ${err.error ?? res.statusText}`);
+      return;
+    }
+    const blob = await res.blob();
+    const cd = res.headers.get('content-disposition') ?? '';
+    const filenameMatch = cd.match(/filename="?([^";]+)"?/);
+    const fallback = `${examName || 'explanation'}_${runs.length}q.docx`;
+    const filename = filenameMatch ? decodeURIComponent(filenameMatch[1]) : fallback;
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
   return (
     <div className="mx-auto max-w-6xl p-6">
       <header className="mb-6 flex items-baseline justify-between">
@@ -702,6 +737,7 @@ export default function AutoPipelinePage() {
           onSaveFeedback={saveFeedback}
           onDownloadJson={downloadJson}
           onCopyMd={copyAsMarkdown}
+          onDownloadDocx={downloadDocx}
         />
       )}
     </div>
@@ -723,12 +759,22 @@ function ResultsSection(props: {
   onSaveFeedback: () => void;
   onDownloadJson: () => void;
   onCopyMd: () => void;
+  onDownloadDocx: (scope: 'active' | 'all') => void;
 }) {
   const { result, activeIdx, onActiveIdx } = props;
   const runs = result.runs ?? [];
   const isMulti = runs.length > 1;
   const successCount = runs.filter((r) => r.parsed).length;
   const active = runs[activeIdx] ?? runs[0];
+  const [docxBusy, setDocxBusy] = useState<null | 'active' | 'all'>(null);
+  async function handleDocx(scope: 'active' | 'all') {
+    setDocxBusy(scope);
+    try {
+      await props.onDownloadDocx(scope);
+    } finally {
+      setDocxBusy(null);
+    }
+  }
 
   // 응답이 최상위 error만 있는 경우 (예: invalid body)
   if (!active && result.error) {
@@ -754,13 +800,23 @@ function ResultsSection(props: {
                 ? ` · ${result.partialFailures}개 검수 필요`
                 : ''}
             </p>
-            {result.extracted && (
-              <span className="text-[11px] text-indigo-800">
-                추출: 총 {result.extracted.totalQuestions}문항 ·
-                {' '}처리 {result.extracted.selectedNumbers.join(', ')} ·
-                {' '}소스 {result.extracted.source}
-              </span>
-            )}
+            <div className="flex items-center gap-2">
+              {result.extracted && (
+                <span className="text-[11px] text-indigo-800">
+                  추출: 총 {result.extracted.totalQuestions}문항 ·
+                  {' '}처리 {result.extracted.selectedNumbers.join(', ')} ·
+                  {' '}소스 {result.extracted.source}
+                </span>
+              )}
+              <button
+                onClick={() => handleDocx('all')}
+                disabled={successCount === 0 || docxBusy !== null}
+                className="rounded-md border border-indigo-700 bg-indigo-700 px-3 py-1 text-[11px] font-semibold text-white hover:bg-indigo-800 disabled:cursor-not-allowed disabled:opacity-50"
+                title="성공한 문항을 한 DOCX 파일로 묶어서 다운로드"
+              >
+                {docxBusy === 'all' ? 'DOCX 생성 중…' : `전체 DOCX (${successCount}문항)`}
+              </button>
+            </div>
           </div>
           {/* 문항 탭 */}
           <div className="mt-2 flex flex-wrap gap-1">
@@ -792,6 +848,14 @@ function ResultsSection(props: {
               결과 {active.parsed ? '✓' : '✗'}
             </h2>
             <div className="flex gap-1">
+              <button
+                onClick={() => handleDocx('active')}
+                disabled={!active.parsed || docxBusy !== null}
+                className="rounded border border-emerald-700 bg-emerald-600 px-2 py-1 text-[11px] font-semibold text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-40"
+                title="이 문항을 DOCX로 다운로드"
+              >
+                {docxBusy === 'active' ? 'DOCX…' : 'DOCX'}
+              </button>
               <button
                 onClick={props.onDownloadJson}
                 disabled={!active.parsed}
