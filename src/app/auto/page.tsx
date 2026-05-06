@@ -71,6 +71,18 @@ type RunHistoryRow = {
   reviewed_at: string | null;
 };
 
+type ExtractedQuestionPreview = {
+  number: number;
+  points?: number;
+  preview: string;
+};
+
+type ExtractState =
+  | { status: 'idle' }
+  | { status: 'extracting' }
+  | { status: 'ready'; source: string; pages?: number; questions: ExtractedQuestionPreview[]; rawTextLength: number }
+  | { status: 'error'; error: string };
+
 export default function AutoPipelinePage() {
   const [questionText, setQuestionText] = useState('');
   const [uploadedFile, setUploadedFile] = useState<File | null>(null);
@@ -86,22 +98,81 @@ export default function AutoPipelinePage() {
   const [maxRetries, setMaxRetries] = useState(2);
   const [showTrace, setShowTrace] = useState(false);
   const [activeIdx, setActiveIdx] = useState(0);
+  const [extractState, setExtractState] = useState<ExtractState>({ status: 'idle' });
+
+  // base64 인코딩 후 JSON으로 보내므로 4MB 정도가 안전한 한계 (1MB body * ~1.37 인코딩 오버헤드 + JSON 래핑)
+  // Next 16 기본은 1MB body. 큰 PDF는 multipart 또는 페이지 분할 필요.
+  const FILE_SIZE_WARN_MB = 3;
+  const FILE_SIZE_LIMIT_MB = 4.5;
 
   const handleFileUpload = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
-    if (file && (file.type === 'application/pdf' || file.type.startsWith('image/'))) {
-      setUploadedFile(file);
-      setQuestionText(''); // 파일 업로드 시 텍스트 입력 초기화
+    if (!file) return;
+    if (!(file.type === 'application/pdf' || file.type.startsWith('image/'))) {
+      setExtractState({ status: 'error', error: `지원하지 않는 파일 형식: ${file.type || '알 수 없음'}` });
+      return;
     }
+    const sizeMB = file.size / 1024 / 1024;
+    if (sizeMB > FILE_SIZE_LIMIT_MB) {
+      setExtractState({
+        status: 'error',
+        error: `파일 크기 ${sizeMB.toFixed(1)}MB 가 ${FILE_SIZE_LIMIT_MB}MB 한도를 초과합니다. PDF는 페이지를 나누거나, 이미지로 캡처해 업로드하세요.`,
+      });
+      return;
+    }
+    setUploadedFile(file);
+    setQuestionText('');
+    setSelectedQuestions([]);
+    setExtractState({ status: 'idle' });
   }, []);
 
-  const handleQuestionSelect = useCallback((questionIndex: number) => {
-    setSelectedQuestions(prev =>
-      prev.includes(questionIndex)
-        ? prev.filter(i => i !== questionIndex)
-        : [...prev, questionIndex]
+  const handleQuestionSelect = useCallback((questionNumber: number) => {
+    setSelectedQuestions((prev) =>
+      prev.includes(questionNumber) ? prev.filter((i) => i !== questionNumber) : [...prev, questionNumber],
     );
   }, []);
+
+  async function runExtraction() {
+    if (!uploadedFile) return;
+    setExtractState({ status: 'extracting' });
+    try {
+      const fileData = await convertFileToBase64(uploadedFile);
+      const res = await fetch('/api/auto-pipeline/extract', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          fileData,
+          fileName: uploadedFile.name,
+          fileType: uploadedFile.type,
+        }),
+      });
+      const data = await res.json();
+      if (!data.ok) {
+        setExtractState({ status: 'error', error: data.error ?? '추출 실패' });
+        return;
+      }
+      setExtractState({
+        status: 'ready',
+        source: data.source,
+        pages: data.pages,
+        questions: data.questions ?? [],
+        rawTextLength: data.rawTextLength ?? 0,
+      });
+      // 인식된 문항이 있으면 부분 모드 초기 선택을 비워둔다
+      setSelectedQuestions([]);
+    } catch (e) {
+      setExtractState({ status: 'error', error: (e as Error).message });
+    }
+  }
+
+  function selectAllExtracted() {
+    if (extractState.status !== 'ready') return;
+    setSelectedQuestions(extractState.questions.map((q) => q.number));
+  }
+
+  function clearSelection() {
+    setSelectedQuestions([]);
+  }
 
   const convertFileToBase64 = (file: File): Promise<string> => {
     return new Promise((resolve, reject) => {
@@ -126,14 +197,22 @@ export default function AutoPipelinePage() {
   // 이력
   const [history, setHistory] = useState<RunHistoryRow[]>([]);
   const [historyOpen, setHistoryOpen] = useState(false);
+  // Supabase 상태 — 'unknown' | 'ok' | 'no-env' | 'no-table'
+  const [supabaseStatus, setSupabaseStatus] = useState<'unknown' | 'ok' | 'no-env' | 'no-table'>('unknown');
 
   const loadHistory = useCallback(async () => {
     try {
       const res = await fetch('/api/auto-pipeline/feedback?limit=20');
       const data = await res.json();
-      if (data.ok && Array.isArray(data.runs)) setHistory(data.runs);
+      if (Array.isArray(data.runs)) setHistory(data.runs);
+      const sb: string = data.supabase ?? 'unknown';
+      if (sb === 'ok' || sb === 'no-env' || sb === 'no-table') {
+        setSupabaseStatus(sb);
+      } else {
+        setSupabaseStatus('unknown');
+      }
     } catch {
-      /* Supabase 미설정 시 그냥 비워둔다 */
+      /* 무시 */
     }
   }, []);
 
@@ -285,6 +364,23 @@ export default function AutoPipelinePage() {
         </button>
       </header>
 
+      {/* Supabase 셋업 안내 배너 */}
+      {(supabaseStatus === 'no-env' || supabaseStatus === 'no-table') && (
+        <div className="mb-4 rounded-lg border border-amber-300 bg-amber-50 p-3 text-xs text-amber-950">
+          <p className="font-semibold">
+            ⚠ 영속화 비활성 — {supabaseStatus === 'no-env' ? 'Supabase 환경변수 미설정' : 'auto_pipeline_runs 테이블 미생성'}
+          </p>
+          <p className="mt-1 leading-relaxed">
+            지금도 해설은 정상 생성되지만 실행 이력·피드백은 저장되지 않습니다.
+            {supabaseStatus === 'no-env' ? (
+              <> Railway Variables 또는 <code className="rounded bg-amber-100 px-1">.env.local</code>에 <code className="rounded bg-amber-100 px-1">NEXT_PUBLIC_SUPABASE_URL</code>, <code className="rounded bg-amber-100 px-1">SUPABASE_SERVICE_ROLE_KEY</code> 추가 후 재배포.</>
+            ) : (
+              <> Supabase Dashboard → SQL Editor에서 <code className="rounded bg-amber-100 px-1">supabase/auto_pipeline_runs.sql</code> 실행.</>
+            )}
+          </p>
+        </div>
+      )}
+
       {historyOpen && (
         <HistoryPanel rows={history} onPick={(row) => { setQuestionText(row.question_text); setExamName(row.exam_name ?? ''); setQuestionNo(row.question_no ?? ''); }} />
       )}
@@ -339,66 +435,146 @@ export default function AutoPipelinePage() {
               className="block w-full text-sm text-slate-500 file:mr-4 file:rounded-md file:border-0 file:bg-blue-50 file:px-3 file:py-2 file:text-sm file:font-semibold file:text-blue-700 hover:file:bg-blue-100"
               disabled={!!questionText.trim()}
             />
-            {uploadedFile && (
-              <p className="mt-1 text-xs text-green-600">
-                ✓ {uploadedFile.name} ({(uploadedFile.size / 1024 / 1024).toFixed(1)}MB)
-              </p>
-            )}
+            {uploadedFile && (() => {
+              const sizeMB = uploadedFile.size / 1024 / 1024;
+              const warn = sizeMB >= FILE_SIZE_WARN_MB;
+              return (
+                <p className={`mt-1 text-xs ${warn ? 'text-amber-700' : 'text-green-600'}`}>
+                  {warn ? '⚠' : '✓'} {uploadedFile.name} ({sizeMB.toFixed(1)}MB)
+                  {warn ? ' — 큰 파일은 추출/전송이 느릴 수 있습니다.' : ''}
+                </p>
+              );
+            })()}
           </div>
 
-          {/* 해설 모드 선택 */}
+          {/* 파일 업로드 시 — 문항 추출 단계 */}
           {uploadedFile && (
             <div className="mt-3">
-              <label className="block text-xs font-semibold text-slate-700 mb-2">
-                해설 범위 선택
-              </label>
-              <div className="flex gap-4">
-                <label className="flex items-center">
-                  <input
-                    type="radio"
-                    value="full"
-                    checked={explanationMode === 'full'}
-                    onChange={(e) => setExplanationMode(e.target.value as 'full' | 'partial')}
-                    className="mr-2"
-                  />
-                  <span className="text-sm">전체 해설</span>
+              <div className="flex items-center justify-between gap-2">
+                <label className="text-xs font-semibold text-slate-700">
+                  문항 추출
                 </label>
-                <label className="flex items-center">
-                  <input
-                    type="radio"
-                    value="partial"
-                    checked={explanationMode === 'partial'}
-                    onChange={(e) => setExplanationMode(e.target.value as 'full' | 'partial')}
-                    className="mr-2"
-                  />
-                  <span className="text-sm">부분 해설 (문제 선택)</span>
-                </label>
+                <button
+                  type="button"
+                  onClick={runExtraction}
+                  disabled={extractState.status === 'extracting'}
+                  className="rounded-md border border-blue-600 bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-800 hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {extractState.status === 'extracting'
+                    ? '추출 중…'
+                    : extractState.status === 'ready'
+                      ? '다시 추출'
+                      : '문항 추출'}
+                </button>
               </div>
-            </div>
-          )}
 
-          {/* 부분 해설 시 문제 선택 */}
-          {uploadedFile && explanationMode === 'partial' && (
-            <div className="mt-3">
-              <label className="block text-xs font-semibold text-slate-700 mb-2">
-                해설할 문제 선택
-              </label>
-              <div className="grid grid-cols-5 gap-2">
-                {Array.from({ length: 20 }, (_, i) => i + 1).map((num) => (
-                  <label key={num} className="flex items-center">
-                    <input
-                      type="checkbox"
-                      checked={selectedQuestions.includes(num)}
-                      onChange={() => handleQuestionSelect(num)}
-                      className="mr-1"
-                    />
-                    <span className="text-xs">{num}번</span>
-                  </label>
-                ))}
-              </div>
-              <p className="mt-1 text-xs text-slate-500">
-                선택된 문제: {selectedQuestions.length > 0 ? selectedQuestions.join(', ') : '없음'}
-              </p>
+              {extractState.status === 'error' && (
+                <p className="mt-2 rounded border border-rose-300 bg-rose-50 px-2 py-1 text-xs text-rose-900">
+                  ✗ {extractState.error}
+                </p>
+              )}
+
+              {extractState.status === 'ready' && (
+                <div className="mt-2 rounded-md border border-emerald-200 bg-emerald-50 p-2 text-xs text-emerald-950">
+                  <p className="font-semibold">
+                    ✓ {extractState.questions.length}개 문항 인식 ·
+                    {' '}소스 {extractState.source}
+                    {extractState.pages ? ` · ${extractState.pages}페이지` : ''}
+                    {' '}· 텍스트 {extractState.rawTextLength.toLocaleString()}자
+                  </p>
+                  {extractState.questions.length === 0 && (
+                    <p className="mt-1 text-rose-800">
+                      문항 번호를 인식하지 못했습니다. PDF 품질·OCR 결과를 확인하거나,
+                      해설 범위 「전체 해설」로 두고 그냥 실행하면 본문 전체가 1문항으로 처리됩니다.
+                    </p>
+                  )}
+                </div>
+              )}
+
+              {/* 해설 범위 — 추출 후에만 의미 있음 */}
+              {extractState.status === 'ready' && extractState.questions.length > 0 && (
+                <>
+                  <div className="mt-3 flex gap-4">
+                    <label className="flex items-center text-sm text-slate-800">
+                      <input
+                        type="radio"
+                        value="full"
+                        checked={explanationMode === 'full'}
+                        onChange={(e) => setExplanationMode(e.target.value as 'full' | 'partial')}
+                        className="mr-1.5"
+                      />
+                      전체 해설 ({extractState.questions.length}문항)
+                    </label>
+                    <label className="flex items-center text-sm text-slate-800">
+                      <input
+                        type="radio"
+                        value="partial"
+                        checked={explanationMode === 'partial'}
+                        onChange={(e) => setExplanationMode(e.target.value as 'full' | 'partial')}
+                        className="mr-1.5"
+                      />
+                      부분 해설
+                    </label>
+                  </div>
+
+                  {explanationMode === 'partial' && (
+                    <div className="mt-2 rounded-md border border-slate-200 bg-slate-50 p-2">
+                      <div className="mb-1 flex items-center justify-between">
+                        <span className="text-[11px] font-semibold text-slate-700">
+                          인식된 문항 (체크해서 선택)
+                        </span>
+                        <div className="flex gap-1">
+                          <button
+                            type="button"
+                            onClick={selectAllExtracted}
+                            className="rounded border border-slate-300 bg-white px-1.5 py-0.5 text-[10px] font-semibold text-slate-700 hover:bg-slate-100"
+                          >
+                            모두
+                          </button>
+                          <button
+                            type="button"
+                            onClick={clearSelection}
+                            className="rounded border border-slate-300 bg-white px-1.5 py-0.5 text-[10px] font-semibold text-slate-700 hover:bg-slate-100"
+                          >
+                            해제
+                          </button>
+                        </div>
+                      </div>
+                      <div className="grid max-h-48 grid-cols-1 gap-1 overflow-auto sm:grid-cols-2">
+                        {extractState.questions.map((q) => {
+                          const isOn = selectedQuestions.includes(q.number);
+                          return (
+                            <label
+                              key={q.number}
+                              className={`flex cursor-pointer items-start gap-1.5 rounded border p-1.5 text-[11px] ${
+                                isOn ? 'border-indigo-400 bg-indigo-50' : 'border-slate-200 bg-white hover:bg-slate-50'
+                              }`}
+                            >
+                              <input
+                                type="checkbox"
+                                checked={isOn}
+                                onChange={() => handleQuestionSelect(q.number)}
+                                className="mt-0.5"
+                              />
+                              <span>
+                                <span className="font-bold text-slate-900">{q.number}번</span>
+                                {q.points ? <span className="text-slate-500"> [{q.points}점]</span> : null}
+                                <span className="ml-1 text-slate-600">{q.preview}</span>
+                              </span>
+                            </label>
+                          );
+                        })}
+                      </div>
+                      <p className="mt-1 text-[11px] text-slate-600">
+                        선택 {selectedQuestions.length}개
+                        {selectedQuestions.length > 10
+                          ? ' — 한 번에 최대 10문항만 처리됩니다 (앞에서부터)'
+                          : ''}
+                      </p>
+                    </div>
+                  )}
+                </>
+              )}
             </div>
           )}
 
@@ -438,23 +614,43 @@ export default function AutoPipelinePage() {
             </label>
           </div>
 
-          <div className="mt-4 flex gap-2">
-            <button
-              onClick={run}
-              disabled={running || (!questionText.trim() && !uploadedFile)}
-              className="flex-1 rounded-md bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-indigo-700 disabled:cursor-not-allowed disabled:bg-slate-300"
-            >
-              {running ? '처리 중...' : '실행'}
-            </button>
-            <button
-              onClick={retry}
-              disabled={running || (!questionText.trim() && !uploadedFile) || !result}
-              className="rounded-md border border-indigo-600 bg-white px-3 py-2.5 text-sm font-semibold text-indigo-700 hover:bg-indigo-50 disabled:cursor-not-allowed disabled:opacity-50"
-              title="같은 입력으로 다시 호출 (LLM이 다른 결과를 줄 수 있음)"
-            >
-              재시도
-            </button>
-          </div>
+          {/* 실행 가능 여부 */}
+          {(() => {
+            const noInput = !questionText.trim() && !uploadedFile;
+            const partialNoneSelected =
+              !!uploadedFile && explanationMode === 'partial' && selectedQuestions.length === 0;
+            const fullWithoutExtractWarning =
+              !!uploadedFile && extractState.status === 'idle';
+            const disabled = running || noInput || partialNoneSelected;
+            return (
+              <>
+                {(partialNoneSelected || fullWithoutExtractWarning) && (
+                  <p className="mt-3 rounded border border-amber-300 bg-amber-50 px-2 py-1 text-[11px] text-amber-900">
+                    {partialNoneSelected
+                      ? '부분 해설 모드입니다 — 위에서 처리할 문항을 1개 이상 선택하세요.'
+                      : '파일을 업로드했습니다 — 「문항 추출」 버튼으로 인식 결과를 먼저 확인하면 정확합니다. 그냥 실행해도 서버가 자동으로 추출합니다.'}
+                  </p>
+                )}
+                <div className="mt-4 flex gap-2">
+                  <button
+                    onClick={run}
+                    disabled={disabled}
+                    className="flex-1 rounded-md bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-indigo-700 disabled:cursor-not-allowed disabled:bg-slate-300"
+                  >
+                    {running ? '처리 중...' : '실행'}
+                  </button>
+                  <button
+                    onClick={retry}
+                    disabled={disabled || !result}
+                    className="rounded-md border border-indigo-600 bg-white px-3 py-2.5 text-sm font-semibold text-indigo-700 hover:bg-indigo-50 disabled:cursor-not-allowed disabled:opacity-50"
+                    title="같은 입력으로 다시 호출 (LLM이 다른 결과를 줄 수 있음)"
+                  >
+                    재시도
+                  </button>
+                </div>
+              </>
+            );
+          })()}
         </div>
 
         {/* 우측: 안내 + 빠른 통계 */}

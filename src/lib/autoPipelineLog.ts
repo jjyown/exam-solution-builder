@@ -96,10 +96,16 @@ export type RunHistoryRow = {
   reviewed_at: string | null;
 };
 
-/** 최근 실행 이력을 시간 역순으로 가져온다. */
-export async function listRecentRuns(limit = 30): Promise<RunHistoryRow[]> {
+export type ListResult =
+  | { status: "ok"; runs: RunHistoryRow[] }
+  | { status: "no-env" }
+  | { status: "no-table"; error: string }
+  | { status: "error"; error: string };
+
+/** 최근 실행 이력을 시간 역순으로 가져온다. 셋업 상태도 분류해 반환. */
+export async function listRecentRunsWithStatus(limit = 30): Promise<ListResult> {
   const client = getSupabaseServiceClient();
-  if (!client) return [];
+  if (!client) return { status: "no-env" };
 
   const { data, error } = await client
     .from(TABLE)
@@ -109,6 +115,17 @@ export async function listRecentRuns(limit = 30): Promise<RunHistoryRow[]> {
     .order("created_at", { ascending: false })
     .limit(limit);
 
-  if (error || !data) return [];
-  return data as RunHistoryRow[];
+  if (error) {
+    if (/schema cache/i.test(error.message) || /relation .* does not exist/i.test(error.message)) {
+      return { status: "no-table", error: error.message };
+    }
+    return { status: "error", error: error.message };
+  }
+  return { status: "ok", runs: (data ?? []) as RunHistoryRow[] };
+}
+
+/** 하위 호환 — 기존 호출자용 */
+export async function listRecentRuns(limit = 30): Promise<RunHistoryRow[]> {
+  const r = await listRecentRunsWithStatus(limit);
+  return r.status === "ok" ? r.runs : [];
 }

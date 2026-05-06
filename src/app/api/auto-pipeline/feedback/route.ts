@@ -7,7 +7,7 @@
  * ────────────────────────────────────────────────────────────────────────────
  */
 import { NextResponse } from "next/server";
-import { listRecentRuns, recordUserFeedback } from "@/lib/autoPipelineLog";
+import { listRecentRunsWithStatus, recordUserFeedback } from "@/lib/autoPipelineLog";
 
 export async function POST(req: Request) {
   let body: {
@@ -39,6 +39,11 @@ export async function POST(req: Request) {
 export async function GET(req: Request) {
   const url = new URL(req.url);
   const limit = Math.min(100, Math.max(1, Number(url.searchParams.get("limit") || 30)));
-  const rows = await listRecentRuns(limit);
-  return NextResponse.json({ ok: true, runs: rows });
+  const r = await listRecentRunsWithStatus(limit);
+  if (r.status === "ok") {
+    return NextResponse.json({ ok: true, supabase: "ok", runs: r.runs });
+  }
+  // 200 OK로 반환하되 supabase 상태를 명시 (UI가 배너로 안내)
+  const error = "error" in r ? r.error : undefined;
+  return NextResponse.json({ ok: true, supabase: r.status, error, runs: [] });
 }
