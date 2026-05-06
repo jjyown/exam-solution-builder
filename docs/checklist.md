@@ -66,6 +66,11 @@
 - [x] 교재 OCR 참고자료 구축 모듈화: `textbook:build-reference` + `textbookReferenceSelector` + `generate-explanation` 태그 주입(`textbookUnit/type/difficulty`)
 - [x] 전체 참고자료 반영: 태그 미지정 시에도 교재 참고 md를 기본 후보로 주입하도록 fallback 활성화
 - [x] 교재 다문항 페이지: Mathpix `line_data` bbox 기반 `textbook:split-pages`로 문항별 png+md 1:1 분할(Pillow)
+- [ ] 교재 PDF 다문항: `textbook:build-reference`에서 split script가 자동 실행되어 `*_problemNN` 산출물이 생성되는지(샘플 PDF) 검증
+- [x] 샘플 검증(확률과통계/여러가지 순열): `tmp_split_output`에 `*_problemNN.md/png` 쌍 생성 확인 (`md_count=403`, `png_count=403`)
+- [ ] 다문항 분할 튜닝: 후반 페이지 과분할(예: page62/63) 억제를 위한 번호 인식 조건(좌표/간격/타입) 강화
+- [x] 다문항 분할 튜닝 1차 적용: 번호 인식에 line type/좌표/번호 진행성 필터 + 세그먼트 상한 폴백 반영
+- [ ] 튜닝 재검증 2차: `tmp_split_output_tuned`에서 잔여 고분할 페이지(page64=8, page79=7) 원인 분석 후 추가 규칙 보강
 - [x] 참고용 문제 폴더 실데이터 OCR 완료: PDF 16건을 Markdown 참고자료로 변환(성공 16, 실패 0)
 - [ ] DOCX 보내기 후: 문제 박스 수식 굵기·해설 OMML 모양·보기 잘림·페이지 끊김 — `05` §3 체크리스트로 육안 확인
 - [x] `npm run build` 통과 (Turbopack NFT 경고는 별도 이슈)

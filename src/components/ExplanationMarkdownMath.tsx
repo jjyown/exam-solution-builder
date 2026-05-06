@@ -25,6 +25,9 @@ const katexOptions = { strict: false, throwOnError: false, errorColor: "#b91c1c"
  */
 function normalizeMathDelimitersForPreview(source: string): string {
   let s = normalizeLatexSourceText(source);
+  // 축약 분수 표기(\frac12)를 명시 분수(\frac{1}{2})로 보정해 렌더 안정성을 높인다.
+  s = s.replace(/\\frac(?!\{)\s*([A-Za-z0-9])\s*([A-Za-z0-9])(?![A-Za-z0-9])/g, "\\frac{$1}{$2}");
+  s = s.replace(/#wfrac\b/gi, "\\frac");
   s = s.replace(/\\\(([\s\S]*?)\\\)/g, (_m, inner: string) => `$${inner}$`);
   s = s.replace(/\\\[([\s\S]*?)\\\]/g, (_m, inner: string) => `$$${inner}$$`);
   return s;

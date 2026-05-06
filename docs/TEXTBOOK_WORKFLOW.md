@@ -21,6 +21,7 @@ npm run textbook:build-reference -- --input "./교재 입력" --output "./교재
 ```
 
 - 생성 산출: `./교재 참고자료/<단원>/<유형>/<난이도>/*.md`
+- 입력이 PDF이면: 페이지를 Mathpix `line_data`로 문항 구간 분할한 뒤, `*_problemNN.png`+`*_problemNN.md`로 생성된다.
 - 각 md에는 frontmatter(`unit/type/difficulty`) + OCR 본문이 저장된다.
 - 기본 동작: 같은 경로의 md가 이미 있으면 **스킵**
 - 강제 재OCR: `--force`
@@ -33,12 +34,14 @@ npm run textbook:build-reference -- --input "./교재 입력" --output "./교재
 
 - **문제**: `1페이지 = 이미지 1장`인데 문항은 3~4개면, 파일명 번호만으로 이미지↔md 1:1 매핑이 깨진다.
 - **해결**: Mathpix `include_line_data`로 줄 단위 `cnt`(바운딩 박스)를 받아, 문항 시작 패턴(`1.`, `22)` 등)마다 구간을 나누고 **구간별 bbox 합집합**으로 페이지 이미지를 크롭한다.
-- **의존성**: `pip install -r scripts/requirements-textbook-ocr.txt` (Pillow)
+- **의존성**: `pip install pillow` (Pillow)
 - **실행 예**:
 
 ```bash
 npm run textbook:split-pages -- --input "./페이지이미지폴더" --output "./문항별산출"
 ```
+
+- (참고) `textbook:build-reference`는 PDF에서 이 분할을 자동 적용하므로, `split-pages`는 이미 페이지 PNG로 렌더되어 있는 경우에만 유용하다.
 
 - **옵션**: `--force`(덮어쓰기), `--padding 0.02`(크롭 여백 비율), `--max-workers 3`(페이지 병렬, 최대 5), `--unit` / `--type` / `--difficulty`(md frontmatter 보강)
 - **산출**: `{페이지파일명_stem}_problem01.png` + 동명 `.md` … (한 페이지에서 검출된 문항 수만큼)

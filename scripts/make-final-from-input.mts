@@ -1,12 +1,10 @@
 import { spawnSync } from "node:child_process";
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import JSZip from "jszip";
 
 const DRAFT_WORK_ROOT = "해설 작업중";
 const MERGED_NAME = "합본_편집용.md";
 const IMAGE_EXT = /\.(png|jpe?g|webp)$/i;
-const MAX_ZIP_NEST = 5;
 
 type Cli = {
   inputDir: string;
@@ -29,6 +27,7 @@ type DraftItem = {
   answer: string;
   explanation: string;
   problemImageRel?: string;
+  problemDiagramRels?: string[];
 };
 
 type ContentIssue = {
@@ -36,6 +35,29 @@ type ContentIssue = {
   severity: "fatal" | "warn";
   code: string;
   message: string;
+};
+
+type QuestionImage = {
+  sourceLabel: string;
+  ext: string;
+  buffer: Buffer;
+};
+
+type QuestionVisuals = {
+  byQuestion: Map<number, { main?: QuestionImage; diagrams: QuestionImage[] }>;
+  fallbackMain: QuestionImage[];
+};
+
+type GateHooks = {
+  runContentGate: (drafts: Array<{ questionNo: number; answer: string; explanation: string }>) => ContentIssue[];
+  runCompletenessGate: (
+    drafts: Array<{ questionNo: number; answer: string; explanation: string }>,
+    questionVisuals: QuestionVisuals,
+  ) => ContentIssue[];
+  decideExplanationImagePolicy: (
+    drafts: Array<{ questionNo: number; answer: string; explanation: string }>,
+    questionVisuals: QuestionVisuals,
+  ) => Array<{ needExtraExplanationImage: boolean }>;
 };
 
 type PythonMathGateResult = {
@@ -59,7 +81,37 @@ function normalizeMathDelimiters(input: string): string {
   // 닫는 수식 구분자 직전 마침표 제거 (예: ... 1.$$ / ... x.$)
   out = out.replace(/\.(\s*\$\$)/g, "$1");
   out = out.replace(/\.(\s*\$)(?=\s|$)/g, "$1");
+  // 인라인 수식 뒤 문장 끝 마침표 제거 (예: "... $\frac12$." -> "... $\frac12$")
+  out = out.replace(/(\$[^$\n]+\$)\s*\.(?=\s|$)/g, "$1");
   return out;
+}
+
+function compactLongMathEqualityLine(line: string): string {
+  const trimmed = line.trim();
+  const blockMath = trimmed.match(/^\$\$([\s\S]+)\$\$$/);
+  if (!blockMath?.[1]) return line;
+  const inner = blockMath[1].trim();
+  const eqCount = (inner.match(/=/g) ?? []).length;
+  if (inner.length < 150 || eqCount < 6) return line;
+  const parts = inner.split("=").map((x) => x.trim()).filter(Boolean);
+  if (parts.length < 7) return line;
+  const head = parts.slice(0, 2).join(" = ");
+  const tail = parts.slice(-2).join(" = ");
+  return `$$${head} = \\cdots = ${tail}$$`;
+}
+
+function pruneVerboseExplanation(explanation: string): string {
+  const lines = explanation
+    .split(/\r?\n/)
+    .map((x) => x.trim())
+    .filter((x, idx, arr) => !(x === "" && arr[idx - 1] === ""));
+
+  const narrationOnly = /^(먼저|정리하면|따라서|이제|각 경우에 대해|문제에서 주어진 범위는|다른 방법으로|마찬가지로)[,:\s]*$/;
+  const reduced = lines
+    .filter((line) => !narrationOnly.test(line))
+    .map((line) => compactLongMathEqualityLine(line));
+
+  return reduced.join("\n").trim();
 }
 
 function parseArgs(argv: string[]): Cli {
@@ -181,285 +233,21 @@ function parseDraftBody(raw: string): { answer: string; explanation: string } {
   }
   if (!explanation) explanation = text;
   explanation = normalizeMathDelimiters(explanation);
+  explanation = pruneVerboseExplanation(explanation);
 
   return { answer, explanation };
 }
 
-function normalizeChoiceToken(text: string): string {
-  const t = text.trim();
-  const circled = t.match(/[①②③④⑤]/)?.[0];
-  if (circled) return circled;
-  const num = t.match(/\b([1-5])\b/)?.[1];
-  if (num) return ["", "①", "②", "③", "④", "⑤"][Number(num)] ?? t;
-  return t;
-}
-
-function evaluateNumericExpression(raw: string): number | null {
-  const expr = raw
-    .replace(/[×x]/g, "*")
-    .replace(/÷/g, "/")
-    .replace(/\s+/g, "")
-    .trim();
-  if (!expr) return null;
-  if (!/^[0-9+\-*/().]+$/.test(expr)) return null;
-  try {
-    const v = Function(`"use strict"; return (${expr});`)();
-    if (typeof v !== "number" || !Number.isFinite(v)) return null;
-    return v;
-  } catch {
-    return null;
+async function cleanupGeneratedQuestionAssets(workdirAbs: string): Promise<void> {
+  const entries = await fs.readdir(workdirAbs, { withFileTypes: true });
+  for (const e of entries) {
+    if (!e.isFile()) continue;
+    if (!/^문항\d+_(문제원본|관련그림)\d*/.test(e.name)) continue;
+    const full = path.join(workdirAbs, e.name);
+    await fs.unlink(full).catch(() => {});
   }
 }
 
-type QuestionImage = {
-  sourceLabel: string;
-  ext: string;
-  buffer: Buffer;
-};
-
-async function extractImagesFromZipBuffer(
-  zipBuf: Buffer,
-  sourceLabel: string,
-  depth: number,
-): Promise<QuestionImage[]> {
-  if (depth > MAX_ZIP_NEST) return [];
-  const zip = await JSZip.loadAsync(zipBuf);
-  const allNames = Object.keys(zip.files)
-    .filter((n) => !zip.files[n]?.dir)
-    .sort((a, b) => a.localeCompare(b, "ko"));
-
-  let manifestMainFiles: Set<string> | null = null;
-  const manifestEntry = zip.file("manifest.json");
-  if (manifestEntry) {
-    try {
-      const raw = await manifestEntry.async("string");
-      const obj = JSON.parse(raw) as { items?: Array<{ file?: string }> };
-      const files = (obj.items ?? [])
-        .map((x) => String(x.file ?? "").trim())
-        .filter(Boolean);
-      if (files.length > 0) manifestMainFiles = new Set(files);
-    } catch {
-      // ignore manifest parse errors
-    }
-  }
-
-  const out: QuestionImage[] = [];
-  for (const name of allNames) {
-    const base = path.basename(name);
-    if (IMAGE_EXT.test(base)) {
-      if (manifestMainFiles && !manifestMainFiles.has(base)) continue;
-      const f = zip.file(name);
-      if (!f) continue;
-      const buffer = Buffer.from(await f.async("uint8array"));
-      out.push({
-        sourceLabel: `${sourceLabel}::${name}`,
-        ext: path.extname(base).toLowerCase() || ".png",
-        buffer,
-      });
-      continue;
-    }
-    if (/\.zip$/i.test(base)) {
-      const f = zip.file(name);
-      if (!f) continue;
-      const nestedBuf = Buffer.from(await f.async("uint8array"));
-      const nested = await extractImagesFromZipBuffer(
-        nestedBuf,
-        `${sourceLabel}>${name}`,
-        depth + 1,
-      );
-      out.push(...nested);
-    }
-  }
-  return out;
-}
-
-async function collectQuestionImages(inputAbs: string): Promise<QuestionImage[]> {
-  const out: QuestionImage[] = [];
-  async function walk(dir: string) {
-    let entries;
-    try {
-      entries = await fs.readdir(dir, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    entries.sort((a, b) => a.name.localeCompare(b.name, "ko"));
-    for (const e of entries) {
-      if (e.name.startsWith(".")) continue;
-      const full = path.join(dir, e.name);
-      if (e.isDirectory()) {
-        await walk(full);
-        continue;
-      }
-      if (IMAGE_EXT.test(e.name)) {
-        const buffer = await fs.readFile(full);
-        out.push({
-          sourceLabel: path.relative(process.cwd(), full),
-          ext: path.extname(e.name).toLowerCase() || ".png",
-          buffer,
-        });
-        continue;
-      }
-      if (/\.zip$/i.test(e.name)) {
-        try {
-          const buf = await fs.readFile(full);
-          const nested = await extractImagesFromZipBuffer(buf, path.relative(process.cwd(), full), 0);
-          out.push(...nested);
-        } catch {
-          // ignore broken zips
-        }
-      }
-    }
-  }
-  await walk(inputAbs);
-  return out;
-}
-
-function checkArithmeticEqualities(questionNo: number, explanation: string): ContentIssue[] {
-  const issues: ContentIssue[] = [];
-  const lines = explanation.split(/\r?\n/);
-  for (const line of lines) {
-    const cleaned = line.replace(/\$/g, "").trim();
-    if (!cleaned.includes("=")) continue;
-    if ((cleaned.match(/=/g) ?? []).length !== 1) continue;
-    if (/[A-Za-z가-힣\\_^]/.test(cleaned)) continue;
-    const [lhsRaw, rhsRaw] = cleaned.split("=");
-    if (!lhsRaw || !rhsRaw) continue;
-    const lhs = evaluateNumericExpression(lhsRaw);
-    const rhs = evaluateNumericExpression(rhsRaw);
-    if (lhs == null || rhs == null) continue;
-    if (Math.abs(lhs - rhs) > 1e-9) {
-      issues.push({
-        questionNo,
-        severity: "fatal",
-        code: "E_ARITH_MISMATCH",
-        message: `산술 등식 불일치 감지: ${cleaned} (계산값 ${lhs} != ${rhs})`,
-      });
-    }
-  }
-  return issues;
-}
-
-function checkChainEqualities(questionNo: number, explanation: string): ContentIssue[] {
-  const issues: ContentIssue[] = [];
-  const lines = explanation.split(/\r?\n/);
-  for (const line of lines) {
-    const cleaned = line.replace(/\$/g, "").trim();
-    const eqCount = (cleaned.match(/=/g) ?? []).length;
-    if (eqCount < 2) continue;
-    if (/[A-Za-z가-힣\\_^]/.test(cleaned)) continue;
-    const parts = cleaned.split("=").map((x) => x.trim()).filter(Boolean);
-    if (parts.length < 3) continue;
-    const values = parts.map((p) => evaluateNumericExpression(p));
-    if (values.some((v) => v == null)) continue;
-    for (let i = 1; i < values.length; i += 1) {
-      const prev = values[i - 1]!;
-      const cur = values[i]!;
-      if (Math.abs(prev - cur) > 1e-9) {
-        issues.push({
-          questionNo,
-          severity: "fatal",
-          code: "E_CHAIN_EQ_MISMATCH",
-          message: `체인 등식 불일치 감지: ${cleaned} (항 ${i}와 ${i + 1} 불일치)`,
-        });
-        break;
-      }
-    }
-  }
-  return issues;
-}
-
-function checkInequalityChains(questionNo: number, explanation: string): ContentIssue[] {
-  const issues: ContentIssue[] = [];
-  const lines = explanation.split(/\r?\n/);
-  const opRe = /(<=|>=|<|>)/g;
-  for (const line of lines) {
-    const cleaned = line.replace(/\$/g, "").trim();
-    const ops = cleaned.match(opRe) ?? [];
-    if (ops.length < 2) continue;
-    if (/[A-Za-z가-힣\\_^]/.test(cleaned)) continue;
-
-    const parts = cleaned.split(opRe).map((x) => x.trim()).filter(Boolean);
-    // parts = [expr0, op0, expr1, op1, expr2, ...]
-    if (parts.length < 5 || parts.length % 2 === 0) continue;
-
-    let failed = false;
-    for (let i = 0; i + 2 < parts.length; i += 2) {
-      const lhsExpr = parts[i]!;
-      const op = parts[i + 1]!;
-      const rhsExpr = parts[i + 2]!;
-      const lhs = evaluateNumericExpression(lhsExpr);
-      const rhs = evaluateNumericExpression(rhsExpr);
-      if (lhs == null || rhs == null) {
-        failed = false;
-        break;
-      }
-      const ok =
-        op === "<" ? lhs < rhs
-        : op === "<=" ? lhs <= rhs
-        : op === ">" ? lhs > rhs
-        : op === ">=" ? lhs >= rhs
-        : true;
-      if (!ok) {
-        issues.push({
-          questionNo,
-          severity: "fatal",
-          code: "E_INEQ_CHAIN_MISMATCH",
-          message: `부등식 체인 불일치 감지: ${cleaned} (비교 ${lhs} ${op} ${rhs} 실패)`,
-        });
-        failed = true;
-        break;
-      }
-    }
-    if (failed) continue;
-  }
-  return issues;
-}
-
-function runContentGate(drafts: DraftItem[]): ContentIssue[] {
-  const issues: ContentIssue[] = [];
-  const banned = /(풀 수 없|알 수 없|판독 불가|모르겠|추정됩니다|화질)/i;
-  const conclusionRe = /정답은?\s*([①②③④⑤1-5])/g;
-  for (const d of drafts) {
-    const exp = d.explanation.trim();
-    if (exp.length < 40) {
-      issues.push({
-        questionNo: d.questionNo,
-        severity: "fatal",
-        code: "E_CONTENT_SHORT",
-        message: "해설 길이가 너무 짧아 내용 검증이 불충분합니다.",
-      });
-    }
-    if (banned.test(exp)) {
-      issues.push({
-        questionNo: d.questionNo,
-        severity: "fatal",
-        code: "E_CONTENT_BANNED_PHRASE",
-        message: "포기/회피 문구가 감지되었습니다.",
-      });
-    }
-    const answerNorm = normalizeChoiceToken(d.answer);
-    let m: RegExpExecArray | null = null;
-    const conclusionTokens: string[] = [];
-    while ((m = conclusionRe.exec(exp)) !== null) {
-      if (m[1]) conclusionTokens.push(normalizeChoiceToken(m[1]));
-    }
-    if (conclusionTokens.length > 0) {
-      const last = conclusionTokens[conclusionTokens.length - 1]!;
-      if (answerNorm && last && answerNorm !== last) {
-        issues.push({
-          questionNo: d.questionNo,
-          severity: "fatal",
-          code: "E_ANSWER_MISMATCH",
-          message: `해설 결론(${last})과 빠른 정답(${answerNorm})이 불일치합니다.`,
-        });
-      }
-    }
-    issues.push(...checkArithmeticEqualities(d.questionNo, exp));
-    issues.push(...checkChainEqualities(d.questionNo, exp));
-    issues.push(...checkInequalityChains(d.questionNo, exp));
-  }
-  return issues;
-}
 
 function runPythonMathGate(drafts: DraftItem[]): PythonMathGateResult {
   const scriptPath = path.join(process.cwd(), "tools", "math_expression_gate.py");
@@ -521,7 +309,8 @@ function runPythonMathGate(drafts: DraftItem[]): PythonMathGateResult {
 async function rewriteMergedForExport(
   workdirAbs: string,
   enableContentGate: boolean,
-  questionImages: QuestionImage[],
+  questionVisuals: QuestionVisuals,
+  hooks: GateHooks,
 ): Promise<void> {
   const entries = await fs.readdir(workdirAbs, { withFileTypes: true });
   const drafts: DraftItem[] = [];
@@ -542,9 +331,21 @@ async function rewriteMergedForExport(
 
   if (drafts.length === 0) return;
   drafts.sort((a, b) => a.questionNo - b.questionNo);
+  if (questionVisuals.byQuestion.size > 0) {
+    const allowed = new Set(questionVisuals.byQuestion.keys());
+    const filtered = drafts.filter((d) => allowed.has(d.questionNo));
+    if (filtered.length > 0 && filtered.length !== drafts.length) {
+      const removed = drafts.filter((d) => !allowed.has(d.questionNo)).map((d) => d.questionNo);
+      console.warn(`[입력 매핑] manifest에 없는 문항 초안 제외: ${removed.join(", ")}`);
+      drafts.length = 0;
+      drafts.push(...filtered);
+    }
+  }
+  await cleanupGeneratedQuestionAssets(workdirAbs);
 
   if (enableContentGate) {
-    const issues = runContentGate(drafts);
+    const issues = hooks.runContentGate(drafts);
+    issues.push(...hooks.runCompletenessGate(drafts, questionVisuals));
     const pyGate = runPythonMathGate(drafts);
     if (pyGate.ok && pyGate.sympyAvailable && pyGate.issues.length > 0) {
       issues.push(...pyGate.issues);
@@ -569,32 +370,53 @@ async function rewriteMergedForExport(
       process.exit(42);
     }
   }
+  const imagePolicy = hooks.decideExplanationImagePolicy(drafts, questionVisuals);
+  const policyNeeded = imagePolicy.filter((x) => x.needExtraExplanationImage).length;
+  console.log(`[이미지 정책] 해설 보조 이미지 권장 문항: ${policyNeeded}/${imagePolicy.length}`);
 
   for (let i = 0; i < drafts.length; i += 1) {
     const d = drafts[i]!;
-    const img = questionImages[i];
-    if (!img) continue;
+    const fromManifest = questionVisuals.byQuestion.get(d.questionNo);
+    const img = fromManifest?.main ?? questionVisuals.fallbackMain[i];
+    const diagrams = fromManifest?.diagrams ?? [];
+    if (!img && diagrams.length === 0) continue;
     const qNo = String(d.questionNo).padStart(2, "0");
-    const ext = img.ext.match(IMAGE_EXT)?.[0] ?? ".png";
-    const fileName = `문항${qNo}_문제원본${ext}`;
-    const abs = path.join(workdirAbs, fileName);
-    await fs.writeFile(abs, img.buffer);
-    d.problemImageRel = `./${fileName}`;
+    if (img) {
+      const ext = img.ext.match(IMAGE_EXT)?.[0] ?? ".png";
+      const fileName = `문항${qNo}_문제원본${ext}`;
+      const abs = path.join(workdirAbs, fileName);
+      await fs.writeFile(abs, img.buffer);
+      d.problemImageRel = `./${fileName}`;
+    }
+    if (diagrams.length > 0) {
+      d.problemDiagramRels = [];
+      for (let k = 0; k < diagrams.length; k += 1) {
+        const dg = diagrams[k]!;
+        const ext = dg.ext.match(IMAGE_EXT)?.[0] ?? ".png";
+        const fileName = `문항${qNo}_관련그림${String(k + 1).padStart(2, "0")}${ext}`;
+        const abs = path.join(workdirAbs, fileName);
+        await fs.writeFile(abs, dg.buffer);
+        d.problemDiagramRels.push(`./${fileName}`);
+      }
+    }
   }
 
   const merged = drafts
     .map(
-      (d) =>
-        [
+      (d) => {
+        const problemLines = [
           `[문항 ${d.questionNo}]`,
           `[문제]`,
           d.problemImageRel ? `![문제 원본](${d.problemImageRel})` : `문제 원본 이미지를 참고하세요.`,
+          ...(d.problemDiagramRels ?? []).map((rel, idx) => `![관련 그림 ${idx + 1}](${rel})`),
           ``,
           `[빠른 정답] ${d.answer}`,
           ``,
           `[해설]`,
           d.explanation.trim(),
-        ].join("\n"),
+        ];
+        return problemLines.join("\n");
+      },
     )
     .join("\n\n");
 
@@ -714,14 +536,27 @@ async function main() {
     process.exit(1);
   }
   console.log(`[선택] workdir=${path.relative(cwd, latestWorkdir) || latestWorkdir}`);
-  const questionImages = await collectQuestionImages(inputAbs);
-  if (questionImages.length > 0) {
-    console.log(`[입력 매핑] 문제 이미지 ${questionImages.length}개를 문항 순서로 연결합니다.`);
+  const questionVisualsMod = await import("../src/lib/recognition/questionVisuals.ts");
+  const questionVisuals = await questionVisualsMod.collectQuestionVisuals(inputAbs);
+  if (questionVisuals.fallbackMain.length > 0 || questionVisuals.byQuestion.size > 0) {
+    const fallbackCount = questionVisuals.fallbackMain.length;
+    const manifestCount = questionVisuals.byQuestion.size;
+    console.log(
+      `[입력 매핑] 문제 이미지 연결: manifest 문항 ${manifestCount}건, fallback 이미지 ${fallbackCount}건`,
+    );
   } else {
     console.warn("[입력 매핑] 문제 이미지를 찾지 못해 [문제]에는 텍스트 안내만 들어갑니다.");
   }
 
-  await rewriteMergedForExport(latestWorkdir, cli.strictGate, questionImages);
+  const contentGateMod = await import("../src/lib/quality/contentGate.ts");
+  const completenessGateMod = await import("../src/lib/quality/completenessGate.ts");
+  const explanationImagePolicyMod = await import("../src/lib/assembly/explanationImagePolicy.ts");
+  const hooks: GateHooks = {
+    runContentGate: contentGateMod.runContentGate,
+    runCompletenessGate: completenessGateMod.runCompletenessGate,
+    decideExplanationImagePolicy: explanationImagePolicyMod.decideExplanationImagePolicy,
+  };
+  await rewriteMergedForExport(latestWorkdir, cli.strictGate, questionVisuals, hooks);
 
   const relWorkdir = path.relative(cwd, latestWorkdir) || latestWorkdir;
   const finalArgs = [tsxCli, "write-final-docx.mts", "--workdir", relWorkdir];

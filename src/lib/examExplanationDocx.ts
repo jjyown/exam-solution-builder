@@ -1,4 +1,5 @@
 import path from "node:path";
+import JSZip from "jszip";
 import {
   Document,
   ImageRun,
@@ -36,6 +37,7 @@ import {
 import { explanationLatexToPlain, quickAnswerToPlainLine } from "@/lib/latexToPlainText";
 import { normalizeLatexSourceText } from "@/lib/latexSourceNormalize";
 import { splitLabeledQuestionChunks } from "@/lib/explanationBlocks";
+import { recognizeMathpixFromImageBase64, resolveMathpixCredentials } from "@/lib/mathpixV3Text";
 
 function bodyTextRun(opts: { text: string; bold?: boolean; size?: number }) {
   return new TextRun({
@@ -44,6 +46,47 @@ function bodyTextRun(opts: { text: string; bold?: boolean; size?: number }) {
     size: opts.size ?? EXAM_DOCX_BODY_SIZE_HALF_PT,
     font: EXAM_DOCX_FONT,
   });
+}
+
+async function forceBoldAllRunsInDocx(buffer: Buffer): Promise<Buffer> {
+  const zip = await JSZip.loadAsync(buffer);
+  const docPath = "word/document.xml";
+  const docEntry = zip.file(docPath);
+  if (!docEntry) return buffer;
+
+  let xml = await docEntry.async("string");
+  // 일반 텍스트 런(w:r)도 누락 없이 모두 볼드 처리
+  xml = xml.replace(/<w:r>(?!\s*<w:rPr>)/g, '<w:r><w:rPr><w:b/><w:bCs/></w:rPr>');
+  xml = xml.replace(/<w:rPr>([\s\S]*?)<\/w:rPr>/g, (_m, inner: string) => {
+    let next = inner;
+    if (!/<w:b(?:\s|\/>|>)/.test(next)) next += "<w:b/>";
+    if (!/<w:bCs(?:\s|\/>|>)/.test(next)) next += "<w:bCs/>";
+    return `<w:rPr>${next}</w:rPr>`;
+  });
+
+  // 수식 런(m:r)도 누락 없이 모두 볼드 처리
+  xml = xml.replace(
+    /<m:r>(?!\s*<m:rPr>)/g,
+    '<m:r><m:rPr><m:sty m:val="b"/><w:rPr><w:b/><w:bCs/></w:rPr></m:rPr>',
+  );
+  xml = xml.replace(/<m:rPr>([\s\S]*?)<\/m:rPr>/g, (_m, inner: string) => {
+    let next = inner;
+    if (!/m:sty\b/.test(next)) next += '<m:sty m:val="b"/>';
+    if (!/<w:rPr>/.test(next)) {
+      next += "<w:rPr><w:b/><w:bCs/></w:rPr>";
+    } else {
+      next = next.replace(/<w:rPr>([\s\S]*?)<\/w:rPr>/g, (_wm, winner: string) => {
+        let wnext = winner;
+        if (!/<w:b(?:\s|\/>|>)/.test(wnext)) wnext += "<w:b/>";
+        if (!/<w:bCs(?:\s|\/>|>)/.test(wnext)) wnext += "<w:bCs/>";
+        return `<w:rPr>${wnext}</w:rPr>`;
+      });
+    }
+    return `<m:rPr>${next}</m:rPr>`;
+  });
+
+  zip.file(docPath, xml);
+  return Buffer.from(await zip.generateAsync({ type: "nodebuffer" }));
 }
 
 export function safeExamFileName(value: string) {
@@ -337,12 +380,100 @@ type DocxLineRenderOpts = {
   forcePlainBoldMath?: boolean;
 };
 
+function compactMathExpressionForDocx(expr: string): string {
+  const src = expr.trim();
+  if (!src) return expr;
+  const eqParts = src.split("=").map((x) => x.trim()).filter(Boolean);
+  if (eqParts.length >= 6) {
+    return `${eqParts.slice(0, 2).join(" = ")} = \\cdots = ${eqParts.slice(-2).join(" = ")}`;
+  }
+  const plusParts = src.split("+").map((x) => x.trim()).filter(Boolean);
+  if (plusParts.length >= 8) {
+    return `${plusParts.slice(0, 3).join(" + ")} + \\cdots + ${plusParts.slice(-3).join(" + ")}`;
+  }
+  return expr;
+}
+
+function normalizeLineForDocxRender(rawLine: string): string {
+  let line = rawLine;
+  // 텍스트로 들어온 대표 분수 표기를 수식으로 승격해 "√2/2" 노출을 줄인다.
+  line = line.replace(
+    /(^|[\s(])(?:√|\\sqrt\{?)(2|3)\}?\s*\/\s*2(?=$|[\s),.가-힣])/g,
+    (_m, lead: string, n: string) => `${lead}$\\frac{\\sqrt{${n}}}{2}$`,
+  );
+
+  const block = line.match(/^\s*\$\$([\s\S]+)\$\$\s*$/);
+  if (block?.[1] && block[1].length >= 130) {
+    return `$$${compactMathExpressionForDocx(block[1])}$$`;
+  }
+  const inlineOnly = line.match(/^\s*\$([^$\n]+)\$\s*$/);
+  if (inlineOnly?.[1] && inlineOnly[1].length >= 130) {
+    return `$${compactMathExpressionForDocx(inlineOnly[1])}$`;
+  }
+  return line;
+}
+
+function imageMimeFromSrc(src: string): string {
+  const t = src.toLowerCase();
+  if (t.endsWith(".jpg") || t.endsWith(".jpeg")) return "image/jpeg";
+  if (t.endsWith(".webp")) return "image/webp";
+  if (t.endsWith(".gif")) return "image/gif";
+  return "image/png";
+}
+
+function hasEnoughTypedProblemText(problemLinesRaw: string[]): boolean {
+  const plain = problemLinesRaw
+    .filter((line) => !parseMarkdownImageLine(line))
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .join(" ");
+  return plain.length >= 24;
+}
+
+function normalizeProblemOcrText(text: string): string[] {
+  return text
+    .replace(/\r\n/g, "\n")
+    .split("\n")
+    .map((x) => x.trim())
+    .filter(Boolean)
+    .filter((line) => !/^\[문항 OCR 참고/i.test(line))
+    .slice(0, 8);
+}
+
+async function deriveProblemTypingLinesFromImages(
+  problemLinesRaw: string[],
+  assetBaseDir?: string,
+): Promise<string[]> {
+  if (!assetBaseDir || hasEnoughTypedProblemText(problemLinesRaw)) return [];
+  if (!resolveMathpixCredentials()) return [];
+  const imageLines = problemLinesRaw
+    .map((line) => parseMarkdownImageLine(line))
+    .filter((x): x is { alt: string; src: string } => Boolean(x));
+  if (imageLines.length === 0) return [];
+  const primary =
+    imageLines.find((img) => /문제\s*원본|원본|문항/i.test(img.alt || "")) ?? imageLines[0];
+  if (!primary) return [];
+  const buf = await readImageRelativeToBase(assetBaseDir, primary.src);
+  if (!buf) return [];
+  const res = await recognizeMathpixFromImageBase64(
+    buf.toString("base64"),
+    imageMimeFromSrc(primary.src),
+  );
+  if (!res.ok) return [];
+  const text = res.data.text?.trim();
+  if (!text) return [];
+  const lines = normalizeProblemOcrText(text);
+  if (lines.length === 0) return [];
+  return ["[OCR 발문/선지]", ...lines];
+}
+
 async function paragraphChildrenForDocxLine(
   line: string,
   assetBaseDir: string | undefined,
   renderOpts?: DocxLineRenderOpts,
 ): Promise<ParagraphChild[]> {
-  const img = parseMarkdownImageLine(line);
+  const normalizedLine = normalizeLineForDocxRender(line);
+  const img = parseMarkdownImageLine(normalizedLine);
   if (img && assetBaseDir) {
     const buf = await readImageRelativeToBase(assetBaseDir, img.src);
     if (buf) {
@@ -371,14 +502,14 @@ async function paragraphChildrenForDocxLine(
   if (renderOpts?.forcePlainBoldMath) {
     return [
       new TextRun({
-        text: explanationLatexToPlain(line),
+        text: explanationLatexToPlain(normalizedLine),
         bold: true,
         font: EXAM_DOCX_FONT,
         size: EXAM_DOCX_BODY_SIZE_HALF_PT,
       }),
     ];
   }
-  return explanationLineToParagraphChildren(line, { bold: renderOpts?.boldContent });
+  return explanationLineToParagraphChildren(normalizedLine, { bold: renderOpts?.boldContent });
 }
 
 function isSingleImageRunParagraph(children: ParagraphChild[]): boolean {
@@ -454,9 +585,24 @@ function quickAnswerDisplayText(block: ExplanationBlock): string {
     (/번/u.test(rawAnswer) || /\([^)]+\)/u.test(rawAnswer) || rawAnswer.replace(/\s/g, "").length > 2);
   if (answerKind === "essay") return "해설참고";
   if (objectiveWithExtra) return quickAnswerToPlainLine(block.answer || "-");
-  /** 편집본 요청: 객관식도 ①~⑤ 대신 숫자(1~5) 표기를 기본으로 사용 */
-  if (objective) return objective;
+  // 객관식은 빠른정답/해설의 [정답] 모두 ①~⑤ 원형 숫자로 통일
+  if (objective) return toCircledObjectiveAnswer(objective);
   return quickAnswerToPlainLine(block.answer || "-");
+}
+
+function normalizeQuickAnswerForMath(answer: string): string {
+  const t = answer.trim();
+  const m = t.match(/^(-?\d+)\s*\/\s*(-?\d+)$/);
+  if (m?.[1] && m?.[2]) {
+    return `\\frac{${m[1]}}{${m[2]}}`;
+  }
+  return t;
+}
+
+function quickAnswerLineChildren(questionLabel: string, quickAnswerText: string): ParagraphChild[] {
+  const answerMathText = normalizeQuickAnswerForMath(quickAnswerText);
+  const answerChildren = explanationLineToParagraphChildren(answerMathText, { bold: true });
+  return [bodyTextRun({ text: `${questionLabel}. [정답] `, bold: true }), ...answerChildren];
 }
 
 /**
@@ -485,8 +631,13 @@ async function buildExplanationSectionChildren(
     if (block.problemLinesRaw.length === 0) continue;
 
     const inner: (Paragraph | Table)[] = [];
+    const ocrTypingLines = await deriveProblemTypingLinesFromImages(
+      block.problemLinesRaw,
+      assetBaseDir,
+    );
+    const mergedProblemLinesRaw = [...ocrTypingLines, ...block.problemLinesRaw];
     let problemNumberPrefixApplied = false;
-    for (const seg of segmentProblemLinesForChoicesBox(block.problemLinesRaw)) {
+    for (const seg of segmentProblemLinesForChoicesBox(mergedProblemLinesRaw)) {
       if (seg.type === "choices") {
         if (!problemNumberPrefixApplied) {
           inner.push(
@@ -534,7 +685,7 @@ async function buildExplanationSectionChildren(
        * - `cantSplit` 표로 감싸도 컬럼 하단에서 긴 문항이 시각적으로 답답해지는 경우가 있어,
        * - 문제량이 큰 문항은 시작 전에 강제 페이지 넘김해 “문항 전체가 다음 페이지에서 시작”되게 한다.
        */
-      const problemWeight = estimateProblemBlockWeight(block.problemLinesRaw);
+      const problemWeight = estimateProblemBlockWeight(mergedProblemLinesRaw);
       if (idx > 0 && problemWeight >= 13) {
         problemChildren.push(
           new Paragraph({
@@ -563,7 +714,7 @@ async function buildExplanationSectionChildren(
     const quickAnswerText = quickAnswerDisplayText(block);
     quickAnswerChildren.push(
       new Paragraph({
-        children: [bodyTextRun({ text: `${block.questionLabel}. [정답] ${quickAnswerText}`, bold: true })],
+        children: quickAnswerLineChildren(block.questionLabel, quickAnswerText),
         spacing: {
           ...EXAM_DOCX_BODY_PARAGRAPH_SPACING,
           before: idx === 0 ? 80 : 160,
@@ -591,7 +742,7 @@ async function buildExplanationSectionChildren(
     const quickAnswerText = quickAnswerDisplayText(block);
     explanationChildren.push(
       new Paragraph({
-        children: [bodyTextRun({ text: `${block.questionLabel}. [정답] ${quickAnswerText}`, bold: true })],
+        children: quickAnswerLineChildren(block.questionLabel, quickAnswerText),
         indent: explIndent,
         spacing: {
           ...EXAM_DOCX_BODY_PARAGRAPH_SPACING,
@@ -782,6 +933,7 @@ export async function buildExamExplanationDocxBuffer(params: BuildExamExplanatio
     ],
   });
 
-  const buffer = Buffer.from(await Packer.toBuffer(doc));
+  const rawBuffer = Buffer.from(await Packer.toBuffer(doc));
+  const buffer = await forceBoldAllRunsInDocx(rawBuffer);
   return { buffer, docxFileName, baseName };
 }

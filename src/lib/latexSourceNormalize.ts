@@ -21,6 +21,17 @@ export function normalizeScalarCdotToTimes(s: string): string {
 }
 
 export function normalizeLatexSourceText(s: string): string {
-  const ascii = s.replace(/\u20A9/g, "\\").replace(/\uFF3C/g, "\\").replace(/\uFF04/g, "$");
+  const ascii = s
+    .replace(/\u20A9/g, "\\")
+    .replace(/\uFFE6/g, "\\")
+    .replace(/\uFF3C/g, "\\")
+    .replace(/\uFF04/g, "$")
+    // 일부 OCR/복붙 손상 토큰: LaTeX 명령 앞 역슬래시가 # / #w 로 깨짐
+    .replace(/#wsqrt\b/gi, "\\sqrt")
+    .replace(/#sqrt\b/gi, "\\sqrt")
+    .replace(/#wfrac\b/gi, "\\frac")
+    .replace(/#frac\b/gi, "\\frac")
+    .replace(/#wlog\b/gi, "\\log")
+    .replace(/#log\b/gi, "\\log");
   return normalizeScalarCdotToTimes(ascii);
 }

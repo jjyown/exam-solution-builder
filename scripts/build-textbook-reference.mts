@@ -1,5 +1,6 @@
 import { promises as fs } from "node:fs";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import path from "node:path";
 import dotenv from "dotenv";
 
@@ -56,23 +57,54 @@ function isPdf(filePath: string): boolean {
   return path.extname(filePath).toLowerCase() === ".pdf";
 }
 
-async function renderPdfFirstPageToPng(pdfAbs: string, cacheDir: string): Promise<string> {
+function computePdfStem(pdfAbs: string): string {
+  const h = createHash("sha1").update(pdfAbs).digest("hex").slice(0, 10);
+  return `${path.parse(pdfAbs).name}.${h}`;
+}
+
+async function renderPdfPagesToPng(
+  pdfAbs: string,
+  cacheDir: string,
+  stem: string,
+): Promise<Array<{ pageNo: number; pngPath: string }>> {
   await fs.mkdir(cacheDir, { recursive: true });
-  const outPng = path.join(cacheDir, `${path.parse(pdfAbs).name}.page1.png`);
   const py = `
 import pypdfium2 as pdfium
+import json
 pdf_path = r'''${pdfAbs.replace(/\\/g, "\\\\")}'''
-out_path = r'''${outPng.replace(/\\/g, "\\\\")}'''
+out_dir = r'''${cacheDir.replace(/\\/g, "\\\\")}'''
+stem = r'''${stem.replace(/\\/g, "\\\\")}'''
 pdf = pdfium.PdfDocument(pdf_path)
-page = pdf[0]
-bitmap = page.render(scale=2.0)
-bitmap.to_pil().save(out_path)
+count = len(pdf)
+for i in range(count):
+    page = pdf[i]
+    bitmap = page.render(scale=2.0)
+    out_path = out_dir + "\\\\" + f"{stem}.page{i+1}.png"
+    bitmap.to_pil().save(out_path)
+print(json.dumps({"count": count}))
 `;
   const r = spawnSync("python", ["-c", py], { stdio: "pipe", encoding: "utf8" });
   if (r.status !== 0) {
     throw new Error((r.stderr || r.stdout || "PDF 렌더 실패").trim());
   }
-  return outPng;
+  const raw = (r.stdout || "").trim();
+  let count = 0;
+  try {
+    count = Number(JSON.parse(raw).count || 0);
+  } catch {
+    count = 0;
+  }
+  if (!Number.isFinite(count) || count <= 0) {
+    throw new Error("PDF 페이지 수를 읽지 못했습니다.");
+  }
+  const out: Array<{ pageNo: number; pngPath: string }> = [];
+  for (let i = 1; i <= count; i += 1) {
+    out.push({
+      pageNo: i,
+      pngPath: path.join(cacheDir, `${stem}.page${i}.png`),
+    });
+  }
+  return out;
 }
 
 async function main() {
@@ -95,58 +127,118 @@ async function main() {
   let okCount = 0;
   let failCount = 0;
   let skipCount = 0;
+  let pageCount = 0;
   const pdfRenderCacheDir = path.join(outAbs, "_tmp_pdf_pages");
   for (const abs of images) {
     const rel = path.relative(inputAbs, abs).replace(/\\/g, "/");
     const meta = parseMetaFromRelativePath(rel);
     const outDir = path.join(outAbs, meta.unit, meta.type, meta.difficulty);
-    const outPath = path.join(outDir, `${path.parse(abs).name}.md`);
+    const baseName = path.parse(abs).name;
 
+    if (!isPdf(abs)) {
+      const outPath = path.join(outDir, `${baseName}.md`);
+      if (!cli.force) {
+        try {
+          await fs.access(outPath);
+          skipCount += 1;
+          pageCount += 1;
+          console.log(`[textbook-ref] 스킵(기존 md): ${path.relative(cwd, outPath)}`);
+          continue;
+        } catch {
+          // 새 파일 생성 계속 진행
+        }
+      }
+      const result = await ocrTextbookReferenceImage(abs);
+      if (!result.ok) {
+        failCount += 1;
+        pageCount += 1;
+        console.warn(`[textbook-ref] 실패: ${rel} - ${result.message}`);
+        continue;
+      }
+      const md = buildTextbookReferenceMarkdown(
+        {
+          unit: meta.unit,
+          type: meta.type,
+          difficulty: meta.difficulty,
+          sourceImage: rel,
+        },
+        result.text,
+      );
+      await fs.mkdir(outDir, { recursive: true });
+      await fs.writeFile(outPath, md, "utf8");
+      okCount += 1;
+      pageCount += 1;
+      console.log(`[textbook-ref] 생성: ${path.relative(cwd, outPath)} (conf=${result.confidence ?? "n/a"})`);
+      continue;
+    }
+
+    const pdfStem = computePdfStem(abs);
+    const pdfCacheDir = path.join(pdfRenderCacheDir, pdfStem);
+
+    let skipPdf = false;
     if (!cli.force) {
       try {
-        await fs.access(outPath);
-        skipCount += 1;
-        console.log(`[textbook-ref] 스킵(기존 md): ${path.relative(cwd, outPath)}`);
-        continue;
+        const entries = await fs.readdir(outDir, { withFileTypes: false });
+        skipPdf = entries.some((n) => n.startsWith(`${pdfStem}.page`) && n.includes("_problem") && n.endsWith(".md"));
       } catch {
-        // 새 파일 생성 계속 진행
+        skipPdf = false;
       }
     }
 
-    let sourceForOcr = abs;
+    if (skipPdf) {
+      skipCount += 1;
+      pageCount += 1;
+      console.log(`[textbook-ref] 스킵(기존 문제 md 존재): ${rel} (stem=${pdfStem})`);
+      continue;
+    }
+
+    let renderedPages: Array<{ pageNo: number; pngPath: string }> = [];
     try {
-      if (isPdf(abs)) {
-        sourceForOcr = await renderPdfFirstPageToPng(abs, pdfRenderCacheDir);
-      }
+      renderedPages = await renderPdfPagesToPng(abs, pdfCacheDir, pdfStem);
     } catch (e) {
       failCount += 1;
       console.warn(`[textbook-ref] 실패: ${rel} - PDF 페이지 렌더 실패: ${e instanceof Error ? e.message : String(e)}`);
       continue;
     }
-    const result = await ocrTextbookReferenceImage(sourceForOcr);
-    if (!result.ok) {
+
+    const splitScriptPath = path.join(cwd, "scripts", "textbook_page_split_mathpix.py");
+    const splitArgs: string[] = [
+      splitScriptPath,
+      "--input",
+      pdfCacheDir,
+      "--output",
+      outDir,
+      "--unit",
+      meta.unit,
+      "--type",
+      meta.type,
+      "--difficulty",
+      meta.difficulty,
+      "--padding",
+      "0.02",
+    ];
+    // 정답/해설 혼재 PDF에서 빠른정답 단독 세그먼트는 제외하고 해설 우선 매핑
+    // (필요 시 split script에 --no-explanation-priority 로 비활성화 가능)
+    if (cli.force) splitArgs.push("--force");
+
+    const splitRun = spawnSync("python", splitArgs, { stdio: "inherit", shell: false });
+    if (splitRun.status !== 0) {
       failCount += 1;
-      console.warn(`[textbook-ref] 실패: ${rel} - ${result.message}`);
+      pageCount += renderedPages.length;
+      console.warn(`[textbook-ref] 실패: ${rel} - split script 실행 실패 (exit=${splitRun.status ?? "?"})`);
       continue;
     }
-    const md = buildTextbookReferenceMarkdown(
-      {
-        unit: meta.unit,
-        type: meta.type,
-        difficulty: meta.difficulty,
-        sourceImage: rel,
-      },
-      result.text,
-    );
-    await fs.mkdir(outDir, { recursive: true });
-    await fs.writeFile(outPath, md, "utf8");
+
     okCount += 1;
-    console.log(`[textbook-ref] 생성: ${path.relative(cwd, outPath)} (conf=${result.confidence ?? "n/a"})`);
+    pageCount += renderedPages.length;
+    console.log(`[textbook-ref] 생성: ${rel} (pdf pages=${renderedPages.length}, stem=${pdfStem})`);
   }
 
   // PDF 중간 렌더 캐시는 실행 종료 시 정리한다.
   await fs.rm(pdfRenderCacheDir, { recursive: true, force: true }).catch(() => {});
-  console.log(`[textbook-ref] 완료: 성공 ${okCount}, 스킵 ${skipCount}, 실패 ${failCount}, 총 ${images.length}`);
+  console.log(
+    `[textbook-ref] 완료: 성공 ${okCount}, 스킵 ${skipCount}, 실패 ${failCount}, 파일 ${images.length}, 페이지 ${pageCount}`,
+  );
 }
 
 void main();

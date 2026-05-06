@@ -55,6 +55,14 @@ function preprocessInlineMath(inner: string): string {
   const stripped = stripTrailingEquationPeriodInMath(inner);
   return normalizeNumericFractionInScripts(
     stripped
+      /** 느슨한 sqrt 표기: \sqrt3 -> \sqrt{3}, \sqrt x -> \sqrt{x} */
+      .replace(/\\sqrt(?!\s*\[)(?!\s*\{)\s*([A-Za-z0-9])/g, "\\sqrt{$1}")
+      /** 느슨한 frac 표기: \frac1{...} -> \frac{1}{...} */
+      .replace(/\\frac(?!\{)\s*([A-Za-z0-9])\s*\{([\s\S]*?)\}/g, "\\frac{$1}{$2}")
+      /** 느슨한 frac 표기: \frac{...}3 -> \frac{...}{3} */
+      .replace(/\\frac\s*\{([\s\S]*?)\}\s*([A-Za-z0-9])(?![A-Za-z0-9])/g, "\\frac{$1}{$2}")
+      /** `\frac12` 같은 축약 분수 표기 → `\frac{1}{2}` */
+      .replace(/\\frac(?!\{)\s*([A-Za-z0-9])\s*([A-Za-z0-9])(?![A-Za-z0-9])/g, "\\frac{$1}{$2}")
       /** `\dfrac12`·`\tfrac12` 처럼 한 자리 분수(중괄호 생략) → `\frac{1}{2}` */
       .replace(/\\dfrac(?!\{)\s*(\d)\s*(\d)(?![0-9])/g, "\\frac{$1}{$2}")
       .replace(/\\tfrac(?!\{)\s*(\d)\s*(\d)(?![0-9])/g, "\\frac{$1}{$2}")
@@ -64,6 +72,8 @@ function preprocessInlineMath(inner: string): string {
       .replace(/\\dfrac\b|\\tfrac\b/g, "\\frac")
       /** 일부 편집기·복사 과정에서 `\frac` 앞 역슬래시만 `#`으로 깨지는 경우 */
       .replace(/#frac\b/g, "\\frac")
+      /** 일부 OCR/폰트 환경에서 `\frac`가 `#wfrac`로 손상되는 경우 */
+      .replace(/#wfrac\b/gi, "\\frac")
       .replace(/\\Biggl\s*/g, "")
       .replace(/\\biggl\s*/g, "")
       .replace(/\\Biggr\s*/g, "")
@@ -323,8 +333,9 @@ const SYMBOL_CMD: Record<string, string> = {
   rightarrow: "→",
   Rightarrow: "⇒",
   Leftarrow: "⇐",
-  Leftrightarrow: "⇔",
+  Leftrightarrow: "<=>",
   leftrightarrow: "↔",
+  iff: "<=>",
   mapsto: "↦",
   parallel: "∥",
   perp: "⊥",
@@ -629,22 +640,24 @@ export function normalizeDisplayMathDelimitersForDocx(line: string): string {
  */
 export function normalizeMathLineTrailingPeriod(line: string): string {
   const lead = line.match(/^(\s*)/)?.[1] ?? "";
-  const t = line.trim();
+  let t = line.trim();
   if (!t || t.startsWith("![")) return line;
+  t = t.replace(/(\$[^$\n]+\$)\s*\.(?=\s|$)/g, "$1");
   const m1 = t.match(/^(\$[^$\n]+\$)\s*\.\s*$/);
   if (m1) return `${lead}${m1[1]}`;
   const m2 = t.match(/^(\$\$[\s\S]*\$\$)\s*\.\s*$/);
   if (m2) return `${lead}${m2[1]}`;
-  return line;
+  return `${lead}${t}`;
 }
 
 function normalizeExplanationPedagogyKorean(line: string): string {
   return line
     /** 백슬래시 유실·변환 실패로 남는 조각 */
-    .replace(/\bLeftrightarrow\b/g, "⇔")
+    .replace(/\bLeftrightarrow\b/g, "<=>")
     .replace(/\bRightarrow\b/g, "⇒")
     .replace(/\bLeftarrow\b/g, "⇐")
-    .replace(/\bLeftr\b/g, "⇔")
+    .replace(/\bLeftr\b/g, "<=>")
+    .replace(/\biff\b/gi, "<=>")
     /** 보기 소항: `**ㄱ.**` → `ㄱ) ` (HML·교재형), 줄 아무 곳에서나 */
     .replace(/\*\*ㄱ\.\*\*\s*/gu, "ㄱ) ")
     .replace(/\*\*ㄴ\.\*\*\s*/gu, "ㄴ) ")

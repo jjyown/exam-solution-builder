@@ -8,7 +8,7 @@
   줄 단위 text를 얻을 수 있어, 문항 시작 패턴이 있는 줄을 기준으로 구간을 나누고
   구간별 bbox 합집합으로 원본 페이지를 크롭한다.
 
-의존성: pip install pillow (scripts/requirements-textbook-ocr.txt 참고)
+의존성: pip install pillow
 
 환경변수: MATHPIX_APP_ID, MATHPIX_APP_KEY (기존 배치 OCR과 동일)
 """
@@ -31,7 +31,7 @@ try:
     from PIL import Image
 except ImportError as e:
     raise SystemExit(
-        "Pillow가 필요합니다. 예: pip install -r scripts/requirements-textbook-ocr.txt"
+        "Pillow가 필요합니다. 예: pip install pillow"
     ) from e
 
 MATHPIX_ENDPOINT = os.environ.get("MATHPIX_API_URL", "https://api.mathpix.com/v3/text")
@@ -200,7 +200,118 @@ class ProblemSegment:
     boxes: List[Tuple[int, int, int, int]] = field(default_factory=list)
 
 
-def build_segments_from_line_data(line_data: List[Dict[str, Any]]) -> List[ProblemSegment]:
+def should_start_new_problem(
+    *,
+    qn: Optional[int],
+    txt: str,
+    bbox: Optional[Tuple[int, int, int, int]],
+    line_type: str,
+    prev_qn: Optional[int],
+    prev_marker_y: Optional[int],
+    page_width: Optional[int],
+    page_height: Optional[int],
+) -> bool:
+    if qn is None or not txt or bbox is None:
+        return False
+
+    # 문항 시작으로 쓰기 부적합한 라인 타입은 제외
+    if line_type in {"equation_number", "page_info", "x_axis_tick_label", "y_axis_tick_label"}:
+        return False
+
+    x0, y0, _, _ = bbox
+    if page_width and x0 > int(page_width * 0.68):
+        # 지나치게 오른쪽에서 시작하면 문항 번호가 아닌 경우가 많음
+        return False
+
+    if prev_marker_y is not None:
+        min_gap = 16
+        if page_height:
+            min_gap = max(min_gap, int(page_height * 0.012))
+        if (y0 - prev_marker_y) < min_gap:
+            return False
+
+    if prev_qn is not None:
+        if qn == prev_qn:
+            return False
+        if qn < prev_qn and not (prev_qn >= 20 and qn <= 3):
+            return False
+        if qn - prev_qn > 8:
+            return False
+
+    return True
+
+
+def segment_text_char_count(seg: ProblemSegment) -> int:
+    return sum(len(t.strip()) for t in seg.text_lines if t and t.strip())
+
+
+def merge_small_neighbor_segments(segments: List[ProblemSegment]) -> List[ProblemSegment]:
+    if len(segments) <= 1:
+        return segments
+
+    merged: List[ProblemSegment] = []
+    i = 0
+    while i < len(segments):
+        seg = segments[i]
+        line_count = len([t for t in seg.text_lines if t.strip()])
+        char_count = segment_text_char_count(seg)
+
+        # 너무 짧은 조각(오탐 분할 가능성)은 이웃과 병합
+        # 단, 번호 기반 세그먼트가 있는 페이지에서는 과한 병합을 피한다.
+        numbered_count = sum(1 for s in segments if s.printed_number is not None)
+        merge_enabled = numbered_count <= 2
+        is_tiny = line_count <= 2 or char_count < 45
+        if merge_enabled and is_tiny and i + 1 < len(segments):
+            nxt = segments[i + 1]
+            combined = ProblemSegment(
+                printed_number=seg.printed_number if seg.printed_number is not None else nxt.printed_number,
+                text_lines=seg.text_lines + nxt.text_lines,
+                boxes=seg.boxes + nxt.boxes,
+            )
+            segments[i + 1] = combined
+            i += 1
+            continue
+
+        merged.append(seg)
+        i += 1
+
+    return merged if merged else segments
+
+
+def classify_segment_type(seg: ProblemSegment) -> str:
+    body = "\n".join(seg.text_lines)
+    has_expl = "[해설]" in body or "해설]" in body
+    has_ans = "[정답]" in body or "정답]" in body
+    if has_expl and has_ans:
+        return "answer_and_explanation"
+    if has_expl:
+        return "explanation"
+    if has_ans:
+        return "quick_answer"
+    return "unknown"
+
+
+def filter_segments_for_explanations(segments: List[ProblemSegment]) -> List[ProblemSegment]:
+    if not segments:
+        return segments
+    types = [classify_segment_type(s) for s in segments]
+    has_expl = any(t in {"explanation", "answer_and_explanation"} for t in types)
+    if not has_expl:
+        # 정답 전용 페이지는 이후 매핑에 불필요하므로 기본적으로 비운다.
+        quick_only = all(t in {"quick_answer", "unknown"} for t in types)
+        if quick_only:
+            return []
+        return segments
+    out = [s for s, t in zip(segments, types) if t in {"explanation", "answer_and_explanation"}]
+    return out if out else segments
+
+
+def build_segments_from_line_data(
+    line_data: List[Dict[str, Any]],
+    *,
+    page_width: Optional[int],
+    page_height: Optional[int],
+) -> List[ProblemSegment]:
     usable: List[Dict[str, Any]] = []
     for line in line_data:
         if skipped_line_for_structure(line):
@@ -212,16 +323,30 @@ def build_segments_from_line_data(line_data: List[Dict[str, Any]]) -> List[Probl
 
     segments: List[ProblemSegment] = []
     current: Optional[ProblemSegment] = None
+    prev_qn: Optional[int] = None
+    prev_marker_y: Optional[int] = None
 
     for line in usable:
         txt = (line.get("text") or "").strip()
         qn = extract_printed_question_number(txt) if txt else None
         bbox = cnt_to_bbox(line.get("cnt") or [])
+        line_type = str(line.get("type") or "")
 
-        if qn is not None:
+        if should_start_new_problem(
+            qn=qn,
+            txt=txt,
+            bbox=bbox,
+            line_type=line_type,
+            prev_qn=prev_qn,
+            prev_marker_y=prev_marker_y,
+            page_width=page_width,
+            page_height=page_height,
+        ):
             if current is not None and (current.text_lines or current.boxes):
                 segments.append(current)
             current = ProblemSegment(printed_number=qn)
+            prev_qn = qn
+            prev_marker_y = bbox[1] if bbox else prev_marker_y
 
         if current is None:
             current = ProblemSegment(printed_number=None)
@@ -239,6 +364,16 @@ def build_segments_from_line_data(line_data: List[Dict[str, Any]]) -> List[Probl
         tail.text_lines = head.text_lines + tail.text_lines
         tail.boxes = head.boxes + tail.boxes
         segments = segments[1:]
+
+    # 안전장치: 비정상 과분할 시 페이지 단일 세그먼트 폴백
+    if len(segments) > 20:
+        merged = ProblemSegment(printed_number=segments[0].printed_number)
+        for s in segments:
+            merged.text_lines.extend(s.text_lines)
+            merged.boxes.extend(s.boxes)
+        return [merged]
+
+    segments = merge_small_neighbor_segments(segments)
 
     return [s for s in segments if s.text_lines or s.boxes]
 
@@ -271,6 +406,7 @@ def write_problem_md(
     unit: Optional[str],
     type_: Optional[str],
     difficulty: Optional[str],
+    section_type: str,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     conf_line = f"{confidence:.6f}" if confidence is not None else "n/a"
@@ -280,6 +416,8 @@ def write_problem_md(
         f"sourcePageImage: {source_page}",
         f"problemIndex: {problem_index}",
         f"printedNumber: {pn}",
+        f"matchKey: q{pn}" if pn != "n/a" else "matchKey: n/a",
+        f"sectionType: {section_type}",
         f"confidence: {conf_line}",
     ]
     if unit:
@@ -301,8 +439,16 @@ def process_one_page(
     unit: Optional[str],
     type_: Optional[str],
     difficulty: Optional[str],
+    explanation_priority: bool,
 ) -> Tuple[bool, str]:
     stem = image_path.stem
+    # 이미 문항 분할 산출물이 존재하면 Mathpix 재호출을 피한다.
+    # (여기서는 최소한 problem01 세트가 있으면 분할된 것으로 간주)
+    md0 = out_dir / f"{stem}_problem01.md"
+    png0 = out_dir / f"{stem}_problem01.png"
+    if not force and md0.exists() and png0.exists():
+        return True, f"[skip] {image_path.name} (problem01 세트 존재)"
+
     ok, err, data = call_mathpix_full(image_path)
     if not ok or not data:
         return False, err or "Mathpix 실패"
@@ -317,7 +463,17 @@ def process_one_page(
         pil = pil.convert("RGB")
     work = align_image_to_mathpix_canvas(pil, data)
 
-    segments = build_segments_from_line_data(line_data) if isinstance(line_data, list) else []
+    segments = (
+        build_segments_from_line_data(
+            line_data,
+            page_width=data.get("image_width") if isinstance(data.get("image_width"), int) else None,
+            page_height=data.get("image_height") if isinstance(data.get("image_height"), int) else None,
+        )
+        if isinstance(line_data, list)
+        else []
+    )
+    if explanation_priority:
+        segments = filter_segments_for_explanations(segments)
 
     if len(segments) <= 1:
         bbox = union_bboxes([b for s in segments for b in s.boxes]) if segments else None
@@ -330,7 +486,13 @@ def process_one_page(
                 if b:
                     boxes.append(b)
             bbox = union_bboxes(boxes)
-        body = "\n\n".join(s.text_lines for s in segments) if segments else full_text
+        if segments:
+            merged_lines: List[str] = []
+            for seg in segments:
+                merged_lines.extend(seg.text_lines)
+            body = "\n\n".join(merged_lines)
+        else:
+            body = full_text
         if not body.strip():
             body = full_text
         if not body.strip():
@@ -357,6 +519,7 @@ def process_one_page(
             unit=unit,
             type_=type_,
             difficulty=difficulty,
+            section_type=classify_segment_type(segments[0]) if segments else "unknown",
         )
         return True, f"[ok] {stem} -> 1문항(폴백)"
 
@@ -382,6 +545,7 @@ def process_one_page(
             unit=unit,
             type_=type_,
             difficulty=difficulty,
+            section_type=classify_segment_type(seg),
         )
     return True, f"[ok] {stem} -> {len(segments)}문항"
 
@@ -406,6 +570,11 @@ def main() -> int:
     parser.add_argument("--unit", default=None, help="frontmatter unit (선택)")
     parser.add_argument("--type", dest="type_", default=None, help="frontmatter type (선택)")
     parser.add_argument("--difficulty", default=None, help="frontmatter difficulty (선택)")
+    parser.add_argument(
+        "--no-explanation-priority",
+        action="store_true",
+        help="해설 우선 필터를 끄고 모든 세그먼트를 저장",
+    )
     args = parser.parse_args()
 
     if not args.input.is_dir():
@@ -432,6 +601,7 @@ def main() -> int:
                 unit=args.unit,
                 type_=args.type_,
                 difficulty=args.difficulty,
+                explanation_priority=not args.no_explanation_priority,
             )
             results.append((msg, ok))
             print(msg)
@@ -447,6 +617,7 @@ def main() -> int:
                     unit=args.unit,
                     type_=args.type_,
                     difficulty=args.difficulty,
+                    explanation_priority=not args.no_explanation_priority,
                 ): img
                 for img in images
             }

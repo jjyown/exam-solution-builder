@@ -20,7 +20,12 @@ export function parseMarkdownImageLine(line: string): { alt: string; src: string
 export function isDocxOmittedTypingReferenceCropAlt(alt: string): boolean {
   const a = (alt || "").trim();
   if (!a) return false;
-  return /문제\s*원본|문제\s*스캔|원본\s*크롭|작업용(?:\s*크롭)?|타이핑\s*참고|HWP\s*스캔|시험지\s*스캔|문항\s*스캔/i.test(a);
+  /**
+   * 주의:
+   * - "문제 원본"은 실제 최종 해설지에 반드시 노출되어야 하므로 제외 대상에서 뺀다.
+   * - 정말 작업용 참조 이미지만 명시적으로 걸러낸다.
+   */
+  return /타이핑\s*참고|작업용(?:\s*크롭)?|검수용(?:\s*크롭)?|원문\s*타이핑\s*참고/i.test(a);
 }
 
 export function isDocxOmittedTypingReferenceCropMarkdownLine(line: string): boolean {
