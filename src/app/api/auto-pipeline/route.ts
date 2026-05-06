@@ -49,6 +49,10 @@ async function callGemini(prompt: string): Promise<string> {
       generationConfig: {
         responseMimeType: 'application/json',
         temperature: 0.2,
+        thinkingConfig: {
+          type: 'EXTENDED_THINKING',
+          budgetTokens: 2000,
+        },
       },
     }),
   });
@@ -65,7 +69,7 @@ async function callGemini(prompt: string): Promise<string> {
 async function callOpenAI(prompt: string): Promise<string> {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) throw new Error('OPENAI_API_KEY 미설정');
-  const model = process.env.OPENAI_MODEL || 'gpt-4.1';
+  const model = process.env.OPENAI_MODEL || 'gpt-4-turbo';
   const res = await fetch('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
     headers: {
@@ -77,6 +81,7 @@ async function callOpenAI(prompt: string): Promise<string> {
       messages: [{ role: 'user', content: prompt }],
       response_format: { type: 'json_object' },
       temperature: 0.2,
+      reasoning_effort: 'high',
     }),
   });
   if (!res.ok) throw new Error(`OpenAI ${res.status}: ${await res.text()}`);
