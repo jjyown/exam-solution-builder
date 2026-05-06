@@ -48,6 +48,14 @@ type RunHistoryRow = {
 
 export default function AutoPipelinePage() {
   const [questionText, setQuestionText] = useState('');
+  const [uploadedFile, setUploadedFile] = useState<File | null>(null);
+  const [explanationMode, setExplanationMode] = useState<'full' | 'partial'>('full');
+  const [selectedQuestions, setSelectedQuestions] = useState<number[]>([]);
+  const [model, setModel] = useState<'gemini' | 'openai'>('gemini');
+  const [topK, setTopK] = useState(3);
+  const [running, setRunning] = useState(false);
+  const [result, setResult] = useState<PipelineResponse | null>(null);
+  const [elapsed, setElapsed] = useState(0);
   const [examName, setExamName] = useState('');
   const [questionNo, setQuestionNo] = useState('');
   const [model, setModel] = useState<'gemini' | 'openai'>('gemini');
@@ -57,6 +65,36 @@ export default function AutoPipelinePage() {
   const [result, setResult] = useState<PipelineResponse | null>(null);
   const [elapsed, setElapsed] = useState(0);
   const [showTrace, setShowTrace] = useState(false);
+
+  const handleFileUpload = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (file && (file.type === 'application/pdf' || file.type.startsWith('image/'))) {
+      setUploadedFile(file);
+      setQuestionText(''); // 파일 업로드 시 텍스트 입력 초기화
+    }
+  }, []);
+
+  const handleQuestionSelect = useCallback((questionIndex: number) => {
+    setSelectedQuestions(prev =>
+      prev.includes(questionIndex)
+        ? prev.filter(i => i !== questionIndex)
+        : [...prev, questionIndex]
+    );
+  }, []);
+
+  const convertFileToBase64 = (file: File): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const result = reader.result as string;
+        // data:image/jpeg;base64, 부분 제거
+        const base64 = result.split(',')[1];
+        resolve(base64);
+      };
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+  };
 
   // 피드백
   const [rating, setRating] = useState<number | null>(null);
@@ -83,25 +121,43 @@ export default function AutoPipelinePage() {
   }, [loadHistory]);
 
   async function run() {
-    if (!questionText.trim()) return;
+    if (!questionText.trim() && !uploadedFile) return;
     setRunning(true);
     setResult(null);
     setRating(null);
     setFeedbackNote('');
     setFeedbackSaved(false);
     const t0 = performance.now();
+
     try {
+      let requestBody: any = {
+        examName: examName || undefined,
+        questionNo: questionNo || undefined,
+        model,
+        topK,
+        maxRetries,
+      };
+
+      if (uploadedFile) {
+        // 파일 업로드 모드
+        const fileData = await convertFileToBase64(uploadedFile);
+        requestBody = {
+          ...requestBody,
+          fileData,
+          fileName: uploadedFile.name,
+          fileType: uploadedFile.type,
+          explanationMode,
+          selectedQuestions: explanationMode === 'partial' ? selectedQuestions : undefined,
+        };
+      } else {
+        // 텍스트 입력 모드
+        requestBody.questionText = questionText;
+      }
+
       const res = await fetch('/api/auto-pipeline', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          questionText,
-          examName: examName || undefined,
-          questionNo: questionNo || undefined,
-          model,
-          topK,
-          maxRetries,
-        }),
+        body: JSON.stringify(requestBody),
       });
       const data = (await res.json()) as PipelineResponse;
       setResult(data);
@@ -221,8 +277,84 @@ export default function AutoPipelinePage() {
               placeholder="문제를 붙여넣으세요. 수식은 LaTeX 또는 평문 모두 허용."
               rows={9}
               className="mt-1 w-full rounded-md border border-slate-300 p-3 font-mono text-sm font-normal"
+              disabled={!!uploadedFile}
             />
           </label>
+
+          {/* 파일 업로드 */}
+          <div className="mt-3">
+            <label className="block text-xs font-semibold text-slate-700 mb-2">
+              또는 PDF/이미지 파일 업로드
+            </label>
+            <input
+              type="file"
+              accept=".pdf,image/*"
+              onChange={handleFileUpload}
+              className="block w-full text-sm text-slate-500 file:mr-4 file:rounded-md file:border-0 file:bg-blue-50 file:px-3 file:py-2 file:text-sm file:font-semibold file:text-blue-700 hover:file:bg-blue-100"
+              disabled={!!questionText.trim()}
+            />
+            {uploadedFile && (
+              <p className="mt-1 text-xs text-green-600">
+                ✓ {uploadedFile.name} ({(uploadedFile.size / 1024 / 1024).toFixed(1)}MB)
+              </p>
+            )}
+          </div>
+
+          {/* 해설 모드 선택 */}
+          {uploadedFile && (
+            <div className="mt-3">
+              <label className="block text-xs font-semibold text-slate-700 mb-2">
+                해설 범위 선택
+              </label>
+              <div className="flex gap-4">
+                <label className="flex items-center">
+                  <input
+                    type="radio"
+                    value="full"
+                    checked={explanationMode === 'full'}
+                    onChange={(e) => setExplanationMode(e.target.value as 'full' | 'partial')}
+                    className="mr-2"
+                  />
+                  <span className="text-sm">전체 해설</span>
+                </label>
+                <label className="flex items-center">
+                  <input
+                    type="radio"
+                    value="partial"
+                    checked={explanationMode === 'partial'}
+                    onChange={(e) => setExplanationMode(e.target.value as 'full' | 'partial')}
+                    className="mr-2"
+                  />
+                  <span className="text-sm">부분 해설 (문제 선택)</span>
+                </label>
+              </div>
+            </div>
+          )}
+
+          {/* 부분 해설 시 문제 선택 */}
+          {uploadedFile && explanationMode === 'partial' && (
+            <div className="mt-3">
+              <label className="block text-xs font-semibold text-slate-700 mb-2">
+                해설할 문제 선택
+              </label>
+              <div className="grid grid-cols-5 gap-2">
+                {Array.from({ length: 20 }, (_, i) => i + 1).map((num) => (
+                  <label key={num} className="flex items-center">
+                    <input
+                      type="checkbox"
+                      checked={selectedQuestions.includes(num)}
+                      onChange={() => handleQuestionSelect(num)}
+                      className="mr-1"
+                    />
+                    <span className="text-xs">{num}번</span>
+                  </label>
+                ))}
+              </div>
+              <p className="mt-1 text-xs text-slate-500">
+                선택된 문제: {selectedQuestions.length > 0 ? selectedQuestions.join(', ') : '없음'}
+              </p>
+            </div>
+          )}
 
           <div className="mt-3 flex flex-wrap items-center gap-3 text-xs text-slate-700">
             <label className="flex items-center gap-1.5">
@@ -263,14 +395,14 @@ export default function AutoPipelinePage() {
           <div className="mt-4 flex gap-2">
             <button
               onClick={run}
-              disabled={running || !questionText.trim()}
+              disabled={running || (!questionText.trim() && !uploadedFile)}
               className="flex-1 rounded-md bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-indigo-700 disabled:cursor-not-allowed disabled:bg-slate-300"
             >
               {running ? '처리 중...' : '실행'}
             </button>
             <button
               onClick={retry}
-              disabled={running || !questionText.trim() || !result}
+              disabled={running || (!questionText.trim() && !uploadedFile) || !result}
               className="rounded-md border border-indigo-600 bg-white px-3 py-2.5 text-sm font-semibold text-indigo-700 hover:bg-indigo-50 disabled:cursor-not-allowed disabled:opacity-50"
               title="같은 입력으로 다시 호출 (LLM이 다른 결과를 줄 수 있음)"
             >

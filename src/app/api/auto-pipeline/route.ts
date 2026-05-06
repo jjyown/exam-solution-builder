@@ -26,6 +26,51 @@ import { runAutoPipeline } from '@/lib/autoPipeline';
 import { buildAutoChecklist } from '@/lib/autoPipelineChecklist';
 import { recordAutoPipelineRun } from '@/lib/autoPipelineLog';
 
+// ── 파일 처리 유틸리티 ──────────────────────────────────────────────────────
+async function processUploadedFile(fileData: string, fileName: string, fileType: string): Promise<string> {
+  // TODO: 실제 PDF/이미지 처리 라이브러리 추가 (pdf-parse, tesseract.js 등)
+  // 현재는 임시 구현 - base64 데이터를 텍스트로 변환 시도
+
+  if (fileType === 'application/pdf') {
+    // PDF 처리 로직 (추후 구현)
+    return `[PDF 파일: ${fileName}] - PDF 처리 기능은 추후 추가 예정입니다.`;
+  } else if (fileType.startsWith('image/')) {
+    // 이미지 OCR 로직 (추후 구현)
+    return `[이미지 파일: ${fileName}] - OCR 기능은 추후 추가 예정입니다.`;
+  }
+
+  return `[지원하지 않는 파일 형식: ${fileType}]`;
+}
+
+function extractQuestionsFromText(text: string): { index: number; content: string }[] {
+  // 간단한 문제 분리 로직 (개선 필요)
+  const questions: { index: number; content: string }[] = [];
+  const lines = text.split('\n');
+
+  let currentQuestion = '';
+  let questionIndex = 0;
+
+  for (const line of lines) {
+    // 문제 번호 패턴 감지 (예: "1.", "1번", "(1)" 등)
+    const questionMatch = line.match(/^(\d+)[\.\s번\)]\s*(.+)$/);
+    if (questionMatch) {
+      if (currentQuestion) {
+        questions.push({ index: questionIndex, content: currentQuestion.trim() });
+      }
+      questionIndex = parseInt(questionMatch[1]);
+      currentQuestion = questionMatch[2];
+    } else {
+      currentQuestion += ' ' + line;
+    }
+  }
+
+  if (currentQuestion) {
+    questions.push({ index: questionIndex, content: currentQuestion.trim() });
+  }
+
+  return questions;
+}
+
 // 런타임 1회 인덱싱, 이후 재사용 (Vercel/Railway 동일하게 동작)
 let retrieverPromise: Promise<ReferenceRetriever> | null = null;
 function getRetriever() {
@@ -105,6 +150,12 @@ export async function POST(req: Request) {
     maxRetries?: number;
     model?: string;
     persist?: boolean;
+    // 파일 업로드 지원
+    fileData?: string; // base64 encoded file
+    fileName?: string;
+    fileType?: string;
+    explanationMode?: 'full' | 'partial';
+    selectedQuestions?: number[];
   };
   try {
     body = await req.json();
@@ -112,9 +163,13 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, error: 'invalid JSON body' }, { status: 400 });
   }
 
-  if (!body.questionText || body.questionText.trim().length < 5) {
+  // 입력 검증: 텍스트 또는 파일 중 하나는 필수
+  const hasTextInput = body.questionText && body.questionText.trim().length >= 5;
+  const hasFileInput = body.fileData && body.fileName && body.fileType;
+
+  if (!hasTextInput && !hasFileInput) {
     return NextResponse.json(
-      { ok: false, error: 'questionText is required (>=5 chars)' },
+      { ok: false, error: 'questionText (>=5 chars) or fileData is required' },
       { status: 400 }
     );
   }
@@ -127,7 +182,36 @@ export async function POST(req: Request) {
   try {
     const retriever = await getRetriever();
     const llmCall = pickLlmCall(model);
-    const result = await runAutoPipeline(body.questionText, {
+
+    // 입력 처리: 텍스트 또는 파일
+    let processedQuestionText = body.questionText || '';
+
+    if (hasFileInput && body.fileData && body.fileName && body.fileType) {
+      // 파일에서 텍스트 추출
+      processedQuestionText = await processUploadedFile(body.fileData, body.fileName, body.fileType);
+
+      // 부분 해설 모드인 경우 선택된 문제만 필터링
+      if (body.explanationMode === 'partial' && body.selectedQuestions && body.selectedQuestions.length > 0) {
+        const allQuestions = extractQuestionsFromText(processedQuestionText);
+        const selectedQuestionsText = allQuestions
+          .filter(q => body.selectedQuestions!.includes(q.index))
+          .map(q => `${q.index}. ${q.content}`)
+          .join('\n\n');
+
+        if (selectedQuestionsText) {
+          processedQuestionText = `선택된 문제들:\n\n${selectedQuestionsText}`;
+        }
+      }
+    }
+
+    if (!processedQuestionText || processedQuestionText.trim().length < 5) {
+      return NextResponse.json(
+        { ok: false, error: 'processed question text is too short' },
+        { status: 400 }
+      );
+    }
+
+    const result = await runAutoPipeline(processedQuestionText, {
       retriever,
       llmCall,
       topK,
@@ -140,7 +224,7 @@ export async function POST(req: Request) {
     if (persist) {
       const log = await recordAutoPipelineRun(
         {
-          questionText: body.questionText,
+          questionText: processedQuestionText,
           examName: body.examName,
           questionNo: body.questionNo,
           model,
