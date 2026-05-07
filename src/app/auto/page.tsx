@@ -1398,13 +1398,17 @@ function ResultsSection(props: {
  */
 function MathText({ text }: { text: string }) {
   if (!text) return null;
+  // LLM 이 가끔 \(..\) / \[..\] LaTeX 표기를 보내므로 $..$ / $$..$$ 로 정규화
+  const normalized = text
+    .replace(/\\\[([\s\S]+?)\\\]/g, (_, inner: string) => `$$${inner}$$`)
+    .replace(/\\\(([\s\S]+?)\\\)/g, (_, inner: string) => `$${inner}$`);
   // $$...$$ (블록) 와 $...$ (인라인) 모두 지원
   const parts: Array<{ type: 'text' | 'inline' | 'block'; value: string }> = [];
   const re = /(\$\$[^$]+\$\$|\$[^$\n]+\$)/g;
   let last = 0;
   let m: RegExpExecArray | null;
-  while ((m = re.exec(text))) {
-    if (m.index > last) parts.push({ type: 'text', value: text.slice(last, m.index) });
+  while ((m = re.exec(normalized))) {
+    if (m.index > last) parts.push({ type: 'text', value: normalized.slice(last, m.index) });
     const token = m[0];
     if (token.startsWith('$$')) {
       parts.push({ type: 'block', value: token.slice(2, -2) });
@@ -1413,7 +1417,7 @@ function MathText({ text }: { text: string }) {
     }
     last = m.index + token.length;
   }
-  if (last < text.length) parts.push({ type: 'text', value: text.slice(last) });
+  if (last < normalized.length) parts.push({ type: 'text', value: normalized.slice(last) });
 
   return (
     <>
