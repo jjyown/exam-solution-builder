@@ -143,20 +143,51 @@ export default function AutoPipelinePage() {
     setAnalysisSyncing(true);
     setAnalysisSyncResult(null);
     try {
-      const res = await fetch('/api/drive/analysis/sync', { method: 'POST' });
-      const data = await res.json();
-      if (!data.ok) {
-        setAnalysisSyncResult({ ok: false, error: data.error ?? '동기화 실패' });
+      // 1) 백그라운드 작업 시작 — POST 즉시 반환 (502 방지)
+      const startRes = await fetch('/api/drive/analysis/sync', { method: 'POST' });
+      const startData = await startRes.json();
+      if (!startData.ok) {
+        setAnalysisSyncResult({
+          ok: false,
+          error: startData.error ?? '시작 실패',
+        });
         return;
       }
-      const s = data.summary;
-      setAnalysisSyncResult({
-        ok: true,
-        totalFiles: s.totalFiles ?? 0,
-        records: s.records ?? 0,
-        errors: Array.isArray(s.errors) ? s.errors : [],
-        bySubfolder: s.bySubfolder ?? {},
-      });
+      // 2) 상태 폴링 — 3초 간격으로 GET, 최대 10분
+      const startedAt = Date.now();
+      const TIMEOUT_MS = 10 * 60 * 1000;
+      // 약간의 정착 시간(첫 번째 GET 이 still running 잡도록)
+      await new Promise((r) => setTimeout(r, 500));
+      while (Date.now() - startedAt < TIMEOUT_MS) {
+        const pollRes = await fetch('/api/drive/analysis/sync');
+        const pollData = await pollRes.json();
+        const job = pollData.job;
+        if (!job) {
+          await new Promise((r) => setTimeout(r, 3000));
+          continue;
+        }
+        if (job.status === 'completed') {
+          const s = job.summary ?? {};
+          setAnalysisSyncResult({
+            ok: true,
+            totalFiles: s.totalFiles ?? 0,
+            records: s.records ?? 0,
+            errors: Array.isArray(s.errors) ? s.errors : [],
+            bySubfolder: s.bySubfolder ?? {},
+          });
+          return;
+        }
+        if (job.status === 'failed') {
+          setAnalysisSyncResult({
+            ok: false,
+            error: job.error ?? '동기화 실패',
+          });
+          return;
+        }
+        // running — 계속 폴링
+        await new Promise((r) => setTimeout(r, 3000));
+      }
+      setAnalysisSyncResult({ ok: false, error: '시간 초과 (10분)' });
     } catch (e) {
       setAnalysisSyncResult({ ok: false, error: (e as Error).message });
     } finally {
