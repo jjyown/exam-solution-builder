@@ -18,7 +18,7 @@
  *  의존성: react-image-crop (이미 설치됨), pdfjs-dist (이미 설치됨)
  * ────────────────────────────────────────────────────────────────────────────
  */
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import ReactCrop, { type Crop, type PixelCrop } from "react-image-crop";
 import "react-image-crop/dist/ReactCrop.css";
 
@@ -36,10 +36,18 @@ type DriveFile = {
   size: number | null;
 };
 
+/** 자연(원본) 픽셀 좌표의 박스 — 페이지 이미지 위에서의 크롭 영역. */
+type NaturalBox = { x: number; y: number; width: number; height: number };
+
 type CropEntry = {
   id: string;
   questionNo: string;
+  /** 어느 page (sources index) 에 속한 크롭인지 */
+  pageIdx: number;
   pageLabel: string;
+  /** 이미지 자연 픽셀 좌표 — overlay 위치·이동·재추출의 진실 소스 */
+  naturalBox: NaturalBox;
+  /** 이 박스 영역만 캔버스로 잘라낸 결과(미리보기·풀이 호출용). 박스 이동 시 재생성. */
   imageDataUrl: string;
   imageMimeType: string;
   /** 풀이 결과 — 처리 전엔 null */
@@ -65,11 +73,30 @@ export default function CropPage() {
   const [activePage, setActivePage] = useState(0);
   const [loadingFile, setLoadingFile] = useState(false);
   const [crop, setCrop] = useState<Crop>();
-  const [completedCrop, setCompletedCrop] = useState<PixelCrop | null>(null);
   const imgRef = useRef<HTMLImageElement | null>(null);
   const [crops, setCrops] = useState<CropEntry[]>([]);
   const [model, setModel] = useState<"gemini" | "openai">("openai"); // 비용 절감 — 기본 OpenAI
-  const [autoNo, setAutoNo] = useState(1); // 새 크롭 자동 번호
+  const pageContainerRef = useRef<HTMLDivElement | null>(null);
+  /** 이미지 로드/리렌더 시 overlay 위치 다시 계산하도록 강제 — img 의 display 크기가 바뀌었을 때 */
+  const [overlayTick, setOverlayTick] = useState(0);
+  /** 다음 자동 부여 번호 미리보기 (UI 안내용) */
+  const nextAutoNo = (() => {
+    const used = crops
+      .map((c) => Number.parseInt(c.questionNo, 10))
+      .filter((n) => Number.isFinite(n));
+    return (used.length > 0 ? Math.max(...used) : 0) + 1;
+  })();
+
+  // 윈도우 리사이즈 → overlay 위치 재계산
+  useEffect(() => {
+    const onResize = () => setOverlayTick((t) => t + 1);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+  // 페이지 전환 시 overlay 다시 그리기
+  useEffect(() => {
+    setOverlayTick((t) => t + 1);
+  }, [activePage]);
 
   // Google Drive 시험지 폴더 연동
   const [driveFiles, setDriveFiles] = useState<DriveFile[]>([]);
@@ -138,7 +165,6 @@ export default function CropPage() {
     setSources([]);
     setActivePage(0);
     setCrop(undefined);
-    setCompletedCrop(null);
     try {
       if (file.type === "application/pdf") {
         const pages = await renderPdfToImages(file);
@@ -162,49 +188,90 @@ export default function CropPage() {
     }
   }
 
-  function addCropFromSelection() {
-    const src = sources[activePage];
-    const sel = completedCrop;
-    if (!src || !sel || !imgRef.current || sel.width < 10 || sel.height < 10) {
-      alert("드래그로 영역을 선택한 뒤 추가하세요.");
-      return;
-    }
-    const imageEl = imgRef.current;
-    const scaleX = imageEl.naturalWidth / imageEl.width;
-    const scaleY = imageEl.naturalHeight / imageEl.height;
+  /** 자연 좌표 박스 → 캔버스로 잘라 PNG dataUrl 반환 */
+  function extractCropDataUrl(imageEl: HTMLImageElement, box: NaturalBox): string {
     const canvas = document.createElement("canvas");
-    canvas.width = Math.round(sel.width * scaleX);
-    canvas.height = Math.round(sel.height * scaleY);
+    canvas.width = Math.max(1, Math.round(box.width));
+    canvas.height = Math.max(1, Math.round(box.height));
     const ctx = canvas.getContext("2d");
-    if (!ctx) return;
+    if (!ctx) return "";
     ctx.drawImage(
       imageEl,
-      sel.x * scaleX,
-      sel.y * scaleY,
-      sel.width * scaleX,
-      sel.height * scaleY,
+      box.x,
+      box.y,
+      box.width,
+      box.height,
       0,
       0,
       canvas.width,
       canvas.height,
     );
-    const dataUrl = canvas.toDataURL("image/png");
-    const id = `crop-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    setCrops((prev) => [
-      ...prev,
-      {
-        id,
-        questionNo: String(autoNo),
-        pageLabel: src.pageLabel,
-        imageDataUrl: dataUrl,
-        imageMimeType: "image/png",
-        parsed: null,
-        status: "idle",
-      },
-    ]);
-    setAutoNo((n) => n + 1);
-    setCompletedCrop(null);
+    return canvas.toDataURL("image/png");
+  }
+
+  /** ReactCrop onComplete — 사용자가 마우스 떼면 자동으로 다음 번호 부여하고 추가. */
+  function handleCropComplete(sel: PixelCrop) {
+    if (sel.width < 10 || sel.height < 10 || !imgRef.current) return;
+    const imageEl = imgRef.current;
+    const src = sources[activePage];
+    if (!src) return;
+    const scaleX = imageEl.naturalWidth / imageEl.width;
+    const scaleY = imageEl.naturalHeight / imageEl.height;
+    const naturalBox: NaturalBox = {
+      x: sel.x * scaleX,
+      y: sel.y * scaleY,
+      width: sel.width * scaleX,
+      height: sel.height * scaleY,
+    };
+    const imageDataUrl = extractCropDataUrl(imageEl, naturalBox);
+    if (!imageDataUrl) return;
+
+    // 자동 번호 = 기존 번호들의 최댓값 + 1 (삭제로 인한 빈 번호는 채우지 않음)
+    setCrops((prev) => {
+      const usedNumbers = prev
+        .map((c) => Number.parseInt(c.questionNo, 10))
+        .filter((n) => Number.isFinite(n));
+      const nextNo = (usedNumbers.length > 0 ? Math.max(...usedNumbers) : 0) + 1;
+      const id = `crop-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      return [
+        ...prev,
+        {
+          id,
+          questionNo: String(nextNo),
+          pageIdx: activePage,
+          pageLabel: src.pageLabel,
+          naturalBox,
+          imageDataUrl,
+          imageMimeType: "image/png",
+          parsed: null,
+          status: "idle",
+        },
+      ];
+    });
+    // 새 박스 그릴 수 있도록 ReactCrop 선택 영역 초기화
     setCrop(undefined);
+  }
+
+  /** 박스 이동/리사이즈 후 호출 — 자연 좌표 갱신 + 자른 이미지 재생성. */
+  function updateCropBox(id: string, nextBox: NaturalBox) {
+    if (!imgRef.current) return;
+    const imageEl = imgRef.current;
+    const newDataUrl = extractCropDataUrl(imageEl, nextBox);
+    setCrops((prev) =>
+      prev.map((c) =>
+        c.id === id
+          ? {
+              ...c,
+              naturalBox: nextBox,
+              imageDataUrl: newDataUrl,
+              // 이미 풀이된 박스를 옮기면 결과도 무효화 → idle 로 되돌림
+              parsed: null,
+              status: "idle",
+              error: undefined,
+            }
+          : c,
+      ),
+    );
   }
 
   function removeCrop(id: string) {
@@ -448,16 +515,12 @@ export default function CropPage() {
         <section className="mt-4 rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
           <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
             <div className="text-xs font-semibold text-slate-700">
-              페이지 선택 · {sources.length}쪽
+              페이지 {sources.length}쪽 · 이 페이지의 박스{" "}
+              {crops.filter((c) => c.pageIdx === activePage).length}개
             </div>
-            <button
-              onClick={addCropFromSelection}
-              disabled={!completedCrop}
-              className="rounded-md border border-emerald-700 bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
-              title="드래그로 선택한 영역을 크롭 목록에 추가"
-            >
-              ➕ 이 영역을 문항 {autoNo}번으로 추가
-            </button>
+            <span className="text-[11px] text-slate-500">
+              마우스로 영역을 드래그하면 자동으로 다음 번호({nextAutoNo})로 추가됩니다.
+            </span>
           </div>
           {sources.length > 1 && (
             <div className="mb-2 flex flex-wrap gap-1">
@@ -467,7 +530,6 @@ export default function CropPage() {
                   onClick={() => {
                     setActivePage(i);
                     setCrop(undefined);
-                    setCompletedCrop(null);
                   }}
                   className={`rounded px-2 py-1 text-[11px] font-semibold ${
                     i === activePage
@@ -476,31 +538,57 @@ export default function CropPage() {
                   }`}
                 >
                   {s.pageLabel}
+                  {crops.some((c) => c.pageIdx === i) && (
+                    <span className="ml-1 rounded-full bg-emerald-200 px-1.5 text-[10px] text-emerald-900">
+                      {crops.filter((c) => c.pageIdx === i).length}
+                    </span>
+                  )}
                 </button>
               ))}
             </div>
           )}
           {activeSrc && (
-            <div className="overflow-auto rounded border border-slate-200 bg-slate-50 p-2">
-              <ReactCrop
-                crop={crop}
-                onChange={(_, percentCrop) => setCrop(percentCrop)}
-                onComplete={(c) => setCompletedCrop(c)}
-              >
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img
-                  ref={imgRef}
-                  src={activeSrc.dataUrl}
-                  alt={activeSrc.pageLabel}
-                  className="max-w-full"
-                  style={{ display: "block" }}
-                />
-              </ReactCrop>
+            <div
+              className="relative overflow-auto rounded border border-slate-200 bg-slate-50 p-2"
+              ref={pageContainerRef}
+            >
+              <div className="relative inline-block">
+                <ReactCrop
+                  crop={crop}
+                  onChange={(_, percentCrop) => setCrop(percentCrop)}
+                  onComplete={handleCropComplete}
+                >
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    ref={imgRef}
+                    src={activeSrc.dataUrl}
+                    alt={activeSrc.pageLabel}
+                    className="block max-w-full"
+                    onLoad={() => {
+                      // 이미지 로드 후 overlay 가 정확한 비율로 다시 그려지도록 강제 리렌더
+                      setOverlayTick((t) => t + 1);
+                    }}
+                  />
+                </ReactCrop>
+                {/* 기존 박스들을 overlay 로 표시 — 드래그로 이동, 핸들로 리사이즈, ✕ 로 삭제 */}
+                {imgRef.current &&
+                  crops
+                    .filter((c) => c.pageIdx === activePage)
+                    .map((c) => (
+                      <CropBoxOverlay
+                        key={c.id + ":" + overlayTick}
+                        entry={c}
+                        imageEl={imgRef.current!}
+                        onCommit={(nextBox) => updateCropBox(c.id, nextBox)}
+                        onDelete={() => removeCrop(c.id)}
+                      />
+                    ))}
+              </div>
             </div>
           )}
           <p className="mt-2 text-[11px] text-slate-500">
-            💡 마우스로 문제 영역을 드래그한 뒤 위 「추가」 버튼을 누르세요. 한 페이지에서 여러
-            문항을 차례로 추가할 수 있습니다.
+            💡 영역 드래그 → 자동 번호 부여. 추가된 박스는 가운데를 잡고 드래그해 위치 조정,
+            모서리 핸들로 크기 변경. ✕ 로 삭제. 다른 페이지에 가서도 계속 추가 가능합니다.
           </p>
         </section>
       )}
@@ -612,6 +700,176 @@ export default function CropPage() {
           업로드: {sourceFile.name} ({(sourceFile.size / 1024).toFixed(0)} KB)
         </p>
       )}
+    </div>
+  );
+}
+
+// ── 박스 overlay 컴포넌트 ────────────────────────────────────────────────
+/**
+ * 이미지 위에 절대 위치로 띄우는 크롭 박스.
+ * - 본체 드래그 → 위치 이동
+ * - 4 모서리 핸들 → 크기 조정
+ * - ✕ → 삭제
+ * 좌표는 imageEl 의 자연 픽셀 (naturalBox) 로 보관, 화면에는 display 크기 비율로 환산해 표시.
+ * onCommit 은 마우스 떼는 순간(mouseup)에만 호출 — 드래그 중에는 시각적 위치만 업데이트.
+ */
+function CropBoxOverlay({
+  entry,
+  imageEl,
+  onCommit,
+  onDelete,
+}: {
+  entry: CropEntry;
+  imageEl: HTMLImageElement;
+  onCommit: (next: NaturalBox) => void;
+  onDelete: () => void;
+}) {
+  const [box, setBox] = useState<NaturalBox>(entry.naturalBox);
+  // entry 가 외부에서 갱신되면(다른 곳에서 박스 옮긴 등) 동기화
+  useEffect(() => {
+    setBox(entry.naturalBox);
+  }, [entry.naturalBox]);
+
+  const dispScaleX = imageEl.width / imageEl.naturalWidth;
+  const dispScaleY = imageEl.height / imageEl.naturalHeight;
+  const left = box.x * dispScaleX;
+  const top = box.y * dispScaleY;
+  const width = box.width * dispScaleX;
+  const height = box.height * dispScaleY;
+
+  function startDrag(
+    e: React.MouseEvent,
+    mode: "move" | "nw" | "ne" | "sw" | "se",
+  ) {
+    e.preventDefault();
+    e.stopPropagation();
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const startBox = { ...box };
+    const natScaleX = imageEl.naturalWidth / imageEl.width;
+    const natScaleY = imageEl.naturalHeight / imageEl.height;
+
+    function clampMove(next: NaturalBox): NaturalBox {
+      const nW = imageEl.naturalWidth;
+      const nH = imageEl.naturalHeight;
+      const minSize = 10;
+      let x = next.x;
+      let y = next.y;
+      let w = Math.max(minSize, next.width);
+      let h = Math.max(minSize, next.height);
+      x = Math.max(0, Math.min(nW - w, x));
+      y = Math.max(0, Math.min(nH - h, y));
+      // 리사이즈 결과가 이미지 경계를 넘지 않도록
+      w = Math.min(w, nW - x);
+      h = Math.min(h, nH - y);
+      return { x, y, width: w, height: h };
+    }
+
+    function onMove(ev: MouseEvent) {
+      const dx = (ev.clientX - startX) * natScaleX;
+      const dy = (ev.clientY - startY) * natScaleY;
+      let next: NaturalBox;
+      if (mode === "move") {
+        next = {
+          x: startBox.x + dx,
+          y: startBox.y + dy,
+          width: startBox.width,
+          height: startBox.height,
+        };
+      } else if (mode === "se") {
+        next = {
+          x: startBox.x,
+          y: startBox.y,
+          width: startBox.width + dx,
+          height: startBox.height + dy,
+        };
+      } else if (mode === "ne") {
+        next = {
+          x: startBox.x,
+          y: startBox.y + dy,
+          width: startBox.width + dx,
+          height: startBox.height - dy,
+        };
+      } else if (mode === "sw") {
+        next = {
+          x: startBox.x + dx,
+          y: startBox.y,
+          width: startBox.width - dx,
+          height: startBox.height + dy,
+        };
+      } else {
+        // nw
+        next = {
+          x: startBox.x + dx,
+          y: startBox.y + dy,
+          width: startBox.width - dx,
+          height: startBox.height - dy,
+        };
+      }
+      setBox(clampMove(next));
+    }
+    function onUp() {
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+      // 마지막 상태로 commit (state 가 비동기라서 closure 의 최종값 잡기 위해 setBox 한 번 더 호출)
+      setBox((curr) => {
+        onCommit(curr);
+        return curr;
+      });
+    }
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  }
+
+  const handleClassBase =
+    "absolute h-3 w-3 rounded-sm border border-emerald-700 bg-white shadow";
+
+  return (
+    <div
+      className="absolute z-20 box-border border-2 border-emerald-500 bg-emerald-500/10 hover:bg-emerald-500/15"
+      style={{
+        left,
+        top,
+        width,
+        height,
+        cursor: "move",
+      }}
+      onMouseDown={(e) => startDrag(e, "move")}
+    >
+      {/* 번호 배지 */}
+      <span className="absolute -left-1 -top-3 select-none rounded-md bg-emerald-700 px-1.5 py-0.5 text-[10px] font-bold text-white shadow">
+        {entry.questionNo}번
+      </span>
+      {/* 삭제 */}
+      <button
+        type="button"
+        onMouseDown={(e) => e.stopPropagation()}
+        onClick={(e) => {
+          e.stopPropagation();
+          onDelete();
+        }}
+        className="absolute -right-2 -top-2 flex h-5 w-5 items-center justify-center rounded-full border border-rose-700 bg-white text-[11px] font-bold text-rose-700 shadow hover:bg-rose-50"
+        title="이 박스 삭제"
+      >
+        ✕
+      </button>
+      {/* 4 모서리 리사이즈 핸들 */}
+      <span
+        className={`${handleClassBase} -left-1.5 -top-1.5 cursor-nwse-resize`}
+        onMouseDown={(e) => startDrag(e, "nw")}
+      />
+      <span
+        className={`${handleClassBase} -right-1.5 -top-1.5 cursor-nesw-resize`}
+        onMouseDown={(e) => startDrag(e, "ne")}
+      />
+      <span
+        className={`${handleClassBase} -bottom-1.5 -left-1.5 cursor-nesw-resize`}
+        onMouseDown={(e) => startDrag(e, "sw")}
+      />
+      <span
+        className={`${handleClassBase} -bottom-1.5 -right-1.5 cursor-nwse-resize`}
+        onMouseDown={(e) => startDrag(e, "se")}
+      />
     </div>
   );
 }
