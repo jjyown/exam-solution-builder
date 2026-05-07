@@ -157,13 +157,6 @@ export async function resolveDriveExamEditAfterFolderId(
   return findChildFolderId(drive, editParentId, folderName);
 }
 
-/** @deprecated 폴더 구조 변경으로 시험지 편집 전 경로로 대체됨. 호환을 위해 유지. */
-export async function resolveDriveExamOriginalsFolderId(
-  drive: drive_v3.Drive,
-): Promise<string | null> {
-  return resolveDriveExamEditBeforeFolderId(drive);
-}
-
 /**
  * 「휴지통」 폴더 ID.
  * 시험지 편집 탭에서 작업 끝난 원본을 옮기는 위치 (Drive 시스템 휴지통과는 별개).

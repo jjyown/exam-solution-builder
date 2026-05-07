@@ -84,14 +84,6 @@ export default function EditPage() {
     "idle" | "loading" | "ready" | "no-config" | "no-folder" | "error"
   >("idle");
   const [driveError, setDriveError] = useState<string | null>(null);
-  const [drivePickerOpen, setDrivePickerOpen] = useState(false);
-  const [drivePicking, setDrivePicking] = useState(false);
-  /** 그리드 picker 에서 다중 선택된 fileId 들 */
-  const [driveSelected, setDriveSelected] = useState<Set<string>>(new Set());
-  /** 큰 미리보기로 띄울 fileId — null 이면 미열림 */
-  const [drivePreviewId, setDrivePreviewId] = useState<string | null>(null);
-  /** 가져오기 진행 표시: 「선택 N개 중 i 가져오는 중」 */
-  const [driveBulkProgress, setDriveBulkProgress] = useState<{ done: number; total: number } | null>(null);
 
   // 범위 입력·묶음 preset (사진 편집기 UX 차용)
   const [rangeText, setRangeText] = useState("");
@@ -379,68 +371,6 @@ export default function EditPage() {
     for (let i = 0; i < bin.length; i += 1) bytes[i] = bin.charCodeAt(i);
     const file = new File([bytes], data.fileName, { type: data.mimeType });
     return { file, driveFileId: fileId };
-  }
-
-  const pickDriveFile = useCallback(async (fileId: string) => {
-    setDrivePicking(true);
-    try {
-      const item = await fetchDriveFile(fileId);
-      await addFiles([item]);
-    } catch (e) {
-      alert(`Drive 가져오기 실패: ${(e as Error).message}`);
-    } finally {
-      setDrivePicking(false);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  /**
-   * 선택한 여러 Drive 파일을 순차로 가져와 슬롯에 추가.
-   * 메모리 문제(4MB × 100장 = 400MB) 회피를 위해 한 번에 한 파일만 메모리에 올림.
-   * 같은 학교 묶음을 한 번에 가져올 때 사용 (체크박스 다중 선택).
-   */
-  const pickDriveFilesBulk = useCallback(async (fileIds: string[]) => {
-    if (fileIds.length === 0) return;
-    setDrivePicking(true);
-    setDriveBulkProgress({ done: 0, total: fileIds.length });
-    const failures: string[] = [];
-    try {
-      for (let i = 0; i < fileIds.length; i++) {
-        const fid = fileIds[i];
-        try {
-          // eslint-disable-next-line no-await-in-loop
-          const item = await fetchDriveFile(fid);
-          // eslint-disable-next-line no-await-in-loop
-          await addFiles([item]);
-        } catch (e) {
-          failures.push(`${fid}: ${(e as Error).message}`);
-        }
-        setDriveBulkProgress({ done: i + 1, total: fileIds.length });
-      }
-      setDriveSelected(new Set());
-      if (failures.length > 0) {
-        alert(`일부 파일 가져오기 실패 (${failures.length}건):\n${failures.slice(0, 5).join("\n")}`);
-      }
-    } finally {
-      setDrivePicking(false);
-      setDriveBulkProgress(null);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  function toggleDriveSelected(fileId: string) {
-    setDriveSelected((prev) => {
-      const next = new Set(prev);
-      if (next.has(fileId)) next.delete(fileId);
-      else next.add(fileId);
-      return next;
-    });
-  }
-  function selectAllDrive() {
-    setDriveSelected(new Set(driveFiles.map((f) => f.id)));
-  }
-  function clearDriveSelection() {
-    setDriveSelected(new Set());
   }
 
   // ── 파일 → Slot 추가 ────────────────────────────────────────────────
@@ -1471,106 +1401,6 @@ export default function EditPage() {
         </section>
       )}
 
-      {/* Drive 썸네일 확대 미리보기 모달 — Esc 또는 바깥 클릭으로 닫힘 */}
-      {drivePreviewId && (
-        <DrivePreviewModal
-          fileId={drivePreviewId}
-          fileName={driveFiles.find((f) => f.id === drivePreviewId)?.name ?? ""}
-          checked={driveSelected.has(drivePreviewId)}
-          onClose={() => setDrivePreviewId(null)}
-          onToggleCheck={() => toggleDriveSelected(drivePreviewId)}
-          onAdd={() => {
-            const fid = drivePreviewId;
-            setDrivePreviewId(null);
-            void pickDriveFile(fid);
-          }}
-        />
-      )}
-    </div>
-  );
-}
-
-/**
- * 큰 미리보기 모달 — Drive thumb 를 size=800 으로 받아 학교명까지 또렷하게 보이게.
- * 체크 토글·바로 추가·닫기 액션 포함. Esc/배경 클릭으로 닫힘.
- */
-function DrivePreviewModal({
-  fileId,
-  fileName,
-  checked,
-  onClose,
-  onToggleCheck,
-  onAdd,
-}: {
-  fileId: string;
-  fileName: string;
-  checked: boolean;
-  onClose: () => void;
-  onToggleCheck: () => void;
-  onAdd: () => void;
-}) {
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    document.body.style.overflow = "hidden";
-    return () => {
-      window.removeEventListener("keydown", onKey);
-      document.body.style.overflow = "";
-    };
-  }, [onClose]);
-  return (
-    <div
-      className="fixed inset-0 z-50 flex flex-col bg-slate-900/80 p-4 backdrop-blur-sm"
-      role="dialog"
-      aria-modal="true"
-      onClick={onClose}
-    >
-      <div
-        className="mx-auto flex h-full max-h-[92vh] w-full max-w-5xl flex-col overflow-hidden rounded-lg bg-white shadow-2xl"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="flex items-center justify-between gap-2 border-b border-slate-200 px-3 py-2">
-          <div className="min-w-0 flex-1 truncate text-sm font-semibold text-slate-900" title={fileName}>
-            🖼 {fileName}
-          </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <label className="flex items-center gap-1 rounded border border-emerald-300 bg-emerald-50 px-2 py-1 text-[11px] font-semibold text-emerald-900">
-              <input
-                type="checkbox"
-                checked={checked}
-                onChange={onToggleCheck}
-                className="h-3.5 w-3.5 cursor-pointer accent-emerald-600"
-              />
-              묶음 선택
-            </label>
-            <button
-              type="button"
-              onClick={onAdd}
-              className="rounded border border-emerald-700 bg-emerald-600 px-3 py-1 text-[11px] font-semibold text-white hover:bg-emerald-700"
-            >
-              ➕ 바로 추가
-            </button>
-            <button
-              type="button"
-              onClick={onClose}
-              className="rounded border border-slate-300 bg-white px-3 py-1 text-[11px] font-semibold text-slate-700 hover:bg-slate-50"
-              title="닫기 (Esc)"
-            >
-              ✕ 닫기
-            </button>
-          </div>
-        </div>
-        <div className="flex-1 overflow-auto bg-slate-100 p-3 text-center">
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
-            src={`/api/drive/thumb?fileId=${encodeURIComponent(fileId)}&size=800`}
-            alt={fileName}
-            className="mx-auto max-h-full max-w-full rounded border border-slate-300 bg-white"
-          />
-        </div>
-      </div>
     </div>
   );
 }
