@@ -24,6 +24,11 @@ import {
 } from "./googleDrive";
 import { extractTextWithGeminiVision, isGeminiVisionAvailable } from "./geminiVisionExtract";
 import type { ReferenceRecord } from "./referenceRetriever";
+import {
+  fetchCachedRecords,
+  persistRecordsForFile,
+  pruneOrphanRecords,
+} from "./analysisRecordsStore";
 
 type CacheEntry = {
   modifiedTime: string | null;
@@ -104,11 +109,20 @@ export async function loadDriveAnalysisRecords(): Promise<{
 
   const all: ReferenceRecord[] = [];
   for (const f of files) {
+    // 1) in-memory 캐시 적중
     const cached = fileCache.get(f.id);
     if (cached && cached.modifiedTime === f.modifiedTime) {
       all.push(...cached.records);
       continue;
     }
+    // 2) Supabase 영구 캐시 적중 — 재배포·재시작 후에도 OCR 안 함
+    const persisted = await fetchCachedRecords(f.id, f.modifiedTime);
+    if (persisted && persisted.length > 0) {
+      fileCache.set(f.id, { modifiedTime: f.modifiedTime, records: persisted });
+      all.push(...persisted);
+      continue;
+    }
+    // 3) 캐시 둘 다 miss → Gemini OCR + Supabase 저장
     try {
       const { buffer, mimeType } = await downloadDriveFileById(f.id);
       const ext = path.extname(f.name).toLowerCase();
@@ -126,11 +140,24 @@ export async function loadDriveAnalysisRecords(): Promise<{
       }
       const records = splitTextIntoRecords(f.id, f.name, f.pathSegments, v.text);
       fileCache.set(f.id, { modifiedTime: f.modifiedTime, records });
+      // Supabase 영구 저장 — best-effort, 실패해도 in-memory 는 동작
+      try {
+        await persistRecordsForFile(f.id, f.modifiedTime, records);
+      } catch {
+        // silent
+      }
       all.push(...records);
       summary.newOrChanged += 1;
     } catch (e) {
       summary.errors.push(`${f.name}: ${(e as Error).message}`);
     }
+  }
+
+  // Drive 에서 삭제된 파일의 Supabase row 정리 (best-effort)
+  try {
+    await pruneOrphanRecords(files.map((f) => f.id));
+  } catch {
+    // silent
   }
 
   summary.records = all.length;

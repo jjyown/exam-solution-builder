@@ -139,6 +139,29 @@ export default function AutoPipelinePage() {
     | null
   >(null);
 
+  // 분석자료 검색
+  const [analysisSearchOpen, setAnalysisSearchOpen] = useState(false);
+  const [analysisSearchQ, setAnalysisSearchQ] = useState('');
+  const [analysisSearchBusy, setAnalysisSearchBusy] = useState(false);
+  const [analysisSearchResults, setAnalysisSearchResults] = useState<
+    Array<{ id: string; source: string; problem_hint?: string; snippet: string }>
+  >([]);
+
+  const runAnalysisSearch = useCallback(async () => {
+    const q = analysisSearchQ.trim();
+    if (!q) return;
+    setAnalysisSearchBusy(true);
+    try {
+      const res = await fetch(`/api/drive/analysis/search?q=${encodeURIComponent(q)}&limit=20`);
+      const data = await res.json();
+      setAnalysisSearchResults(Array.isArray(data.results) ? data.results : []);
+    } catch {
+      setAnalysisSearchResults([]);
+    } finally {
+      setAnalysisSearchBusy(false);
+    }
+  }, [analysisSearchQ]);
+
   const syncDriveAnalysis = useCallback(async () => {
     setAnalysisSyncing(true);
     setAnalysisSyncResult(null);
@@ -648,6 +671,14 @@ export default function AutoPipelinePage() {
         <div className="flex items-center gap-2">
           <button
             type="button"
+            onClick={() => setAnalysisSearchOpen((v) => !v)}
+            className="rounded-md border border-emerald-300 bg-white px-3 py-1.5 text-xs font-semibold text-emerald-800 hover:bg-emerald-50"
+            title="분석용 자료 (Supabase 영구 저장된 OCR 결과) 안에서 키워드 검색"
+          >
+            분석자료 검색 {analysisSearchOpen ? '닫기' : '열기'}
+          </button>
+          <button
+            type="button"
             onClick={syncDriveAnalysis}
             disabled={analysisSyncing}
             className="rounded-md border border-emerald-300 bg-white px-3 py-1.5 text-xs font-semibold text-emerald-800 hover:bg-emerald-50 disabled:opacity-50"
@@ -663,6 +694,43 @@ export default function AutoPipelinePage() {
           </button>
         </div>
       </header>
+
+      {analysisSearchOpen && (
+        <div className="mb-4 rounded-lg border border-emerald-200 bg-emerald-50/40 p-3">
+          <div className="flex items-center gap-2">
+            <input
+              type="text"
+              value={analysisSearchQ}
+              onChange={(e) => setAnalysisSearchQ(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') runAnalysisSearch(); }}
+              placeholder="예: 조건부확률 / 원형 순열 / 함수의 극한"
+              className="flex-1 rounded-md border border-emerald-300 px-3 py-1.5 text-sm"
+            />
+            <button
+              type="button"
+              onClick={runAnalysisSearch}
+              disabled={analysisSearchBusy}
+              className="rounded-md bg-emerald-700 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-800 disabled:opacity-50"
+            >
+              {analysisSearchBusy ? '검색 중…' : '검색'}
+            </button>
+          </div>
+          {analysisSearchResults.length > 0 && (
+            <ul className="mt-3 max-h-72 space-y-2 overflow-y-auto">
+              {analysisSearchResults.map((r) => (
+                <li key={r.id} className="rounded border border-emerald-200 bg-white p-2 text-xs">
+                  <p className="font-semibold text-slate-800">{r.problem_hint || r.source}</p>
+                  <p className="mt-0.5 text-[11px] text-slate-500">{r.source}</p>
+                  <p className="mt-1 text-slate-700">{r.snippet}</p>
+                </li>
+              ))}
+            </ul>
+          )}
+          {!analysisSearchBusy && analysisSearchResults.length === 0 && analysisSearchQ.trim() && (
+            <p className="mt-2 text-xs text-slate-600">결과 없음 — Supabase 에 분석자료 저장 안 됐을 수 있습니다 (「분석자료 새로 학습」 한 번 눌러보세요).</p>
+          )}
+        </div>
+      )}
 
       {analysisSyncResult && (
         <div className={`mb-4 rounded-lg border p-3 text-xs ${analysisSyncResult.ok ? 'border-emerald-300 bg-emerald-50 text-emerald-950' : 'border-rose-300 bg-rose-50 text-rose-950'}`}>
