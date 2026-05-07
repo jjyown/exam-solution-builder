@@ -11,6 +11,7 @@ const nextConfig: NextConfig = {
     "pdfjs-dist",
     "@google/generative-ai",
     "googleapis",
+    "pg",
   ],
 };
 

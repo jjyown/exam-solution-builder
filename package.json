@@ -36,6 +36,7 @@
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
     "@supabase/supabase-js": "^2.105.1",
+    "@types/pg": "^8.20.0",
     "docx": "^9.6.1",
     "googleapis": "^171.4.0",
     "html2canvas": "^1.4.1",
@@ -44,6 +45,7 @@
     "katex": "^0.16.45",
     "next": "16.2.4",
     "pdfjs-dist": "^5.7.284",
+    "pg": "^8.20.0",
     "react": "19.2.4",
     "react-dom": "19.2.4",
     "react-image-crop": "^11.0.10",
