@@ -30,6 +30,25 @@ type DriveFile = {
 };
 
 type NaturalBox = { x: number; y: number; width: number; height: number };
+/**
+ * 정규화 박스 — 이미지 가로/세로 대비 0~1 비율로 저장.
+ * 이미지 해상도(s1600 썸네일 vs 풀 원본) 가 바뀌어도 같은 영역을 가리킴.
+ * 캔버스 그리기·자르기 시 현재 imageEl 의 naturalWidth/Height 와 곱해 픽셀 좌표로 환산.
+ */
+type CropNorm = { x: number; y: number; width: number; height: number };
+
+function normToNaturalBox(
+  n: CropNorm,
+  naturalW: number,
+  naturalH: number,
+): NaturalBox {
+  return {
+    x: n.x * naturalW,
+    y: n.y * naturalH,
+    width: n.width * naturalW,
+    height: n.height * naturalH,
+  };
+}
 
 /** 편집 슬롯 — 한 장의 원본 이미지(또는 PDF 한 페이지)에 대응. */
 type Slot = {
@@ -46,7 +65,8 @@ type Slot = {
   /** 사용자가 부여한 페이지 번호 — 출력 PDF 의 정렬 기준 */
   pageNo: number;
   /** 자연 좌표 박스 — 비어있으면 미설정. 자르기 결과 imageDataUrl 도 같이 보관 */
-  naturalBox: NaturalBox | null;
+  /** 자른 영역 — 정규화 0~1 좌표. null 이면 미설정. 이미지 해상도 변경에 안전. */
+  cropNorm: CropNorm | null;
   croppedDataUrl: string | null;
   /** Gemini 가 추출해 준 시험명 한 줄 — 「묶음 이름」으로 사용 가능 */
   suggestedName: string | null;
@@ -253,7 +273,7 @@ export default function EditPage() {
           thumbUrl: directThumb,
           sourceLabel: f.name,
           pageNo: nextNo,
-          naturalBox: null,
+          cropNorm: null,
           croppedDataUrl: null,
           suggestedName: null,
           busy: null,
@@ -392,7 +412,7 @@ export default function EditPage() {
               thumbUrl: p.dataUrl,
               sourceLabel: `${f.name} ${p.pageLabel}`,
               pageNo: 0,
-              naturalBox: null,
+              cropNorm: null,
               croppedDataUrl: null,
               suggestedName: null,
               busy: null,
@@ -410,7 +430,7 @@ export default function EditPage() {
             thumbUrl: dataUrl,
             sourceLabel: f.name,
             pageNo: 0,
-            naturalBox: null,
+            cropNorm: null,
             croppedDataUrl: null,
             suggestedName: null,
             busy: null,
@@ -467,19 +487,23 @@ export default function EditPage() {
     if (!active || !imgRef.current) return;
     if (sel.width < 10 || sel.height < 10) return;
     const imageEl = imgRef.current;
-    const scaleX = imageEl.naturalWidth / imageEl.width;
-    const scaleY = imageEl.naturalHeight / imageEl.height;
-    const naturalBox: NaturalBox = {
-      x: sel.x * scaleX,
-      y: sel.y * scaleY,
-      width: sel.width * scaleX,
-      height: sel.height * scaleY,
+    if (!imageEl.width || !imageEl.height) return;
+    // 표시 좌표 → 정규화 0~1 (이미지 해상도 변경에 안전)
+    const cropNorm: CropNorm = {
+      x: sel.x / imageEl.width,
+      y: sel.y / imageEl.height,
+      width: sel.width / imageEl.width,
+      height: sel.height / imageEl.height,
     };
-    // 빨간 박스 즉시 표시 (사용자 피드백) — naturalBox 만 먼저 저장.
-    // croppedDataUrl 은 풀 dataURL 이 있어야 toDataURL 가능 (CDN URL 은 canvas tainted).
-    setSlot(active.id, { naturalBox, error: undefined });
+    // 빨간 박스 즉시 표시 — cropNorm 만 먼저 저장.
+    setSlot(active.id, { cropNorm, error: undefined });
 
     // captureCrop 시도 — imgRef 가 dataURL 이면 즉시 OK, CDN URL 이면 SecurityError.
+    const naturalBox = normToNaturalBox(
+      cropNorm,
+      imageEl.naturalWidth,
+      imageEl.naturalHeight,
+    );
     try {
       const croppedDataUrl = captureCrop(imageEl, naturalBox);
       setSlot(active.id, { croppedDataUrl });
@@ -487,17 +511,22 @@ export default function EditPage() {
     } catch {
       /* tainted — 풀 dataURL 받아 다시 시도 */
     }
-    // 폴백: 풀 dataURL 다운로드 → 별도 Image 로 그려 captureCrop
+    // 폴백: 풀 dataURL 다운로드 → 별도 Image 로 풀 해상도 기준 다시 환산해 자르기
     const fullSrc = await ensureFullDataUrlSource(active.id);
     if (!fullSrc) return;
     try {
       const fullImg = await loadImage(fullSrc);
-      const croppedDataUrl = captureCrop(fullImg, naturalBox);
+      const fullBox = normToNaturalBox(
+        cropNorm,
+        fullImg.naturalWidth,
+        fullImg.naturalHeight,
+      );
+      const croppedDataUrl = captureCrop(fullImg, fullBox);
       setSlot(active.id, { croppedDataUrl });
     } catch (e) {
       setSlot(active.id, { error: `자르기 실패: ${(e as Error).message}` });
     }
-    // crop state 는 useEffect 가 active.naturalBox 변화 감지해 자동으로 다시 그려줌
+    // crop state 는 useEffect 가 active.cropNorm 변화 감지해 자동으로 다시 그려줌
   }
 
   // ── AI 박스 자동 검출 ─────────────────────────────────────────────────
@@ -518,16 +547,17 @@ export default function EditPage() {
       const data = await res.json();
       if (!data.ok) throw new Error(data.error || "AI 박스 검출 실패");
       const box = data.box as { nx: number; ny: number; nw: number; nh: number };
-      const dim = await imageDimensions(src);
-      const naturalBox: NaturalBox = {
-        x: box.nx * dim.w,
-        y: box.ny * dim.h,
-        width: box.nw * dim.w,
-        height: box.nh * dim.h,
+      // Gemini 응답은 이미 정규화 0~1 — 그대로 cropNorm 으로 보관
+      const cropNorm: CropNorm = {
+        x: box.nx,
+        y: box.ny,
+        width: box.nw,
+        height: box.nh,
       };
       const img = await loadImage(src);
+      const naturalBox = normToNaturalBox(cropNorm, img.naturalWidth, img.naturalHeight);
       const croppedDataUrl = captureCrop(img, naturalBox);
-      setSlot(s.id, { naturalBox, croppedDataUrl, busy: null });
+      setSlot(s.id, { cropNorm, croppedDataUrl, busy: null });
     } catch (e) {
       setSlot(s.id, { busy: null, error: (e as Error).message });
     }
@@ -537,7 +567,7 @@ export default function EditPage() {
     setBulkBusy(true);
     try {
       // 체크된 슬롯만 처리 (115장 자동로드 환경에서 「전체 AI 박스」가 모든 파일 처리하면 곤란)
-      const targets = slots.filter((s) => s.includeInPdf && !s.naturalBox);
+      const targets = slots.filter((s) => s.includeInPdf && !s.cropNorm);
       if (targets.length === 0) {
         alert("AI 박스를 적용할 체크된 페이지가 없습니다.");
         return;
@@ -553,7 +583,7 @@ export default function EditPage() {
 
   // ── AI 박스 모방 (현재 슬롯 박스를 기준으로 나머지에 같은 의도 적용) ────
   async function mimicBoxFromActive() {
-    if (!active?.naturalBox || !active?.croppedDataUrl) {
+    if (!active?.cropNorm || !active?.croppedDataUrl) {
       alert("현재 페이지에 박스가 잡혀 있어야 합니다 (드래그 또는 AI 자동).");
       return;
     }
@@ -563,17 +593,17 @@ export default function EditPage() {
       alert("기준 페이지 풀 원본을 불러오지 못했습니다.");
       return;
     }
-    const refImg = await loadImage(refSrc);
+    // cropNorm 자체가 정규화 0~1 — 그대로 Gemini 모방 API 의 referenceBox 로 전송
     const refBox = {
-      nx: active.naturalBox.x / refImg.naturalWidth,
-      ny: active.naturalBox.y / refImg.naturalHeight,
-      nw: active.naturalBox.width / refImg.naturalWidth,
-      nh: active.naturalBox.height / refImg.naturalHeight,
+      nx: active.cropNorm.x,
+      ny: active.cropNorm.y,
+      nw: active.cropNorm.width,
+      nh: active.cropNorm.height,
     };
     setBulkBusy(true);
     try {
       // 체크된 슬롯만 모방 대상 — Drive 자동 로드 시 미체크가 기본이므로 명시적 묶음만 처리
-      const targets = slots.filter((s) => s.id !== active.id && s.includeInPdf && !s.naturalBox);
+      const targets = slots.filter((s) => s.id !== active.id && s.includeInPdf && !s.cropNorm);
       if (targets.length === 0) {
         alert("모방 대상이 없습니다. 사이드바에서 같은 묶음 페이지들을 체크하세요.");
         return;
@@ -602,16 +632,22 @@ export default function EditPage() {
           const data = await res.json();
           if (!data.ok) throw new Error(data.error || "박스 모방 실패");
           const tgtBox = data.box as { nx: number; ny: number; nw: number; nh: number };
+          // Gemini 응답은 정규화 — 그대로 cropNorm
+          const cropNorm: CropNorm = {
+            x: tgtBox.nx,
+            y: tgtBox.ny,
+            width: tgtBox.nw,
+            height: tgtBox.nh,
+          };
           // eslint-disable-next-line no-await-in-loop
           const tgtImg = await loadImage(tgtSrc);
-          const naturalBox: NaturalBox = {
-            x: tgtBox.nx * tgtImg.naturalWidth,
-            y: tgtBox.ny * tgtImg.naturalHeight,
-            width: tgtBox.nw * tgtImg.naturalWidth,
-            height: tgtBox.nh * tgtImg.naturalHeight,
-          };
+          const naturalBox = normToNaturalBox(
+            cropNorm,
+            tgtImg.naturalWidth,
+            tgtImg.naturalHeight,
+          );
           const croppedDataUrl = captureCrop(tgtImg, naturalBox);
-          setSlot(s.id, { naturalBox, croppedDataUrl, busy: null });
+          setSlot(s.id, { cropNorm, croppedDataUrl, busy: null });
         } catch (e) {
           setSlot(s.id, { busy: null, error: (e as Error).message });
         }
@@ -823,29 +859,25 @@ export default function EditPage() {
   // 이미지 자연 크기는 img 가 로드돼야 알 수 있어 imgLoadTick 으로 재트리거.
   const [imgLoadTick, setImgLoadTick] = useState(0);
   useEffect(() => {
-    if (!active || !active.naturalBox || !imgRef.current) {
+    if (!active || !active.cropNorm) {
       setCrop(undefined);
       return;
     }
-    const img = imgRef.current;
-    if (!img.naturalWidth || !img.naturalHeight) {
-      // 아직 로드 전 — onLoad 가 imgLoadTick 증가시키면 다시 평가
-      return;
-    }
+    // cropNorm 은 정규화 0~1 — 이미지 자연 크기와 무관하게 % 로 직접 변환 가능
     setCrop({
       unit: "%",
-      x: (active.naturalBox.x / img.naturalWidth) * 100,
-      y: (active.naturalBox.y / img.naturalHeight) * 100,
-      width: (active.naturalBox.width / img.naturalWidth) * 100,
-      height: (active.naturalBox.height / img.naturalHeight) * 100,
+      x: active.cropNorm.x * 100,
+      y: active.cropNorm.y * 100,
+      width: active.cropNorm.width * 100,
+      height: active.cropNorm.height * 100,
     });
   }, [
     active,
     active?.id,
-    active?.naturalBox?.x,
-    active?.naturalBox?.y,
-    active?.naturalBox?.width,
-    active?.naturalBox?.height,
+    active?.cropNorm?.x,
+    active?.cropNorm?.y,
+    active?.cropNorm?.width,
+    active?.cropNorm?.height,
     active?.sourceDataUrl,
     imgLoadTick,
   ]);
@@ -1155,7 +1187,7 @@ export default function EditPage() {
                         {s.sourceLabel}
                       </div>
                       <div className="truncate text-slate-500">
-                        {s.naturalBox ? "✓ 박스" : "박스 없음"}
+                        {s.cropNorm ? "✓ 박스" : "박스 없음"}
                         {s.busy && ` · ${labelBusy(s.busy)}`}
                         {s.error && ` · ✗`}
                       </div>
@@ -1206,7 +1238,7 @@ export default function EditPage() {
                 </button>
                 <button
                   onClick={detectAllBoxes}
-                  disabled={bulkBusy || slots.every((s) => s.naturalBox)}
+                  disabled={bulkBusy || slots.every((s) => s.cropNorm)}
                   className="rounded-md border border-indigo-300 bg-white px-3 py-1.5 text-xs font-semibold text-indigo-800 hover:bg-indigo-50 disabled:opacity-50"
                   title="박스 없는 모든 페이지에 AI 자동 박스 적용"
                 >
@@ -1214,7 +1246,7 @@ export default function EditPage() {
                 </button>
                 <button
                   onClick={mimicBoxFromActive}
-                  disabled={!active?.naturalBox || bulkBusy}
+                  disabled={!active?.cropNorm || bulkBusy}
                   className="rounded-md border border-purple-700 bg-purple-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-purple-700 disabled:opacity-50"
                   title="현재 박스를 기준으로 나머지 페이지에 같은 의도의 박스 복제"
                 >
