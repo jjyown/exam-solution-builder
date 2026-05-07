@@ -214,11 +214,11 @@ export default function AutoPipelinePage() {
   const FILE_SIZE_WARN_MB = 3;
   const FILE_SIZE_LIMIT_MB = 4.5;
 
-  const handleFileUpload = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
-    if (!(file.type === 'application/pdf' || file.type.startsWith('image/'))) {
-      setExtractState({ status: 'error', error: `지원하지 않는 파일 형식: ${file.type || '알 수 없음'}` });
+  const acceptUploadedFile = useCallback((file: File) => {
+    const isPdf = file.type === 'application/pdf' || /\.pdf$/i.test(file.name);
+    const isImg = file.type.startsWith('image/') || /\.(png|jpe?g|webp|gif)$/i.test(file.name);
+    if (!isPdf && !isImg) {
+      setExtractState({ status: 'error', error: `지원하지 않는 파일 형식: ${file.type || file.name}` });
       return;
     }
     const sizeMB = file.size / 1024 / 1024;
@@ -233,6 +233,41 @@ export default function AutoPipelinePage() {
     setQuestionText('');
     setSelectedQuestions([]);
     setExtractState({ status: 'idle' });
+  }, []);
+
+  const handleFileUpload = useCallback(
+    (event: React.ChangeEvent<HTMLInputElement>) => {
+      const file = event.target.files?.[0];
+      if (!file) return;
+      acceptUploadedFile(file);
+    },
+    [acceptUploadedFile],
+  );
+
+  const [isDragOver, setIsDragOver] = useState(false);
+  const handleDrop = useCallback(
+    (event: React.DragEvent<HTMLDivElement>) => {
+      event.preventDefault();
+      event.stopPropagation();
+      setIsDragOver(false);
+      if (questionText.trim()) return; // 텍스트 입력 모드면 무시
+      const file = event.dataTransfer?.files?.[0];
+      if (file) acceptUploadedFile(file);
+    },
+    [acceptUploadedFile, questionText],
+  );
+  const handleDragOver = useCallback((event: React.DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
+    setIsDragOver(true);
+  }, []);
+  const handleDragLeave = useCallback((event: React.DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    // 자식 요소로 이동할 때도 leave 가 발생하므로 currentTarget 검사
+    if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
+    setIsDragOver(false);
   }, []);
 
   const handleQuestionSelect = useCallback((questionNumber: number) => {
@@ -741,18 +776,37 @@ export default function AutoPipelinePage() {
             )}
           </div>
 
-          {/* 파일 업로드 */}
+          {/* 파일 업로드 (드래그 앤 드롭 지원) */}
           <div className="mt-3">
             <label className="block text-xs font-semibold text-slate-700 mb-2">
-              또는 PDF/이미지 파일 업로드
+              또는 PDF/이미지 파일 업로드 — 끌어다 놓아도 됩니다
             </label>
-            <input
-              type="file"
-              accept=".pdf,image/*"
-              onChange={handleFileUpload}
-              className="block w-full text-sm text-slate-500 file:mr-4 file:rounded-md file:border-0 file:bg-blue-50 file:px-3 file:py-2 file:text-sm file:font-semibold file:text-blue-700 hover:file:bg-blue-100"
-              disabled={!!questionText.trim()}
-            />
+            <div
+              onDrop={handleDrop}
+              onDragOver={handleDragOver}
+              onDragEnter={handleDragOver}
+              onDragLeave={handleDragLeave}
+              className={`rounded-md border-2 border-dashed px-3 py-4 transition-colors ${
+                questionText.trim()
+                  ? 'border-slate-200 bg-slate-50 opacity-60'
+                  : isDragOver
+                    ? 'border-blue-500 bg-blue-50'
+                    : 'border-slate-300 bg-slate-50 hover:border-blue-400 hover:bg-blue-50/40'
+              }`}
+            >
+              <p className="mb-2 text-center text-xs text-slate-600">
+                {isDragOver
+                  ? '↓ 여기에 놓으세요'
+                  : '파일을 이 영역에 끌어다 놓거나, 아래 「파일 선택」 버튼 사용'}
+              </p>
+              <input
+                type="file"
+                accept=".pdf,image/*"
+                onChange={handleFileUpload}
+                className="block w-full text-sm text-slate-500 file:mr-4 file:rounded-md file:border-0 file:bg-blue-100 file:px-3 file:py-2 file:text-sm file:font-semibold file:text-blue-800 hover:file:bg-blue-200 disabled:opacity-40"
+                disabled={!!questionText.trim()}
+              />
+            </div>
             {uploadedFile && (() => {
               const sizeMB = uploadedFile.size / 1024 / 1024;
               const warn = sizeMB >= FILE_SIZE_WARN_MB;
