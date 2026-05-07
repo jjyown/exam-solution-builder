@@ -1228,6 +1228,7 @@ export default function AutoPipelinePage() {
       {result && (
         <ResultsSection
           result={result}
+          examName={examName}
           activeIdx={activeIdx}
           onActiveIdx={setActiveIdx}
           showTrace={showTrace}
@@ -1253,6 +1254,7 @@ export default function AutoPipelinePage() {
 
 function ResultsSection(props: {
   result: PipelineResponse;
+  examName: string;
   activeIdx: number;
   onActiveIdx: (idx: number) => void;
   showTrace: boolean;
@@ -1278,6 +1280,7 @@ function ResultsSection(props: {
   const active = runs[activeIdx] ?? runs[0];
   const totalCostCents = runs.reduce((s, r) => s + (r.approxCostCents ?? 0), 0);
   const [docxBusy, setDocxBusy] = useState<null | 'active' | 'all'>(null);
+  const [previewScope, setPreviewScope] = useState<null | 'active' | 'all'>(null);
   async function handleDocx(scope: 'active' | 'all') {
     setDocxBusy(scope);
     try {
@@ -1348,6 +1351,14 @@ function ResultsSection(props: {
                   {' '}소스 {result.extracted.source}
                 </span>
               )}
+              <button
+                onClick={() => setPreviewScope('all')}
+                disabled={successCount === 0}
+                className="rounded-md border border-indigo-300 bg-white px-3 py-1 text-[11px] font-semibold text-indigo-800 hover:bg-indigo-50 disabled:cursor-not-allowed disabled:opacity-50"
+                title="DOCX 다운로드 전에 결과물이 어떻게 나올지 화면에서 미리보기"
+              >
+                📄 전체 미리보기
+              </button>
               <button
                 onClick={() => handleDocx('all')}
                 disabled={successCount === 0 || docxBusy !== null}
@@ -1432,6 +1443,14 @@ function ResultsSection(props: {
               )}
             </div>
             <div className="flex gap-1">
+              <button
+                onClick={() => setPreviewScope('active')}
+                disabled={!active.parsed}
+                className="rounded border border-emerald-300 bg-white px-2 py-1 text-[11px] font-semibold text-emerald-800 hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-40"
+                title="이 문항이 DOCX에서 어떻게 나올지 미리보기"
+              >
+                📄 미리보기
+              </button>
               <button
                 onClick={() => handleDocx('active')}
                 disabled={!active.parsed || docxBusy !== null}
@@ -1524,7 +1543,171 @@ function ResultsSection(props: {
           </div>
         </div>
       </div>
+
+      {previewScope && (
+        <DocxPreviewModal
+          examName={props.examName}
+          runs={previewScope === 'all' ? runs.filter((r) => r.parsed) : [active].filter((r) => r.parsed)}
+          onClose={() => setPreviewScope(null)}
+        />
+      )}
     </section>
+  );
+}
+
+/**
+ * DOCX 다운로드 전 결과물이 어떻게 나올지 보여주는 미리보기 모달.
+ * 실제 DOCX 레이아웃(수학영역 헤더 → 시험명(해설) → 문항별 [정답]·[해설])을 흉내낸 A4 종이 스타일.
+ * 화면에서 미리 검토하거나 브라우저 인쇄(Ctrl+P)로 PDF 저장도 가능.
+ */
+function DocxPreviewModal({
+  examName,
+  runs,
+  onClose,
+}: {
+  examName: string;
+  runs: RunRow[];
+  onClose: () => void;
+}) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    document.body.style.overflow = 'hidden';
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      document.body.style.overflow = '';
+    };
+  }, [onClose]);
+
+  const displayName = (examName || '미지정시험지').trim();
+  const today = new Date();
+  const dateStr = `${today.getFullYear()}.${String(today.getMonth() + 1).padStart(2, '0')}.${String(today.getDate()).padStart(2, '0')}`;
+
+  function handlePrint() {
+    window.print();
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex flex-col bg-slate-900/70 backdrop-blur-sm print:bg-white print:backdrop-blur-none"
+      role="dialog"
+      aria-modal="true"
+    >
+      {/* 헤더 (인쇄 시 숨김) */}
+      <div className="flex items-center justify-between border-b border-slate-200 bg-white px-4 py-2 shadow-sm print:hidden">
+        <div className="flex items-baseline gap-3">
+          <h3 className="text-sm font-semibold text-slate-900">📄 DOCX 결과물 미리보기</h3>
+          <span className="text-[11px] text-slate-500">
+            {runs.length}문항 · 실제 DOCX 레이아웃과 거의 동일 · 인쇄(Ctrl+P)로 PDF 저장 가능
+          </span>
+        </div>
+        <div className="flex gap-2">
+          <button
+            onClick={handlePrint}
+            className="rounded border border-slate-700 bg-slate-700 px-3 py-1 text-[11px] font-semibold text-white hover:bg-slate-800"
+            title="브라우저 인쇄 → PDF로 저장 가능 (Ctrl+P)"
+          >
+            🖨 인쇄·PDF
+          </button>
+          <button
+            onClick={onClose}
+            className="rounded border border-slate-300 bg-white px-3 py-1 text-[11px] font-semibold text-slate-700 hover:bg-slate-100"
+            title="닫기 (Esc)"
+          >
+            ✕ 닫기
+          </button>
+        </div>
+      </div>
+
+      {/* 종이 영역 */}
+      <div className="flex-1 overflow-auto bg-slate-200 p-6 print:overflow-visible print:bg-white print:p-0">
+        <div className="mx-auto flex max-w-[820px] flex-col gap-6 print:max-w-none print:gap-0">
+          {/* 표지 */}
+          <article className="docx-page rounded bg-white p-12 shadow-lg print:rounded-none print:shadow-none">
+            <h1 className="text-center text-xl font-bold text-slate-900">수학영역</h1>
+            <h2 className="mt-1 text-center text-lg font-bold text-slate-900">
+              {displayName}(해설)
+            </h2>
+            <p className="mt-3 text-center text-[11px] text-slate-500">{dateStr}</p>
+          </article>
+
+          {runs.length === 0 ? (
+            <article className="docx-page rounded bg-white p-12 text-center text-sm text-slate-500 shadow-lg print:rounded-none print:shadow-none">
+              미리보기에 표시할 성공한 문항이 없습니다.
+            </article>
+          ) : (
+            runs.map((r, idx) => (
+              <article
+                key={r.runId || `${r.questionNo}-${idx}`}
+                className="docx-page rounded bg-white p-12 shadow-lg print:rounded-none print:shadow-none"
+              >
+                <div className="border-b border-slate-300 pb-2">
+                  <span className="text-base font-bold text-slate-900">
+                    [문항 {r.questionNo || idx + 1}]
+                  </span>
+                </div>
+                {r.parsed && (
+                  <>
+                    <div className="mt-3 flex items-baseline gap-2">
+                      <span className="text-sm font-semibold text-slate-900">[정답]</span>
+                      <span className="text-sm font-bold text-slate-900">
+                        <MathText text={r.parsed.answer} />
+                      </span>
+                    </div>
+                    <div className="mt-4">
+                      <p className="text-sm font-semibold text-slate-900">[해설]</p>
+                      <ol className="mt-2 list-decimal space-y-2 pl-5 text-[13px] leading-relaxed text-slate-900">
+                        {r.parsed.explanation_steps.map((s, i) => (
+                          <li key={i}>
+                            <div>
+                              <MathText text={s.text} />
+                            </div>
+                            {s.equation && (
+                              <div className="mt-1">
+                                <EquationBlock tex={s.equation} />
+                              </div>
+                            )}
+                          </li>
+                        ))}
+                      </ol>
+                      {r.parsed.summary && (
+                        <p className="mt-3 text-[12px] text-slate-700">
+                          <MathText text={r.parsed.summary} />
+                        </p>
+                      )}
+                    </div>
+                  </>
+                )}
+              </article>
+            ))
+          )}
+        </div>
+      </div>
+
+      <style jsx global>{`
+        .docx-page {
+          width: 100%;
+          min-height: 1100px;
+          font-family: 'Malgun Gothic', '맑은 고딕', 'Noto Sans KR', sans-serif;
+        }
+        @media print {
+          .docx-page {
+            page-break-after: always;
+            box-shadow: none;
+            min-height: auto;
+          }
+          .docx-page:last-child {
+            page-break-after: auto;
+          }
+          @page {
+            size: A4;
+            margin: 18mm 16mm;
+          }
+        }
+      `}</style>
+    </div>
   );
 }
 
