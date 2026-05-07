@@ -783,24 +783,7 @@ export default function EditPage() {
     }
     if (!sourceForName) return;
     setSlot(active.id, { busy: "naming", error: undefined });
-    // 1차: Mathpix OCR + 정규식 파싱 (보통 0.5~1.5초, 비용 ~$0.004)
-    // 2차: Mathpix 미설정·실패 시 Gemini 폴백 (1~2초)
-    try {
-      const mxRes = await fetch("/api/photo-edit/suggest-name-mathpix", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ image: sourceForName }),
-      });
-      const mxData = await mxRes.json();
-      if (mxRes.ok && mxData.ok && mxData.name && String(mxData.name).length >= 5) {
-        setSlot(active.id, { suggestedName: mxData.name, busy: null });
-        if (!examName.trim()) setExamName(String(mxData.name));
-        return;
-      }
-      // Mathpix 실패 또는 결과 부족 → Gemini 폴백
-    } catch {
-      /* 네트워크 실패 → Gemini 폴백 */
-    }
+    // Gemini 직접 — 작은 이미지 + thinking 끔 + maxOutputTokens 256 으로 보통 1~2초.
     try {
       const res = await fetch("/api/photo-edit/suggest-name", {
         method: "POST",
