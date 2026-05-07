@@ -24,24 +24,51 @@ type Parsed = {
   summary?: string;
 };
 
-type RunItem = { questionNo: string; parsed: Parsed | null };
+type RunItem = {
+  questionNo: string;
+  /** 원본 문제 본문 (자동 파이프라인이 보존한 questionText) — DOCX 「문제」 섹션에 들어간다 */
+  questionText?: string;
+  parsed: Parsed | null;
+};
 
 type Body = {
   examName?: string;
   runs?: RunItem[];
 };
 
-/** ParsedExplanation 1건 → `[문항 N]/[정답]/[해설]` 마크다운 블록. */
+/**
+ * questionText에서 노이즈(시험지 메타·번호 머리)를 떼고 본문만 남긴다.
+ * `[문항 N] ` 접두는 빌더가 다시 붙이므로 제거.
+ */
+function cleanQuestionText(no: string, raw: string | undefined): string {
+  if (!raw) return "";
+  return raw
+    .replace(new RegExp(`^\\s*\\[문항\\s*${no}\\]\\s*`, "i"), "")
+    .replace(/^\s*\d+\s*[\.\)번]\s*/, "")
+    .trim();
+}
+
+/**
+ * ParsedExplanation 1건 → `[문항 N] / [정답] / [해설]` 형식.
+ * examExplanationDocx의 parseExplanationBlocks가 이 형식을 인식해
+ * 자동으로 (문제) → (빠른정답) → (해설) 3섹션 양식으로 분리한다.
+ */
 function renderRunAsBlock(run: RunItem): string {
   const lines: string[] = [];
   lines.push(`[문항 ${run.questionNo}]`);
+  // 문제 본문 — [정답]/[해설] 헤더 직전까지가 「문제」 섹션이 된다.
+  const body = cleanQuestionText(run.questionNo, run.questionText);
+  if (body) {
+    lines.push(body);
+  }
   if (!run.parsed) {
-    lines.push("[정답] -");
-    lines.push("[해설] (생성 실패)");
+    lines.push(`[정답] -`);
+    lines.push(`[해설]`);
+    lines.push(`(생성 실패 — 운영자 검수 필요)`);
     return lines.join("\n");
   }
   lines.push(`[정답] ${run.parsed.answer || "-"}`);
-  lines.push("[해설]");
+  lines.push(`[해설]`);
   run.parsed.explanation_steps.forEach((step, i) => {
     const num = `${i + 1}.`;
     if (step.text) lines.push(`${num} ${step.text}`);

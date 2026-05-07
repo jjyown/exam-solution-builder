@@ -348,6 +348,61 @@ export default function AutoPipelinePage() {
     void navigator.clipboard.writeText(md);
   }
 
+  /** 실행 결과(성공·실패 무관)를 CSV로 — 실패 분석용 */
+  function downloadRunsCsv() {
+    if (!result) return;
+    const runs = result.runs ?? [];
+    if (runs.length === 0) return;
+    const csvEscape = (v: unknown) => {
+      const s = v === null || v === undefined ? '' : String(v);
+      return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+    const header = [
+      '문항번호',
+      '성공',
+      '시도횟수',
+      '정답',
+      '풀이단계수',
+      '오류',
+      '검수체크리스트',
+      'runId',
+      '영속화실패',
+      '문제본문(앞 200자)',
+    ];
+    const rows = runs.map((r) => [
+      r.questionNo,
+      r.parsed ? 'O' : 'X',
+      r.attempts,
+      r.parsed?.answer ?? '',
+      r.parsed?.explanation_steps.length ?? 0,
+      (r.errors ?? []).join(' | '),
+      (r.manualReviewChecklist ?? []).join(' | '),
+      r.runId ?? '',
+      r.persistError ?? '',
+      (r.questionText ?? '').slice(0, 200).replace(/\s+/g, ' '),
+    ]);
+    const csv = '﻿' + [header, ...rows].map((row) => row.map(csvEscape).join(',')).join('\r\n');
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${examName || '해설지'}_실행분석_${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  /** 실행 결과 + trace 전부를 JSON으로 — 깊은 디버깅용 */
+  function downloadRunsJson() {
+    if (!result) return;
+    const blob = new Blob([JSON.stringify(result, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${examName || '해설지'}_실행로그_${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
   async function downloadDocx(scope: 'active' | 'all') {
     if (!result) return;
     const runs =
@@ -362,7 +417,11 @@ export default function AutoPipelinePage() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         examName: examName || `해설지`,
-        runs: runs.map((r) => ({ questionNo: r.questionNo, parsed: r.parsed })),
+        runs: runs.map((r) => ({
+          questionNo: r.questionNo,
+          questionText: r.questionText,
+          parsed: r.parsed,
+        })),
       }),
     });
     if (!res.ok) {
@@ -740,6 +799,8 @@ export default function AutoPipelinePage() {
           onDownloadJson={downloadJson}
           onCopyMd={copyAsMarkdown}
           onDownloadDocx={downloadDocx}
+          onDownloadRunsCsv={downloadRunsCsv}
+          onDownloadRunsJson={downloadRunsJson}
         />
       )}
     </div>
@@ -762,6 +823,8 @@ function ResultsSection(props: {
   onDownloadJson: () => void;
   onCopyMd: () => void;
   onDownloadDocx: (scope: 'active' | 'all') => void;
+  onDownloadRunsCsv: () => void;
+  onDownloadRunsJson: () => void;
 }) {
   const { result, activeIdx, onActiveIdx } = props;
   const runs = result.runs ?? [];
@@ -817,6 +880,20 @@ function ResultsSection(props: {
                 title="성공한 문항을 한 DOCX 파일로 묶어서 다운로드"
               >
                 {docxBusy === 'all' ? 'DOCX 생성 중…' : `전체 DOCX (${successCount}문항)`}
+              </button>
+              <button
+                onClick={props.onDownloadRunsCsv}
+                className="rounded-md border border-amber-600 bg-amber-50 px-3 py-1 text-[11px] font-semibold text-amber-900 hover:bg-amber-100"
+                title="문항별 성공/실패·오류·검수 체크리스트를 CSV로 — 실패 원인 분석용"
+              >
+                실패 분석 CSV
+              </button>
+              <button
+                onClick={props.onDownloadRunsJson}
+                className="rounded-md border border-slate-400 bg-white px-3 py-1 text-[11px] font-semibold text-slate-700 hover:bg-slate-50"
+                title="실행 결과와 trace 전체 JSON 다운로드"
+              >
+                전체 JSON
               </button>
             </div>
           </div>

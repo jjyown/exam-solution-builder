@@ -24,8 +24,21 @@ export function buildAutoChecklist(result: PipelineResult): string[] {
   const out: string[] = [];
 
   if (!result.ok || !result.parsed) {
+    const joinedErr = result.errors.join(" / ");
+    // 자주 발생하는 환경 오류는 사람이 바로 조치 가능한 한 줄 안내로 분리
+    if (/RESOURCE_EXHAUSTED|spending\s*cap|quota/i.test(joinedErr)) {
+      out.push(
+        `[Gemini 한도 초과] 월 사용 한도/결제 캡 초과. https://ai.studio/spend 에서 한도 상향하거나, OPENAI_API_KEY 설정 후 모델을 OpenAI로 전환하세요.`,
+      );
+    } else if (/GEMINI_API_KEY 미설정/.test(joinedErr)) {
+      out.push(`[키 미설정] Railway Variables에 GEMINI_API_KEY 또는 OPENAI_API_KEY 추가 필요.`);
+    } else if (/OPENAI_API_KEY 미설정/.test(joinedErr)) {
+      out.push(`[OpenAI 키 미설정] OPENAI_API_KEY 설정 또는 model=gemini로 전환.`);
+    } else if (/(429|Too Many Requests|rate.*limit)/i.test(joinedErr)) {
+      out.push(`[일시적 rate-limit] 잠시 후 재시도 또는 maxRetries 늘리기.`);
+    }
     out.push(
-      `[전체 실패] ${result.attempts}회 시도 후 실패 — 마지막 오류: ${result.errors.join(" / ")}`,
+      `[전체 실패] ${result.attempts}회 시도 후 실패 — 마지막 오류: ${joinedErr}`,
     );
     return out;
   }

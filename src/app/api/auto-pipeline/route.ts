@@ -42,6 +42,26 @@ function getRetriever() {
 }
 
 // ── LLM 어댑터 ─────────────────────────────────────────────────────────────
+/**
+ * Gemini API 응답이 한도 초과·rate-limit 인지 판별.
+ * 429 그리고 RESOURCE_EXHAUSTED / spending cap / quota 키워드 매칭.
+ */
+function isGeminiQuotaError(status: number, body: string): boolean {
+  if (status !== 429) return false;
+  return /RESOURCE_EXHAUSTED|spending\s*cap|quota|rate.*limit/i.test(body);
+}
+
+class GeminiQuotaError extends Error {
+  status = 429;
+  raw: string;
+  constructor(raw: string) {
+    super(
+      'Gemini 사용 한도/요금 한도 초과 (RESOURCE_EXHAUSTED). 자동으로 OpenAI로 폴백을 시도합니다.',
+    );
+    this.raw = raw;
+  }
+}
+
 async function callGemini(prompt: string): Promise<string> {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) throw new Error('GEMINI_API_KEY 미설정');
@@ -58,7 +78,11 @@ async function callGemini(prompt: string): Promise<string> {
       },
     }),
   });
-  if (!res.ok) throw new Error(`Gemini ${res.status}: ${await res.text()}`);
+  if (!res.ok) {
+    const body = await res.text();
+    if (isGeminiQuotaError(res.status, body)) throw new GeminiQuotaError(body);
+    throw new Error(`Gemini ${res.status}: ${body}`);
+  }
   const data = await res.json();
   return (
     data?.candidates?.[0]?.content?.parts?.map((p: { text?: string }) => p.text).join('') || ''
@@ -88,8 +112,31 @@ async function callOpenAI(prompt: string): Promise<string> {
   return data?.choices?.[0]?.message?.content || '';
 }
 
-function pickLlmCall(model: string | undefined) {
-  return (model || '').toLowerCase() === 'openai' ? callOpenAI : callGemini;
+/**
+ * 모델 선택 + Gemini 한도 초과 시 OpenAI 자동 폴백.
+ * 한 번 폴백되면 같은 요청 안 다른 문항도 OpenAI 사용 (state는 클로저로).
+ */
+function pickLlmCall(modelPref: string | undefined) {
+  let fallenBack = (modelPref || '').toLowerCase() === 'openai';
+  if (fallenBack) return callOpenAI;
+  return async (prompt: string): Promise<string> => {
+    if (fallenBack) return callOpenAI(prompt);
+    try {
+      return await callGemini(prompt);
+    } catch (e) {
+      if (e instanceof GeminiQuotaError) {
+        fallenBack = true;
+        if (process.env.OPENAI_API_KEY) {
+          // 자동 폴백
+          return callOpenAI(prompt);
+        }
+        throw new Error(
+          `Gemini 한도 초과 + OPENAI_API_KEY 없음. https://ai.studio/spend 또는 Railway에 OPENAI_API_KEY 추가 후 재시도.`,
+        );
+      }
+      throw e;
+    }
+  };
 }
 
 // ── 입력 → 처리할 문항 리스트 결정 ─────────────────────────────────────────
