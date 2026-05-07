@@ -72,6 +72,12 @@ export async function extractTextWithGeminiVision(
   base64: string,
   mimeType: string,
 ): Promise<VisionExtractResult> {
+  if (isGeminiOcrKillSwitched()) {
+    return {
+      ok: false,
+      error: "GEMINI_OCR_DISABLED=true — 비용 보호 킬스위치 활성화. Railway Variables 에서 해제하세요.",
+    };
+  }
   const apiKey = process.env.GEMINI_API_KEY?.trim();
   if (!apiKey) {
     return { ok: false, error: "GEMINI_API_KEY 미설정 — Railway/.env.local 에 추가 필요." };
@@ -138,7 +144,25 @@ function stripMetaWrappers(raw: string): string {
   return s;
 }
 
-/** 사용 가능 여부 — UI 가 fallback 분기 결정에 사용 */
+/**
+ * 비용 비상 정지 킬 스위치.
+ * GEMINI_OCR_DISABLED=true (또는 1/yes/on) 이면:
+ *  - 모든 Gemini Vision OCR 호출이 즉시 거절됨
+ *  - 분석자료 auto-sync 의 새 OCR 도 건너뜀 (이미 캐시된 자료는 정상 사용)
+ *  - 시험지 PDF 도 pdfjs 텍스트 추출만 사용 (스캔본은 실패할 수 있음)
+ * Railway Variables 에 한 줄 추가/제거로 즉시 토글 가능.
+ */
+function isGeminiOcrKillSwitched(): boolean {
+  return /^(1|true|yes|on)$/i.test((process.env.GEMINI_OCR_DISABLED || "").trim());
+}
+
+/** 사용 가능 여부 — UI 가 fallback 분기 결정에 사용. 킬스위치 ON 이면 false. */
 export function isGeminiVisionAvailable(): boolean {
+  if (isGeminiOcrKillSwitched()) return false;
   return Boolean(process.env.GEMINI_API_KEY?.trim());
+}
+
+/** 킬 스위치 상태 조회 — UI/관리 페이지용 */
+export function isGeminiOcrDisabled(): boolean {
+  return isGeminiOcrKillSwitched();
 }
