@@ -179,8 +179,68 @@ export default function EditPage() {
   function clearAllSelection(): void {
     setSlots((prev) => prev.map((s) => ({ ...s, includeInPdf: false })));
   }
-  function removeUncheckedSlots(): void {
-    setSlots((prev) => prev.filter((s) => s.includeInPdf));
+  /**
+   * 체크된 슬롯들을 일괄 삭제 — 사이드바 X 버튼의 묶음 버전.
+   * Drive 출처는 「휴지통」 폴더로 이동, 로컬·이미 trashed 는 단순 제거.
+   * 작업 흐름: 체크 4개 → AI 박스 → AI 학교명 → ☁ Drive 업로드 → 「선택항목 삭제」
+   *           로 4개 한 번에 정리 → 다음 묶음으로 이동.
+   */
+  async function trashCheckedSlots(): Promise<void> {
+    const checked = slots.filter((s) => s.includeInPdf);
+    if (checked.length === 0) {
+      alert("체크된 페이지가 없습니다.");
+      return;
+    }
+    const driveFileIds = Array.from(
+      new Set(
+        checked.filter((s) => s.driveFileId && !s.trashed).map((s) => s.driveFileId!),
+      ),
+    );
+    const localOnly = checked.length - driveFileIds.length;
+
+    const message =
+      driveFileIds.length > 0
+        ? `체크된 ${checked.length}개 항목을 삭제합니다.\n\nDrive 원본 ${driveFileIds.length}개는 「휴지통」 폴더로 이동되며, 「시험지 편집 전」 폴더에서 사라집니다.${localOnly > 0 ? `\n로컬 ${localOnly}개는 목록에서만 제거.` : ""}\n실수했을 땐 Drive 「휴지통」에서 다시 옮기면 복구됩니다.\n\n진행할까요?`
+        : `체크된 ${checked.length}개 항목을 목록에서 제거합니다.\n\n진행할까요?`;
+    if (!confirm(message)) return;
+
+    setBulkBusy(true);
+    let failCount = 0;
+    for (const fid of driveFileIds) {
+      // 같은 fileId 공유 슬롯들 모두 trashing 표시
+      setSlots((prev) =>
+        prev.map((x) => (x.driveFileId === fid ? { ...x, busy: "trashing" } : x)),
+      );
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        const res = await fetch("/api/drive/move-to-trash", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ fileId: fid }),
+        });
+        // eslint-disable-next-line no-await-in-loop
+        const data = await res.json();
+        if (!data.ok) throw new Error(data.error || "휴지통 이동 실패");
+      } catch {
+        failCount += 1;
+      }
+    }
+    // 체크된 슬롯들을 일괄 제거 (휴지통 실패분도 사이드바에선 제거 — 깨끗하게 다음 작업)
+    setSlots((prev) => {
+      const next = prev.filter((s) => !s.includeInPdf);
+      if (next.length === 0) {
+        setActiveId(null);
+      } else if (activeId && !next.find((s) => s.id === activeId)) {
+        setActiveId(next[0].id);
+      }
+      return next;
+    });
+    setBulkBusy(false);
+    if (failCount > 0) {
+      alert(
+        `Drive 휴지통 이동 실패 ${failCount}건 — 사이드바에서는 제거되었지만 Drive 원본은 「시험지 편집 전」에 남아있을 수 있음.`,
+      );
+    }
   }
   function clearAllSlots(): void {
     if (slots.length === 0) return;
@@ -1354,12 +1414,14 @@ export default function EditPage() {
                   전체 PDF
                 </button>
                 <button
-                  onClick={removeUncheckedSlots}
-                  disabled={slots.length === 0 || slots.every((s) => s.includeInPdf)}
-                  className="rounded-md border border-rose-300 bg-white px-3 py-1.5 text-xs font-semibold text-rose-800 hover:bg-rose-50 disabled:opacity-50"
-                  title="체크 해제된 페이지를 목록에서 제거"
+                  onClick={trashCheckedSlots}
+                  disabled={
+                    bulkBusy || slots.length === 0 || !slots.some((s) => s.includeInPdf)
+                  }
+                  className="rounded-md border border-rose-700 bg-rose-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-rose-700 disabled:opacity-50"
+                  title="체크된 페이지들을 묶어 삭제 — Drive 원본은 「휴지통」 폴더로 이동(복구 가능)"
                 >
-                  선택 해제 항목 삭제
+                  🗑 선택항목 삭제
                 </button>
                 <button
                   onClick={clearAllSlots}
