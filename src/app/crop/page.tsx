@@ -18,7 +18,7 @@
  *  의존성: react-image-crop (이미 설치됨), pdfjs-dist (이미 설치됨)
  * ────────────────────────────────────────────────────────────────────────────
  */
-import { useRef, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import ReactCrop, { type Crop, type PixelCrop } from "react-image-crop";
 import "react-image-crop/dist/ReactCrop.css";
 
@@ -26,6 +26,14 @@ type ParsedExplanation = {
   answer: string;
   explanation_steps: { text: string; equation: string }[];
   summary?: string;
+};
+
+type DriveFile = {
+  id: string;
+  name: string;
+  mimeType: string;
+  modifiedTime: string | null;
+  size: number | null;
 };
 
 type CropEntry = {
@@ -62,6 +70,68 @@ export default function CropPage() {
   const [crops, setCrops] = useState<CropEntry[]>([]);
   const [model, setModel] = useState<"gemini" | "openai">("openai"); // 비용 절감 — 기본 OpenAI
   const [autoNo, setAutoNo] = useState(1); // 새 크롭 자동 번호
+
+  // Google Drive 시험지 폴더 연동
+  const [driveFiles, setDriveFiles] = useState<DriveFile[]>([]);
+  const [driveStatus, setDriveStatus] = useState<
+    "idle" | "loading" | "ready" | "no-config" | "error"
+  >("idle");
+  const [driveError, setDriveError] = useState<string | null>(null);
+  const [drivePickerOpen, setDrivePickerOpen] = useState(false);
+  const [drivePicking, setDrivePicking] = useState(false);
+
+  const loadDriveFiles = useCallback(async () => {
+    setDriveStatus("loading");
+    setDriveError(null);
+    try {
+      const res = await fetch("/api/drive/exams");
+      const data = await res.json();
+      if (data.configured === false) {
+        setDriveStatus("no-config");
+        setDriveError(data.reason ?? null);
+        return;
+      }
+      if (!data.ok) {
+        setDriveStatus("error");
+        setDriveError(data.error ?? "Drive 목록 조회 실패");
+        return;
+      }
+      setDriveFiles(Array.isArray(data.files) ? data.files : []);
+      setDriveStatus("ready");
+    } catch (e) {
+      setDriveStatus("error");
+      setDriveError((e as Error).message);
+    }
+  }, []);
+
+  const pickDriveFile = useCallback(
+    async (fileId: string) => {
+      setDrivePicking(true);
+      try {
+        const res = await fetch("/api/drive/exams/fetch", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ fileId }),
+        });
+        const data = await res.json();
+        if (!data.ok) throw new Error(data.error ?? "Drive 파일 다운로드 실패");
+        // base64 → Blob → File 객체로 변환 (handleFile 재사용)
+        const bin = atob(data.fileData);
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i += 1) bytes[i] = bin.charCodeAt(i);
+        const file = new File([bytes], data.fileName, { type: data.mimeType });
+        setDrivePickerOpen(false);
+        await handleFile(file);
+      } catch (e) {
+        alert(`Drive 가져오기 실패: ${(e as Error).message}`);
+      } finally {
+        setDrivePicking(false);
+      }
+    },
+    // handleFile 은 클로저로 안정 — 의존성 비움
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
+  );
 
   async function handleFile(file: File) {
     setLoadingFile(true);
@@ -273,8 +343,91 @@ export default function CropPage() {
             </select>
           </label>
         </div>
+        {/* Google Drive 「시험지」 폴더 — 로컬 업로드 위에 노출 */}
+        <div className="mt-3">
+          <div className="flex items-center justify-between gap-2">
+            <label className="block text-xs font-semibold text-slate-700">
+              Google Drive 「시험지」 폴더에서 가져오기
+            </label>
+            <button
+              type="button"
+              onClick={() => {
+                if (!drivePickerOpen && driveStatus !== "ready") loadDriveFiles();
+                setDrivePickerOpen((v) => !v);
+              }}
+              className="rounded-md border border-emerald-600 bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-800 hover:bg-emerald-100"
+            >
+              {drivePickerOpen ? "Drive 패널 닫기" : "Drive에서 가져오기"}
+            </button>
+          </div>
+          {drivePickerOpen && (
+            <div className="mt-2 rounded-md border border-emerald-200 bg-emerald-50 p-2 text-xs">
+              {driveStatus === "loading" && (
+                <p className="text-emerald-900">목록 불러오는 중…</p>
+              )}
+              {driveStatus === "no-config" && (
+                <p className="text-amber-900">
+                  Drive 키 미설정 — Railway Variables 에 GOOGLE_CLIENT_ID/SECRET/REFRESH_TOKEN
+                  추가가 필요합니다.
+                  {driveError ? ` (${driveError})` : ""}
+                </p>
+              )}
+              {driveStatus === "error" && (
+                <p className="text-rose-900">✗ {driveError ?? "Drive 오류"}</p>
+              )}
+              {driveStatus === "ready" && driveFiles.length === 0 && (
+                <p className="text-slate-700">
+                  「해설제작/시험지」 폴더가 비어 있습니다. PDF/이미지를 업로드하세요.
+                </p>
+              )}
+              {driveStatus === "ready" && driveFiles.length > 0 && (
+                <div className="space-y-1">
+                  <p className="mb-1 text-emerald-900">최신순 {driveFiles.length}개:</p>
+                  <ul className="max-h-48 overflow-y-auto divide-y divide-emerald-100 rounded border border-emerald-200 bg-white">
+                    {driveFiles.map((f) => (
+                      <li
+                        key={f.id}
+                        className="flex items-center justify-between gap-2 px-2 py-1"
+                      >
+                        <div className="flex-1 truncate">
+                          <span className="font-semibold text-slate-800">{f.name}</span>
+                          {f.size !== null && (
+                            <span className="ml-2 text-slate-500">
+                              {(f.size / 1024 / 1024).toFixed(1)}MB
+                            </span>
+                          )}
+                          {f.modifiedTime && (
+                            <span className="ml-2 text-slate-400">
+                              {new Date(f.modifiedTime).toLocaleDateString("ko-KR")}
+                            </span>
+                          )}
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => pickDriveFile(f.id)}
+                          disabled={drivePicking}
+                          className="rounded border border-emerald-600 bg-white px-2 py-0.5 font-semibold text-emerald-800 hover:bg-emerald-50 disabled:opacity-50"
+                        >
+                          {drivePicking ? "가져오는 중…" : "가져오기"}
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                  <button
+                    type="button"
+                    onClick={loadDriveFiles}
+                    className="mt-1 text-emerald-800 underline"
+                  >
+                    목록 새로고침
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
         <label className="mt-3 block text-xs font-semibold text-slate-700">
-          시험지 파일 (PDF / 이미지)
+          또는 시험지 파일 직접 업로드 (PDF / 이미지)
           <input
             type="file"
             accept="application/pdf,image/*"
