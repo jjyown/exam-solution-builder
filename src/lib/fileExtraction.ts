@@ -105,11 +105,93 @@ async function extractFromImage(base64: string, mimeType: string): Promise<Extra
   return { ok: false, error: errors.join(" | ") || "이미지 추출 실패" };
 }
 
+/**
+ * 한국 학원 시험지 PDF 가 자주 보이는 텍스트 손상 패턴 감지.
+ *  - 숫자·수식 글리프가 특수 폰트로 임베드되어 pdfjs 추출 시 빈 공백만 남는 케이스.
+ *  - 예) "자녀  명이" (숫자 누락), "①   ②   ③" (선지 값 누락), "P    " (수식 누락).
+ *  hits / chunk 비율이 임계 이상이면 broken 으로 판정.
+ */
+function looksLikeBrokenKoreanExamText(text: string): {
+  broken: boolean;
+  reasons: string[];
+} {
+  const reasons: string[] = [];
+  let hits = 0;
+
+  // 1) "선지 ① 다음에 값 없이 공백·줄바꿈" — 객관식 선지 값 누락
+  const emptyChoices = text.match(/[①②③④⑤⑥⑦⑧⑨⑩]\s{2,}(?=[①②③④⑤⑥⑦⑧⑨⑩]|\n|$)/g);
+  if (emptyChoices && emptyChoices.length >= 3) {
+    hits += emptyChoices.length;
+    reasons.push(`빈 선지 ${emptyChoices.length}개`);
+  }
+
+  // 2) 한국어 단위 명사 앞에 숫자 누락: "  명", "  원", "  개", "  점"
+  const emptyUnits = text.match(/\s{2,}(?:명|원|개|점|장|번|회|배|쪽)/g);
+  if (emptyUnits && emptyUnits.length >= 3) {
+    hits += emptyUnits.length;
+    reasons.push(`단위 앞 숫자 누락 ${emptyUnits.length}개`);
+  }
+
+  // 3) 빈 수식 마커 ("$  $", "P  =  ", "수가  이")
+  const emptyMath = text.match(/(?:\$\s*\$|=\s{2,}[가-힣]|[가-힣]\s{2,}이[다라]?\b)/g);
+  if (emptyMath && emptyMath.length >= 5) {
+    hits += emptyMath.length;
+    reasons.push(`빈 수식·조사 ${emptyMath.length}개`);
+  }
+
+  // 4) 유난히 짧은 줄들이 연속 (수식이 그래픽으로 빠지면 행이 토막 남)
+  const lines = text.split("\n");
+  const tinyLines = lines.filter((l) => l.trim().length > 0 && l.trim().length <= 3).length;
+  if (tinyLines >= 10 && tinyLines / Math.max(lines.length, 1) > 0.25) {
+    hits += tinyLines;
+    reasons.push(`극단적 단편 줄 ${tinyLines}/${lines.length}`);
+  }
+
+  // 본문 길이 대비 손상 hits 비율로 판정 (1000자당 6건 이상이면 broken)
+  const ratio = hits / Math.max(text.length / 1000, 1);
+  return { broken: ratio >= 6, reasons };
+}
+
+function pdfForceVision(): boolean {
+  return /^(1|true|yes|on)$/i.test((process.env.PDF_FORCE_VISION || "").trim());
+}
+
 async function extractFromPdf(base64: string): Promise<ExtractionResult> {
+  // 0) 환경변수 PDF_FORCE_VISION=true 면 pdfjs 건너뛰고 바로 Gemini multimodal
+  if (pdfForceVision() && isGeminiVisionAvailable()) {
+    const v = await extractTextWithGeminiVision(base64, "application/pdf");
+    if (v.ok) return { ok: true, text: v.text, source: "pdf-gemini", model: v.model };
+    // 강제 비전 실패 시 pdfjs 폴백으로 진행
+  }
+
   // 1) pdfjs 로 텍스트 PDF 빠르게 처리
   const fast = await tryFastPdfText(base64);
+
+  // 1-a) 충분한 텍스트면 손상 패턴 검사. 손상 의심이면 Gemini multimodal 로 재추출.
   if (fast.ok && fast.text.length >= PDF_TEXT_MIN_CHARS) {
-    return { ok: true, text: fast.text, source: "pdf-text", pages: fast.pages };
+    const diag = looksLikeBrokenKoreanExamText(fast.text);
+    if (!diag.broken) {
+      return { ok: true, text: fast.text, source: "pdf-text", pages: fast.pages };
+    }
+    // 손상 감지 → Gemini multimodal 재추출 (한국 시험지 시각 인식)
+    if (isGeminiVisionAvailable()) {
+      const v = await extractTextWithGeminiVision(base64, "application/pdf");
+      if (v.ok) {
+        return { ok: true, text: v.text, source: "pdf-gemini", model: v.model };
+      }
+      // Gemini 실패해도 손상된 pdfjs 결과보단 명시 에러가 안전
+      return {
+        ok: false,
+        error: `PDF 텍스트 손상 감지(${diag.reasons.join(", ")}) — Gemini 재추출 실패: ${v.error}`,
+      };
+    }
+    // Vision 키 없으면 어쩔 수 없이 손상된 pdfjs 결과 반환 + 경고
+    return {
+      ok: true,
+      text: fast.text,
+      source: "pdf-text",
+      pages: fast.pages,
+    };
   }
   const fastErr = fast.ok ? `텍스트 부족 (${fast.text.length}자)` : fast.error;
 
