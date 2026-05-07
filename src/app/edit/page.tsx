@@ -401,7 +401,7 @@ export default function EditPage() {
     URL.revokeObjectURL(url);
   }
 
-  async function uploadToDriveExamsFolder() {
+  async function uploadToDriveExamEditAfterFolder() {
     setSavingToDrive(true);
     setSaveResult(null);
     try {
@@ -409,7 +409,7 @@ export default function EditPage() {
       if (!blob) return;
       const base64 = await blobToBase64(blob);
       const fileName = `${sanitizeFilename(examName || "편집_시험지")}.pdf`;
-      const res = await fetch("/api/drive/exams/upload", {
+      const res = await fetch("/api/drive/exam-edit-after/upload", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ fileName, fileData: base64, mimeType: "application/pdf" }),
@@ -445,8 +445,8 @@ export default function EditPage() {
       <header className="mb-3">
         <h1 className="text-xl font-bold text-slate-900">📝 시험지 편집</h1>
         <p className="mt-1 text-xs text-slate-600">
-          「시험지 원안」 폴더 사진/스캔 → 자동·수동 자르기 → 학교명 자동 추출 → 「시험지」 폴더에
-          PDF 로 일괄 업로드 → 해설 제작 탭에서 바로 사용.
+          「시험지 편집 전」 폴더 사진/스캔 → 자동·수동 자르기 → 학교명 자동 추출 → 「시험지 편집 후」
+          폴더에 PDF 로 일괄 업로드. (Drive 경로: 해설제작 / 분석용 자료 / 시험지 편집 / …)
         </p>
       </header>
 
@@ -475,7 +475,7 @@ export default function EditPage() {
               }}
               className="rounded-md border border-emerald-600 bg-emerald-50 px-3 py-1.5 text-xs font-semibold text-emerald-800 hover:bg-emerald-100"
             >
-              {drivePickerOpen ? "Drive 패널 닫기" : "Drive 「시험지 원안」"}
+              {drivePickerOpen ? "Drive 패널 닫기" : "Drive 「시험지 편집 전」"}
             </button>
             <label className="cursor-pointer rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50">
               로컬 파일 추가
@@ -505,8 +505,9 @@ export default function EditPage() {
             )}
             {driveStatus === "no-folder" && (
               <p className="text-amber-900">
-                「시험지 원안」 폴더가 Drive 에 없습니다. 「해설제작」 안에 만들거나
-                GOOGLE_DRIVE_EXAM_ORIGINALS_FOLDER_ID 를 직접 지정.
+                「시험지 편집 전」 폴더가 Drive 에 없습니다. 「해설제작 / 분석용 자료 / 시험지
+                편집」 안에 「시험지 편집 전」 폴더를 만들거나
+                GOOGLE_DRIVE_EXAM_EDIT_BEFORE_FOLDER_ID 를 직접 지정하세요.
                 {driveError ? ` (${driveError})` : ""}
               </p>
             )}
@@ -729,12 +730,12 @@ export default function EditPage() {
                 💾 PDF 다운로드
               </button>
               <button
-                onClick={uploadToDriveExamsFolder}
+                onClick={uploadToDriveExamEditAfterFolder}
                 disabled={savingToDrive}
                 className="rounded-md border border-indigo-700 bg-indigo-700 px-3 py-1.5 text-xs font-semibold text-white hover:bg-indigo-800 disabled:opacity-50"
-                title="Drive 「해설제작/시험지」 폴더로 업로드 → 해설 제작 탭의 Drive 패널에서 바로 사용"
+                title="Drive 「해설제작 / 분석용 자료 / 시험지 편집 / 시험지 편집 후」 폴더로 업로드"
               >
-                {savingToDrive ? "업로드 중…" : "☁ Drive 「시험지」에 업로드"}
+                {savingToDrive ? "업로드 중…" : "☁ Drive 「시험지 편집 후」에 업로드"}
               </button>
             </div>
           </div>
@@ -745,7 +746,7 @@ export default function EditPage() {
                 {saveResult.name}
               </a>
               <span className="ml-2 text-emerald-800">
-                해설 제작 탭에서 「Drive 에서 가져오기」 → 새로고침 후 사용 가능.
+                Drive 「시험지 편집 후」 폴더에 저장됨.
               </span>
             </div>
           )}

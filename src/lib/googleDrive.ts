@@ -113,21 +113,55 @@ export async function resolveDriveAnalysisFolderId(drive: drive_v3.Drive): Promi
 }
 
 /**
- * 「시험지 원안」 — 사용자 원본 사진/스캔 묶음.
- * 시험지 편집 탭의 입력 폴더. (편집·정리·자르기 거친 결과는 「시험지」 폴더에 저장)
- * 미설정·미존재 시 null. 환경변수:
- *   - GOOGLE_DRIVE_EXAM_ORIGINALS_FOLDER_ID
- *   - GOOGLE_DRIVE_EXAM_ORIGINALS_FOLDER_NAME (기본 "시험지 원안")
+ * 시험지 편집 탭에서 사용하는 입력/출력 폴더 — 둘 다 다음 경로 안에 있음:
+ *   해설제작 / 분석용 자료 / 시험지 편집 / [시험지 편집 전 | 시험지 편집 후]
+ *
+ *  - 시험지 편집 전: 사용자가 처리해야 할 원본 사진·스캔 (편집 입력)
+ *  - 시험지 편집 후: 자르기·정리 끝난 결과물 (편집 출력)
+ *
+ *  ENV 오버라이드:
+ *   - GOOGLE_DRIVE_EXAM_EDIT_BEFORE_FOLDER_ID (직접 ID 지정 — 깊은 경로 탐색 안 함)
+ *   - GOOGLE_DRIVE_EXAM_EDIT_AFTER_FOLDER_ID
+ *   - GOOGLE_DRIVE_EXAM_EDIT_BEFORE_FOLDER_NAME (기본 "시험지 편집 전")
+ *   - GOOGLE_DRIVE_EXAM_EDIT_AFTER_FOLDER_NAME (기본 "시험지 편집 후")
+ *   - GOOGLE_DRIVE_EXAM_EDIT_PARENT_FOLDER_NAME (기본 "시험지 편집")
  */
+async function resolveDriveExamEditParentFolderId(
+  drive: drive_v3.Drive,
+): Promise<string | null> {
+  const analysisId = await resolveDriveAnalysisFolderId(drive);
+  if (!analysisId) return null;
+  const editParentName = env("GOOGLE_DRIVE_EXAM_EDIT_PARENT_FOLDER_NAME") || "시험지 편집";
+  return findChildFolderId(drive, analysisId, editParentName);
+}
+
+export async function resolveDriveExamEditBeforeFolderId(
+  drive: drive_v3.Drive,
+): Promise<string | null> {
+  const direct = env("GOOGLE_DRIVE_EXAM_EDIT_BEFORE_FOLDER_ID");
+  if (direct) return direct;
+  const editParentId = await resolveDriveExamEditParentFolderId(drive);
+  if (!editParentId) return null;
+  const folderName = env("GOOGLE_DRIVE_EXAM_EDIT_BEFORE_FOLDER_NAME") || "시험지 편집 전";
+  return findChildFolderId(drive, editParentId, folderName);
+}
+
+export async function resolveDriveExamEditAfterFolderId(
+  drive: drive_v3.Drive,
+): Promise<string | null> {
+  const direct = env("GOOGLE_DRIVE_EXAM_EDIT_AFTER_FOLDER_ID");
+  if (direct) return direct;
+  const editParentId = await resolveDriveExamEditParentFolderId(drive);
+  if (!editParentId) return null;
+  const folderName = env("GOOGLE_DRIVE_EXAM_EDIT_AFTER_FOLDER_NAME") || "시험지 편집 후";
+  return findChildFolderId(drive, editParentId, folderName);
+}
+
+/** @deprecated 폴더 구조 변경으로 시험지 편집 전 경로로 대체됨. 호환을 위해 유지. */
 export async function resolveDriveExamOriginalsFolderId(
   drive: drive_v3.Drive,
 ): Promise<string | null> {
-  const direct = env("GOOGLE_DRIVE_EXAM_ORIGINALS_FOLDER_ID");
-  if (direct) return direct;
-  const folderName = env("GOOGLE_DRIVE_EXAM_ORIGINALS_FOLDER_NAME") || "시험지 원안";
-  const parentId = await resolveDriveParentFolderId(drive);
-  const id = await findChildFolderId(drive, parentId, folderName);
-  return id ?? null;
+  return resolveDriveExamEditBeforeFolderId(drive);
 }
 
 export async function uploadBufferToDriveFolder(params: {
