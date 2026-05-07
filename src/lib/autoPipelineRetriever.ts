@@ -31,14 +31,19 @@ function initRetriever(): Promise<ReferenceRetriever> {
   const kbPath =
     process.env.REFERENCE_KB_PATH ||
     path.join(process.cwd(), "reference", "kb.jsonl");
-  return ReferenceRetriever.fromJsonl(kbPath).then(async (r) => {
-    try {
-      const { loadDriveAnalysisRecords } = await import("./driveAnalysisLearner");
-      const { records } = await loadDriveAnalysisRecords();
-      if (records.length > 0) r.addRecords(records);
-    } catch {
-      // best-effort — Drive 실패해도 베이스 KB 만으로 동작
-    }
+  // ⚠️ 핵심: kb.jsonl 만 로드되면 즉시 반환 (~50ms).
+  //    Drive 분석용 자료 OCR 은 백그라운드로 처리해서 startup·healthcheck 막지 않음.
+  //    첫 몇 호출은 Drive records 없이 동작하고, 이후 백그라운드 완료 시 자동 합쳐짐.
+  return ReferenceRetriever.fromJsonl(kbPath).then((r) => {
+    void (async () => {
+      try {
+        const { loadDriveAnalysisRecords } = await import("./driveAnalysisLearner");
+        const { records } = await loadDriveAnalysisRecords();
+        if (records.length > 0) r.addRecords(records);
+      } catch {
+        // best-effort — Drive 실패해도 베이스 KB 만으로 동작
+      }
+    })();
     return r;
   });
 }
