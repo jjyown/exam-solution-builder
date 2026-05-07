@@ -110,6 +110,23 @@ export default function AutoPipelinePage() {
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState<PipelineResponse | null>(null);
   const [elapsed, setElapsed] = useState(0);
+  /** 실행 중 라이브 경과 시간(ms) — 1초마다 갱신 */
+  const [liveElapsed, setLiveElapsed] = useState(0);
+  /** 서버에서 폴링한 진행 상황 — 어느 문항·어느 단계인지 */
+  const [progress, setProgress] = useState<{
+    stage: 'idle' | 'preparing' | 'processing' | 'completed' | 'failed';
+    currentIdx: number;
+    total: number;
+    currentNo: string | null;
+    subStage:
+      | null
+      | 'searching'
+      | 'generating'
+      | 'validating'
+      | 'retrying'
+      | 'persisting';
+    completedCount: number;
+  } | null>(null);
   const [examName, setExamName] = useState('');
   const [questionNo, setQuestionNo] = useState('');
   const [maxRetries, setMaxRetries] = useState(2);
@@ -441,6 +458,40 @@ export default function AutoPipelinePage() {
     setFeedbackNote('');
     setFeedbackSaved(false);
   }, [activeIdx]);
+
+  // 실행 중 라이브 경과 시간 (1초마다 갱신) + 진행 상황 폴링 (1.5초)
+  useEffect(() => {
+    if (!running) {
+      setLiveElapsed(0);
+      setProgress(null);
+      return;
+    }
+    const t0 = performance.now();
+    const tick = setInterval(() => {
+      setLiveElapsed(Math.round(performance.now() - t0));
+    }, 1000);
+    const poll = setInterval(async () => {
+      try {
+        const res = await fetch('/api/auto-pipeline/progress', { cache: 'no-store' });
+        if (!res.ok) return;
+        const d = await res.json();
+        setProgress({
+          stage: d.stage,
+          currentIdx: d.currentIdx,
+          total: d.total,
+          currentNo: d.currentNo,
+          subStage: d.subStage,
+          completedCount: d.completedCount,
+        });
+      } catch {
+        // silent — 다음 tick 에 다시 시도
+      }
+    }, 1500);
+    return () => {
+      clearInterval(tick);
+      clearInterval(poll);
+    };
+  }, [running]);
 
   async function run() {
     if (!questionText.trim() && !uploadedFile) return;
@@ -1187,6 +1238,12 @@ export default function AutoPipelinePage() {
                     재시도
                   </button>
                 </div>
+                {running && (
+                  <LiveProgressPanel
+                    elapsedMs={liveElapsed}
+                    progress={progress}
+                  />
+                )}
               </>
             );
           })()}
@@ -1552,6 +1609,109 @@ function ResultsSection(props: {
         />
       )}
     </section>
+  );
+}
+
+/**
+ * 실행 중 라이브 진행률 패널.
+ * 백엔드 /api/auto-pipeline/progress 폴링 결과 + 클라이언트 1초 단위 경과시간을 결합해 표시.
+ * 다중 문항이면 진행 바·현재 문항·세부 단계, 단일 문항이면 경과 시간 + 단계만.
+ */
+function LiveProgressPanel({
+  elapsedMs,
+  progress,
+}: {
+  elapsedMs: number;
+  progress: {
+    stage: 'idle' | 'preparing' | 'processing' | 'completed' | 'failed';
+    currentIdx: number;
+    total: number;
+    currentNo: string | null;
+    subStage:
+      | null
+      | 'searching'
+      | 'generating'
+      | 'validating'
+      | 'retrying'
+      | 'persisting';
+    completedCount: number;
+  } | null;
+}) {
+  const sec = Math.floor(elapsedMs / 1000);
+  const mm = String(Math.floor(sec / 60)).padStart(2, '0');
+  const ss = String(sec % 60).padStart(2, '0');
+
+  // 한 문항 평균 ≈ 25초 (RAG 검색 + LLM + 검증 + 영속화 합산 경험치). 실제 처리량으로 보정.
+  const SEC_PER_QUESTION_DEFAULT = 25;
+  const avgSecPerQ =
+    progress && progress.completedCount > 0 && elapsedMs > 0
+      ? Math.max(8, Math.round(elapsedMs / 1000 / progress.completedCount))
+      : SEC_PER_QUESTION_DEFAULT;
+
+  const total = progress?.total ?? 0;
+  const done = progress?.completedCount ?? 0;
+  const remaining = Math.max(total - done, 0);
+  const etaSec = remaining * avgSecPerQ;
+  const etaMm = String(Math.floor(etaSec / 60)).padStart(2, '0');
+  const etaSs = String(etaSec % 60).padStart(2, '0');
+
+  const subStageLabel: Record<string, string> = {
+    searching: '참고 예시 검색',
+    generating: 'LLM 풀이 생성',
+    validating: '검증 단계',
+    retrying: '재시도',
+    persisting: '결과 저장',
+  };
+
+  const stageMsg = progress
+    ? progress.stage === 'preparing'
+      ? '입력 파싱·문항 추출 중'
+      : progress.stage === 'processing'
+        ? `${progress.currentNo ?? '?'}번 문항 ${
+            progress.subStage ? `· ${subStageLabel[progress.subStage] ?? progress.subStage}` : ''
+          }`
+        : progress.stage === 'completed'
+          ? '결과 정리 중'
+          : progress.stage === 'failed'
+            ? '에러 발생'
+            : '준비 중'
+    : '시작 중…';
+
+  const pct = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : null;
+
+  return (
+    <div className="mt-3 rounded-md border border-indigo-200 bg-indigo-50 p-3 text-xs text-indigo-950">
+      <div className="flex items-center justify-between gap-3">
+        <span className="font-semibold">⏳ 처리 중 — {stageMsg}</span>
+        <span className="font-mono text-[11px] text-indigo-800">
+          경과 {mm}:{ss}
+          {total > 1 && remaining > 0 && (
+            <> · 남은 시간 ≈ {etaMm}:{etaSs}</>
+          )}
+        </span>
+      </div>
+      {total > 1 && (
+        <>
+          <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-indigo-100">
+            <div
+              className="h-full bg-indigo-600 transition-all duration-500"
+              style={{ width: `${pct ?? 0}%` }}
+            />
+          </div>
+          <div className="mt-1 flex items-center justify-between text-[10px] text-indigo-800">
+            <span>
+              {done} / {total} 문항 완료
+              {pct !== null && ` (${pct}%)`}
+            </span>
+            <span>한 문항 평균 ≈ {avgSecPerQ}초</span>
+          </div>
+        </>
+      )}
+      <p className="mt-2 text-[10px] text-indigo-700">
+        💡 1문항 처리에는 RAG 검색 → LLM → 검증 → (필요시) 재시도가 포함되어 25~40초 정도 걸립니다.
+        창을 닫지 마세요 — 화면 닫으면 결과가 표시되지 않습니다 (백엔드는 계속 작동).
+      </p>
+    </div>
   );
 }
 

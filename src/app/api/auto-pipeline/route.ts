@@ -40,6 +40,77 @@ const getRetriever = () =>
   // 동적 import 로 동기 모듈 그래프 회피 — 타입 추론은 그대로 유지
   import('@/lib/autoPipelineRetriever').then((m) => m.getAutoPipelineRetriever());
 
+// ── 진행 상황 추적 (UI 라이브 폴링용) ─────────────────────────────────────
+/**
+ * 현재 실행 중인 파이프라인의 진행 상태를 모듈 전역에 보관한다.
+ * UI 가 /api/auto-pipeline/progress 를 폴링해 실시간 진행률을 표시한다.
+ * 동시 실행은 1개 (admin tool 가정) — 새 POST 가 시작되면 덮어쓴다.
+ */
+type ProgressStage =
+  | 'idle'
+  | 'preparing'      // 입력 파싱·문항 추출 중
+  | 'processing'     // 문항 풀이 진행 중 (currentIdx 사용)
+  | 'completed'
+  | 'failed';
+
+type ProgressState = {
+  stage: ProgressStage;
+  startedAt: number | null;
+  updatedAt: number | null;
+  /** 처리 중인 현재 문항(0-indexed). processing 단계에서만 의미있음 */
+  currentIdx: number;
+  /** 전체 문항 수 */
+  total: number;
+  /** 현재 처리 중 문항 번호 — UI 표시용 */
+  currentNo: string | null;
+  /** processing 안에서의 세부 단계 */
+  subStage:
+    | null
+    | 'searching'      // 참고 예시 검색
+    | 'generating'     // LLM 풀이 생성
+    | 'validating'     // V1-V6 검증
+    | 'retrying'       // 검증 실패 → 재시도
+    | 'persisting';    // Supabase 영속화
+  /** 지금까지 완료된 문항 수 */
+  completedCount: number;
+  /** 마지막 에러 (failed 일 때) */
+  error: string | null;
+};
+
+let progressState: ProgressState = {
+  stage: 'idle',
+  startedAt: null,
+  updatedAt: null,
+  currentIdx: 0,
+  total: 0,
+  currentNo: null,
+  subStage: null,
+  completedCount: 0,
+  error: null,
+};
+
+function setProgress(patch: Partial<ProgressState>): void {
+  progressState = { ...progressState, ...patch, updatedAt: Date.now() };
+}
+
+function startProgress(total: number): void {
+  progressState = {
+    stage: 'preparing',
+    startedAt: Date.now(),
+    updatedAt: Date.now(),
+    currentIdx: 0,
+    total,
+    currentNo: null,
+    subStage: null,
+    completedCount: 0,
+    error: null,
+  };
+}
+
+export function getProgressSnapshot(): ProgressState {
+  return progressState;
+}
+
 // ── LLM 어댑터 ─────────────────────────────────────────────────────────────
 /**
  * Gemini API 응답이 한도 초과·rate-limit 인지 판별.
@@ -366,10 +437,15 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, error: 'invalid JSON body' }, { status: 400 });
   }
 
+  // 진행 상황 초기화 — preparing 단계로 시작
+  startProgress(0);
+
   const resolved = await resolveItems(body);
   if (!resolved.ok) {
+    setProgress({ stage: 'failed', error: resolved.error });
     return NextResponse.json({ ok: false, error: resolved.error }, { status: 400 });
   }
+  setProgress({ total: resolved.items.length, stage: 'processing' });
 
   const model = (body.model || 'gemini').toLowerCase();
   const topK = body.topK ?? 3;
@@ -391,6 +467,11 @@ export async function POST(req: Request) {
 
     // ─── 단일 문항 모드 ──────────────────────────────────────────────────
     if (resolved.items.length === 1) {
+      setProgress({
+        currentIdx: 0,
+        currentNo: resolved.items[0].questionNo,
+        subStage: 'generating',
+      });
       const row = await executeOne({
         retriever,
         routedCall,
@@ -402,6 +483,7 @@ export async function POST(req: Request) {
         item: resolved.items[0],
         profileOverride,
       });
+      setProgress({ stage: 'completed', completedCount: 1, subStage: null });
 
       // 추출 메타가 0문항이면 분리 실패 경고 추가
       if (resolved.extracted && resolved.extracted.totalQuestions === 0) {
@@ -427,7 +509,13 @@ export async function POST(req: Request) {
 
     // ─── 다중 문항 모드: 순차 실행 ────────────────────────────────────────
     const runs: RunRow[] = [];
+    let idx = 0;
     for (const item of resolved.items) {
+      setProgress({
+        currentIdx: idx,
+        currentNo: item.questionNo,
+        subStage: 'generating',
+      });
       // 한 문항이라도 throw 나도 다른 문항은 계속 진행
       try {
         const row = await executeOne({
@@ -442,6 +530,7 @@ export async function POST(req: Request) {
           profileOverride,
         });
         runs.push(row);
+        setProgress({ completedCount: idx + 1 });
       } catch (e) {
         const inf =
           profileOverride === 'auto'
@@ -459,10 +548,13 @@ export async function POST(req: Request) {
           profile: inf.profile,
           profileReason: inf.reason,
         });
+        setProgress({ completedCount: idx + 1 });
       }
+      idx += 1;
     }
 
     const partialFailures = runs.filter((r) => !r.parsed).length;
+    setProgress({ stage: 'completed', subStage: null });
     return NextResponse.json({
       ok: partialFailures === 0,
       runs,
@@ -470,6 +562,7 @@ export async function POST(req: Request) {
       extracted: resolved.extracted,
     });
   } catch (e) {
+    setProgress({ stage: 'failed', error: (e as Error).message });
     return NextResponse.json({ ok: false, error: (e as Error).message }, { status: 500 });
   }
 }
