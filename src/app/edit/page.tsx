@@ -291,36 +291,29 @@ export default function EditPage() {
     if (!cur.driveFileId) return null;
     setSlot(slotId, { busy: "loading", error: undefined });
 
-    // 1차: thumbnailLink 의 고해상도 (s1600) 를 dataURL 로 받아 즉시 표시
+    // 1차: thumbnailLink 의 고해상도 (s1600) URL 을 sourceDataUrl 로 바로 설정 → 즉시 표시
+    // (fetch + blob + FileReader 단계 생략 — img 가 CDN 에서 직접 받음)
     const driveFile = driveFiles.find((d) => d.id === cur.driveFileId);
     const isPdf =
       driveFile?.mimeType === "application/pdf" ||
       /\.pdf$/i.test(driveFile?.name ?? cur.sourceLabel);
 
     if (!isPdf && driveFile?.thumbnailLink) {
-      try {
-        const bigUrl = driveFile.thumbnailLink.replace(/=s\d+(-[a-z])?$/, "=s1600");
-        const res = await fetch(bigUrl);
-        if (res.ok) {
-          const blob = await res.blob();
-          const previewUrl = await blobToDataUrl(blob);
-          // 즉시 캔버스에 표시 — busy 해제
-          setSlot(slotId, { sourceDataUrl: previewUrl, busy: null });
-          // 백그라운드: 풀 원본을 받아 더 선명한 sourceDataUrl 로 교체 (자르기·AI 정확도용)
-          void (async () => {
-            try {
-              const fetched = await fetchDriveFile(cur.driveFileId!);
-              const fullUrl = await fileToDataUrl(fetched.file);
-              setSlot(slotId, { sourceDataUrl: fullUrl });
-            } catch {
-              /* preview 만으로도 작동 — silent */
-            }
-          })();
-          return previewUrl;
+      const bigUrl = driveFile.thumbnailLink.replace(/=s\d+(-[a-z])?$/, "=s1600");
+      // 즉시 표시 — img.src 가 CDN 에서 병렬 다운로드 (브라우저 캐시 / parallel)
+      setSlot(slotId, { sourceDataUrl: bigUrl, busy: null });
+      // 백그라운드: 풀 원본 dataURL 로 조용히 교체 (자르기·AI 정확도 + canvas tainted 회피)
+      void (async () => {
+        try {
+          const fetched = await fetchDriveFile(cur.driveFileId!);
+          const fullUrl = await fileToDataUrl(fetched.file);
+          // 사용자가 그 사이 다른 슬롯으로 이동해도 안전 — id 기반으로 갱신
+          setSlot(slotId, { sourceDataUrl: fullUrl });
+        } catch {
+          /* preview 만으로도 보기는 가능 — silent */
         }
-      } catch {
-        /* fall through to 풀 다운로드 */
-      }
+      })();
+      return bigUrl;
     }
 
     // 2차: 풀 원본 다운로드 (PDF 또는 thumbnailLink 실패 시)
@@ -853,11 +846,30 @@ export default function EditPage() {
   // ── 활성 슬롯 풀 소스 지연 로드 — 사이드바에서 클릭한 순간 다운로드 ──
   useEffect(() => {
     if (!activeId) return;
-    const s = slots.find((x) => x.id === activeId);
-    if (!s) return;
-    if (s.sourceDataUrl) return; // 이미 로드됨
-    if (!s.driveFileId) return; // 로컬은 항상 로드된 상태
-    void ensureSlotSource(activeId);
+    const idx = slots.findIndex((x) => x.id === activeId);
+    if (idx < 0) return;
+    const s = slots[idx];
+    if (s.driveFileId && !s.sourceDataUrl) void ensureSlotSource(activeId);
+
+    // 인접 슬롯 ±2 프리페치 — 사용자가 키보드 ↑↓/클릭 이동할 때 즉시 표시
+    // 풀 다운로드는 안 함 (4MB×4 = 메모리·트래픽 부담). thumbnailLink s1600 만 미리 깔아둠.
+    const neighbors = [idx - 2, idx - 1, idx + 1, idx + 2]
+      .filter((i) => i >= 0 && i < slots.length && i !== idx)
+      .map((i) => slots[i])
+      .filter((n) => n.driveFileId && !n.sourceDataUrl);
+    for (const n of neighbors) {
+      if (!n.driveFileId) continue;
+      const meta = driveFiles.find((d) => d.id === n.driveFileId);
+      const isPdf =
+        meta?.mimeType === "application/pdf" ||
+        /\.pdf$/i.test(meta?.name ?? n.sourceLabel);
+      if (isPdf || !meta?.thumbnailLink) continue;
+      const bigUrl = meta.thumbnailLink.replace(/=s\d+(-[a-z])?$/, "=s1600");
+      // 브라우저 백그라운드 디코드 — `<link rel=prefetch>` 효과
+      const img = new Image();
+      img.crossOrigin = "anonymous";
+      img.src = bigUrl;
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeId]);
 
@@ -1267,6 +1279,8 @@ export default function EditPage() {
                         ref={imgRef}
                         src={active.sourceDataUrl}
                         alt={active.sourceLabel}
+                        // CDN 직접 URL 일 때 canvas drawImage 를 위한 CORS — Drive lh3 는 일반적으로 허용
+                        crossOrigin="anonymous"
                         className="block max-w-full"
                       />
                     </ReactCrop>
