@@ -14,6 +14,8 @@
  * ────────────────────────────────────────────────────────────────────────────
  */
 import { useCallback, useEffect, useState } from 'react';
+import { InlineMath, BlockMath } from 'react-katex';
+import 'katex/dist/katex.min.css';
 
 type ParsedExplanation = {
   answer: string;
@@ -944,12 +946,78 @@ function ResultsSection(props: {
   );
 }
 
+/**
+ * `$...$` 인라인 수식이 섞인 텍스트를 KaTeX로 렌더한다.
+ * 매칭 실패 시 평문으로 폴백 (LLM이 미완성 수식을 줘도 화면이 깨지지 않게).
+ */
+function MathText({ text }: { text: string }) {
+  if (!text) return null;
+  // $$...$$ (블록) 와 $...$ (인라인) 모두 지원
+  const parts: Array<{ type: 'text' | 'inline' | 'block'; value: string }> = [];
+  const re = /(\$\$[^$]+\$\$|\$[^$\n]+\$)/g;
+  let last = 0;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text))) {
+    if (m.index > last) parts.push({ type: 'text', value: text.slice(last, m.index) });
+    const token = m[0];
+    if (token.startsWith('$$')) {
+      parts.push({ type: 'block', value: token.slice(2, -2) });
+    } else {
+      parts.push({ type: 'inline', value: token.slice(1, -1) });
+    }
+    last = m.index + token.length;
+  }
+  if (last < text.length) parts.push({ type: 'text', value: text.slice(last) });
+
+  return (
+    <>
+      {parts.map((p, i) => {
+        if (p.type === 'text') return <span key={i}>{p.value}</span>;
+        try {
+          return p.type === 'block' ? (
+            <BlockMath key={i} math={p.value} />
+          ) : (
+            <InlineMath key={i} math={p.value} />
+          );
+        } catch {
+          return (
+            <span key={i} className="rounded bg-rose-50 px-1 font-mono text-[11px] text-rose-800" title="수식 렌더 실패">
+              {p.type === 'block' ? `$$${p.value}$$` : `$${p.value}$`}
+            </span>
+          );
+        }
+      })}
+    </>
+  );
+}
+
+/** equation 필드 단독 렌더 (BlockMath). 내부에 $ 없이 raw LaTeX 가정. */
+function EquationBlock({ tex }: { tex: string }) {
+  const cleaned = tex.replace(/^\$\$?|\$\$?$/g, '').trim();
+  if (!cleaned) return null;
+  try {
+    return (
+      <div className="overflow-x-auto rounded bg-slate-50 px-2 py-1 text-slate-900">
+        <BlockMath math={cleaned} />
+      </div>
+    );
+  } catch {
+    return (
+      <div className="mt-0.5 rounded bg-rose-50 px-2 py-1 font-mono text-[12px] text-rose-800" title="수식 렌더 실패 — 원본 표시">
+        {tex}
+      </div>
+    );
+  }
+}
+
 function ResultView({ parsed }: { parsed: ParsedExplanation }) {
   return (
     <div className="space-y-3 text-sm text-slate-900">
       <div className="rounded-md bg-emerald-50 p-3">
         <span className="text-xs font-semibold text-emerald-900">정답</span>
-        <div className="mt-0.5 text-base font-bold text-emerald-950">{parsed.answer}</div>
+        <div className="mt-0.5 text-base font-bold text-emerald-950">
+          <MathText text={parsed.answer} />
+        </div>
       </div>
       <div>
         <span className="text-xs font-semibold text-slate-700">
@@ -958,10 +1026,12 @@ function ResultView({ parsed }: { parsed: ParsedExplanation }) {
         <ol className="mt-1 list-decimal space-y-2 pl-5">
           {parsed.explanation_steps.map((s, i) => (
             <li key={i}>
-              <div>{s.text}</div>
+              <div className="leading-relaxed">
+                <MathText text={s.text} />
+              </div>
               {s.equation && (
-                <div className="mt-0.5 rounded bg-slate-50 px-2 py-1 font-mono text-[12px] text-indigo-800">
-                  {s.equation}
+                <div className="mt-1">
+                  <EquationBlock tex={s.equation} />
                 </div>
               )}
             </li>
@@ -971,7 +1041,9 @@ function ResultView({ parsed }: { parsed: ParsedExplanation }) {
       {parsed.summary && (
         <div className="rounded-md bg-slate-50 p-3 text-xs">
           <span className="font-semibold text-slate-700">요약 </span>
-          <span className="text-slate-800">{parsed.summary}</span>
+          <span className="text-slate-800">
+            <MathText text={parsed.summary} />
+          </span>
         </div>
       )}
     </div>
