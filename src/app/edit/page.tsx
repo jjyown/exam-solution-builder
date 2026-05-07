@@ -527,7 +527,8 @@ export default function EditPage() {
     };
     const croppedDataUrl = captureCrop(imageEl, naturalBox);
     setSlot(active.id, { naturalBox, croppedDataUrl, error: undefined });
-    setCrop(undefined);
+    // crop state 는 useEffect 가 active.naturalBox 변화 감지해 자동으로 다시 그려줌
+    // (clearing here causes flash + 사용자가 박스 위치를 잃어버린 듯한 인상)
   }
 
   // ── AI 박스 자동 검출 ─────────────────────────────────────────────────
@@ -842,6 +843,38 @@ export default function EditPage() {
     // 한 번만
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // ── 활성 슬롯의 naturalBox → ReactCrop 표시용 percent crop 동기화 ──
+  // 슬롯 전환 / box 변경 / 이미지 로드 완료 시 메인 캔버스에 빨간 박스가 자동 표시됨.
+  // 이미지 자연 크기는 img 가 로드돼야 알 수 있어 imgLoadTick 으로 재트리거.
+  const [imgLoadTick, setImgLoadTick] = useState(0);
+  useEffect(() => {
+    if (!active || !active.naturalBox || !imgRef.current) {
+      setCrop(undefined);
+      return;
+    }
+    const img = imgRef.current;
+    if (!img.naturalWidth || !img.naturalHeight) {
+      // 아직 로드 전 — onLoad 가 imgLoadTick 증가시키면 다시 평가
+      return;
+    }
+    setCrop({
+      unit: "%",
+      x: (active.naturalBox.x / img.naturalWidth) * 100,
+      y: (active.naturalBox.y / img.naturalHeight) * 100,
+      width: (active.naturalBox.width / img.naturalWidth) * 100,
+      height: (active.naturalBox.height / img.naturalHeight) * 100,
+    });
+  }, [
+    active,
+    active?.id,
+    active?.naturalBox?.x,
+    active?.naturalBox?.y,
+    active?.naturalBox?.width,
+    active?.naturalBox?.height,
+    active?.sourceDataUrl,
+    imgLoadTick,
+  ]);
 
   // ── 활성 슬롯 풀 소스 지연 로드 — 사이드바에서 클릭한 순간 다운로드 ──
   useEffect(() => {
@@ -1282,6 +1315,7 @@ export default function EditPage() {
                         // CDN 직접 URL 일 때 canvas drawImage 를 위한 CORS — Drive lh3 는 일반적으로 허용
                         crossOrigin="anonymous"
                         className="block max-w-full"
+                        onLoad={() => setImgLoadTick((t) => t + 1)}
                       />
                     </ReactCrop>
                   </div>
