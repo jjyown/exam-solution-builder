@@ -619,7 +619,7 @@ export default function AutoPipelinePage() {
             onClick={syncDriveAnalysis}
             disabled={analysisSyncing}
             className="rounded-md border border-emerald-300 bg-white px-3 py-1.5 text-xs font-semibold text-emerald-800 hover:bg-emerald-50 disabled:opacity-50"
-            title="Drive 「분석용 자료」 폴더를 다시 읽어 KB 에 합칩니다 (양식·교재 학습)"
+            title="Drive 「분석용 자료」(시중교재/개인자료 포함) 폴더를 다시 읽어 KB 에 합칩니다. 자동 감지도 동작 — 새 PDF 올린 후 ~1분 안 첫 풀이 호출에서 자동 반영됩니다."
           >
             {analysisSyncing ? '분석자료 동기화 중…' : '분석자료 새로 학습'}
           </button>
