@@ -26,6 +26,11 @@ type Row = {
   content: string;
   equations: string[] | null;
   answer: string | null;
+  // 1:1 매핑
+  problem_no: number | null;
+  solution_text: string | null;
+  solution_equations: string[] | null;
+  pair_series: string | null;
 };
 
 function rowToRecord(r: Row): ReferenceRecord {
@@ -36,6 +41,10 @@ function rowToRecord(r: Row): ReferenceRecord {
     content: r.content,
     equations: Array.isArray(r.equations) ? r.equations : [],
     answer: r.answer ?? "",
+    problem_no: r.problem_no ?? undefined,
+    solution_text: r.solution_text ?? undefined,
+    solution_equations: Array.isArray(r.solution_equations) ? r.solution_equations : undefined,
+    pair_series: r.pair_series ?? undefined,
   };
 }
 
@@ -79,6 +88,10 @@ export async function persistRecordsForFile(
     content: r.content,
     equations: r.equations,
     answer: r.answer,
+    problem_no: r.problem_no ?? null,
+    solution_text: r.solution_text ?? null,
+    solution_equations: r.solution_equations ?? [],
+    pair_series: r.pair_series ?? null,
   }));
   await sb.from(TABLE).insert(rows);
 }
@@ -112,30 +125,42 @@ export async function fetchAllRecords(): Promise<ReferenceRecord[]> {
   return (data as Row[]).map(rowToRecord);
 }
 
-/** 사용자 검색 (problem_hint + content trigram). limit 기본 30. */
+/** 사용자 검색 (problem_hint + content + solution_text trigram). limit 기본 30. */
 export async function searchAnalysisRecords(
   query: string,
   limit = 30,
-): Promise<Array<ReferenceRecord & { snippet: string }>> {
+): Promise<Array<ReferenceRecord & { snippet: string; matchedIn: "problem" | "solution" | "hint" }>> {
   const sb = getSupabaseServiceClient();
   if (!sb) return [];
   const q = query.trim();
   if (!q) return [];
-  // ilike 단순 부분일치 — 한국어 trigram 인덱스가 있어 빠름
+  // ilike 단순 부분일치 — 한국어 trigram 인덱스가 있어 빠름. 풀이 본문도 검색 대상.
   const { data, error } = await sb
     .from(TABLE)
     .select("*")
-    .or(`problem_hint.ilike.%${q}%,content.ilike.%${q}%`)
+    .or(
+      `problem_hint.ilike.%${q}%,content.ilike.%${q}%,solution_text.ilike.%${q}%`,
+    )
     .limit(limit);
   if (error || !data) return [];
   return (data as Row[]).map((r) => {
     const rec = rowToRecord(r);
-    // 짧은 snippet 만들기
-    const lower = r.content.toLowerCase();
-    const idx = lower.indexOf(q.toLowerCase());
+    const lq = q.toLowerCase();
+    // 매칭된 위치를 우선순위로 검색 (문제 → 풀이 → 힌트)
+    const candidates: Array<{ field: "problem" | "solution" | "hint"; text: string }> = [
+      { field: "problem", text: r.content || "" },
+      { field: "solution", text: r.solution_text || "" },
+      { field: "hint", text: r.problem_hint || "" },
+    ];
+    const found =
+      candidates.find((c) => c.text.toLowerCase().includes(lq)) || candidates[0];
+    const idx = found.text.toLowerCase().indexOf(lq);
     const start = Math.max(0, idx - 40);
-    const end = Math.min(r.content.length, (idx >= 0 ? idx : 0) + 80);
-    const snippet = (start > 0 ? "…" : "") + r.content.slice(start, end) + (end < r.content.length ? "…" : "");
-    return { ...rec, snippet };
+    const end = Math.min(found.text.length, (idx >= 0 ? idx : 0) + 100);
+    const snippet =
+      (start > 0 ? "…" : "") +
+      found.text.slice(start, end) +
+      (end < found.text.length ? "…" : "");
+    return { ...rec, snippet, matchedIn: found.field };
   });
 }

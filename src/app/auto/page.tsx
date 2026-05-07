@@ -144,7 +144,16 @@ export default function AutoPipelinePage() {
   const [analysisSearchQ, setAnalysisSearchQ] = useState('');
   const [analysisSearchBusy, setAnalysisSearchBusy] = useState(false);
   const [analysisSearchResults, setAnalysisSearchResults] = useState<
-    Array<{ id: string; source: string; problem_hint?: string; snippet: string }>
+    Array<{
+      id: string;
+      source: string;
+      problem_hint?: string;
+      snippet: string;
+      matchedIn?: 'problem' | 'solution' | 'hint';
+      problem_no?: number;
+      solution_text?: string;
+      pair_series?: string;
+    }>
   >([]);
 
   const runAnalysisSearch = useCallback(async () => {
@@ -716,11 +725,39 @@ export default function AutoPipelinePage() {
             </button>
           </div>
           {analysisSearchResults.length > 0 && (
-            <ul className="mt-3 max-h-72 space-y-2 overflow-y-auto">
+            <ul className="mt-3 max-h-96 space-y-2 overflow-y-auto">
               {analysisSearchResults.map((r) => (
                 <li key={r.id} className="rounded border border-emerald-200 bg-white p-2 text-xs">
-                  <p className="font-semibold text-slate-800">{r.problem_hint || r.source}</p>
-                  <p className="mt-0.5 text-[11px] text-slate-500">{r.source}</p>
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="font-semibold text-slate-800">
+                      {r.problem_hint || r.source}
+                      {typeof r.problem_no === 'number' && (
+                        <span className="ml-1 rounded bg-slate-100 px-1 text-slate-600">
+                          {r.problem_no}번
+                        </span>
+                      )}
+                    </p>
+                    <span
+                      className={`shrink-0 rounded px-1 text-[10px] ${
+                        r.matchedIn === 'solution'
+                          ? 'bg-amber-100 text-amber-800'
+                          : r.matchedIn === 'problem'
+                            ? 'bg-blue-100 text-blue-800'
+                            : 'bg-slate-100 text-slate-600'
+                      }`}
+                    >
+                      {r.matchedIn === 'solution'
+                        ? '풀이 매치'
+                        : r.matchedIn === 'problem'
+                          ? '문제 매치'
+                          : '제목 매치'}
+                    </span>
+                  </div>
+                  <p className="mt-0.5 text-[11px] text-slate-500">
+                    {r.source}
+                    {r.pair_series && ` · 시리즈: ${r.pair_series}`}
+                    {r.solution_text && ' · 풀이 포함 ✓'}
+                  </p>
                   <p className="mt-1 text-slate-700">{r.snippet}</p>
                 </li>
               ))}

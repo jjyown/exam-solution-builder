@@ -153,6 +153,11 @@ export async function loadDriveAnalysisRecords(): Promise<{
     }
   }
 
+  // 별도 PDF 페어 매칭 (예: "쎈_대수_문제.pdf" + "쎈_대수_해설.pdf")
+  // 같은 series 의 문제 record · 풀이 record 를 problem_no 로 join 해서
+  // 문제 record 에 solution_text 를 채워 넣는다.
+  const merged = mergePairedSeparatePdfs(all);
+
   // Drive 에서 삭제된 파일의 Supabase row 정리 (best-effort)
   try {
     await pruneOrphanRecords(files.map((f) => f.id));
@@ -160,8 +165,84 @@ export async function loadDriveAnalysisRecords(): Promise<{
     // silent
   }
 
-  summary.records = all.length;
-  return { records: all, summary };
+  summary.records = merged.length;
+  return { records: merged, summary };
+}
+
+/**
+ * "쎈_문제.pdf" + "쎈_해설.pdf" 처럼 별도 PDF 로 올라온 페어를 파일명 휴리스틱으로
+ * 묶고, 문제 record 의 solution_text 를 풀이 record 에서 가져와 채운다.
+ * 이미 1:1 매핑된 record (problem_no 와 solution_text 가 같이 있는) 는 그대로 둔다.
+ */
+function mergePairedSeparatePdfs(records: ReferenceRecord[]): ReferenceRecord[] {
+  type Bucket = { series: string; kind: "problem" | "solution"; records: ReferenceRecord[] };
+  const buckets = new Map<string, Bucket>();
+
+  for (const r of records) {
+    if (r.solution_text) continue; // 이미 합본 페어링
+    if (typeof r.problem_no !== "number") continue; // 페어링 가능한 row 만 후보
+    const meta = inferSeriesAndKindFromSource(r.source);
+    if (!meta) continue;
+    const key = `${meta.series}::${meta.kind}`;
+    const bucket = buckets.get(key) ?? { series: meta.series, kind: meta.kind, records: [] };
+    bucket.records.push(r);
+    buckets.set(key, bucket);
+  }
+
+  // 같은 series 의 problem ↔ solution 매핑
+  const result = records.slice();
+  const indexById = new Map(result.map((r, i) => [r.id, i] as const));
+  const seriesNames = new Set<string>();
+  for (const b of buckets.values()) seriesNames.add(b.series);
+
+  for (const series of seriesNames) {
+    const problemBucket = buckets.get(`${series}::problem`);
+    const solutionBucket = buckets.get(`${series}::solution`);
+    if (!problemBucket || !solutionBucket) continue;
+    const solByNo = new Map<number, ReferenceRecord>();
+    for (const s of solutionBucket.records) {
+      if (typeof s.problem_no !== "number") continue;
+      const exist = solByNo.get(s.problem_no);
+      if (!exist || (s.content?.length ?? 0) > (exist.content?.length ?? 0)) {
+        solByNo.set(s.problem_no, s);
+      }
+    }
+    for (const p of problemBucket.records) {
+      if (typeof p.problem_no !== "number") continue;
+      const sol = solByNo.get(p.problem_no);
+      if (!sol) continue;
+      const idx = indexById.get(p.id);
+      if (idx === undefined) continue;
+      result[idx] = {
+        ...p,
+        solution_text: sol.content,
+        solution_equations: sol.equations,
+        pair_series: series,
+        problem_hint: `${p.problem_hint} (풀이 페어 ✓)`,
+      };
+    }
+  }
+  return result;
+}
+
+/** "drive/분석용자료/시중교재/쎈_대수_문제.pdf" → { series: "쎈 대수", kind: "problem" } */
+function inferSeriesAndKindFromSource(
+  source: string,
+): { series: string; kind: "problem" | "solution" } | null {
+  // 파일명만 추출
+  const filename = source.split("/").pop() ?? source;
+  const lower = filename.toLowerCase();
+  const isSolution = /해설|정답|answer|solution/.test(lower) || /해설|정답/.test(filename);
+  const isProblem = /문제|기출|워크북|problem|question/.test(lower) || /문제|기출|워크북/.test(filename);
+  if (!isSolution && !isProblem) return null;
+  // 시리즈 이름 = 파일명에서 키워드/확장자/구분자 떼어낸 것
+  let series = filename
+    .replace(/\.[^.]+$/, "")
+    .replace(/[_\s\-]?(문제|기출|워크북|problem|question|해설|정답|answer|solution)[_\s\-]?/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!series) return null;
+  return { series, kind: isSolution ? "solution" : "problem" };
 }
 
 /** 캐시 강제 무효화 — sync 엔드포인트가 사용 */
@@ -171,9 +252,11 @@ export function invalidateAnalysisCache(): void {
 
 /**
  * 추출된 텍스트를 적당한 단위로 잘라 ReferenceRecord 로 만든다.
- * 단위:
- *   - `[문항 N]` 헤더가 있으면 문항 단위
- *   - 그 외엔 빈 줄 2개 단위 chunk (최대 1500자)
+ *
+ * 우선순위:
+ *  1) [문항 N] + [해설 N] 또는 [해설] 섹션이 동시에 있으면 → 1:1 매핑된 페어 record
+ *  2) 문항 번호 헤더만 있으면 → 문항 단위 chunk (풀이 없음)
+ *  3) 둘 다 없으면 → 1500자 단위 chunk
  */
 function splitTextIntoRecords(
   fileId: string,
@@ -183,14 +266,34 @@ function splitTextIntoRecords(
 ): ReferenceRecord[] {
   const cleaned = text.trim();
   if (!cleaned) return [];
+  const subPath = pathSegments.length > 0 ? `${pathSegments.join("/")}/` : "";
+  const sourcePath = `drive/분석용자료/${subPath}${fileName}`;
 
-  // 문항 헤더 분리
-  const labeled = cleaned.match(/\[문항\s*\d+\][\s\S]*?(?=\[문항\s*\d+\]|$)/g);
-  if (labeled && labeled.length >= 2) {
-    return labeled.map((chunk, idx) => buildRecord(fileId, fileName, pathSegments, idx, chunk.trim()));
+  // 1) 1:1 매핑 시도
+  const paired = parseProblemSolutionPairs(cleaned);
+  if (paired.length >= 2) {
+    return paired.map((p) => ({
+      id: `drive:${fileId}#${p.problem_no}`,
+      source: sourcePath,
+      answer: p.answer,
+      problem_hint: `${subPath}${fileName} ${p.problem_no}번${p.solution ? " (풀이 포함)" : ""}`,
+      content: p.question,
+      equations: extractEquationsHeuristic(p.question),
+      problem_no: p.problem_no,
+      solution_text: p.solution || undefined,
+      solution_equations: p.solution ? extractEquationsHeuristic(p.solution) : undefined,
+    }));
   }
 
-  // 문항 헤더가 없는 경우 — 1500자 단위 chunk
+  // 2) 문항 헤더만 있는 경우 — 문항 단위 chunk
+  const labeled = cleaned.match(/\[문항\s*\d+\][\s\S]*?(?=\[문항\s*\d+\]|$)/g);
+  if (labeled && labeled.length >= 2) {
+    return labeled.map((chunk, idx) =>
+      buildRecord(fileId, fileName, pathSegments, idx, chunk.trim()),
+    );
+  }
+
+  // 3) 헤더 없음 — 1500자 단위 chunk (옛 흐름)
   const chunks: string[] = [];
   const MAX = 1500;
   let buf = "";
@@ -206,6 +309,139 @@ function splitTextIntoRecords(
   if (buf.trim()) chunks.push(buf.trim());
   if (chunks.length === 0) return [];
   return chunks.map((chunk, idx) => buildRecord(fileId, fileName, pathSegments, idx, chunk));
+}
+
+/**
+ * 텍스트에서 문항 N 과 해설 N 을 짝지어 추출.
+ * 인식 헤더:
+ *  - `[문항 N]`, `[해설 N]`
+ *  - "1.", "1)", "1번" (앞 줄 시작에 위치)
+ *  - "[해설]", "[정답 및 해설]", "정답 및 해설", "해설" 단독 줄 → 풀이 섹션 시작
+ *
+ * 빈 페이지·중복 페이지 안전:
+ *  - 같은 N 의 풀이 여러 개면 가장 긴 것을 선택 (빈 페이지 무시)
+ *  - 빈 풀이는 undefined 처리
+ */
+type Pair = {
+  problem_no: number;
+  question: string;
+  solution: string;
+  answer: string;
+};
+
+function parseProblemSolutionPairs(fullText: string): Pair[] {
+  // 풀이 섹션 시작 마커 — 첫 번째 매치 위치를 분리점으로 사용
+  const solutionSectionRe =
+    /(?:^|\n)\s*(?:\[정답\s*및\s*해설\]|\[해설\]|정답\s*및\s*해설|해설)\s*\n/m;
+  const solStartMatch = fullText.match(solutionSectionRe);
+  let problemSection = fullText;
+  let solutionSection = "";
+  if (solStartMatch && solStartMatch.index !== undefined) {
+    problemSection = fullText.slice(0, solStartMatch.index);
+    solutionSection = fullText.slice(solStartMatch.index + solStartMatch[0].length);
+  }
+
+  const problems = parseNumberedItems(problemSection);
+  if (problems.length < 2) return []; // 매핑 의미 없음 → 옛 흐름으로
+
+  // 풀이 섹션이 없으면 — `[해설 N]` 인라인 마커가 본문에 흩어진 케이스 시도
+  let solutions: { no: number; text: string }[] = [];
+  if (solutionSection) {
+    solutions = parseNumberedItems(solutionSection);
+  } else {
+    solutions = parseInlineSolutionMarkers(fullText);
+  }
+
+  // 같은 N 여러 개면 가장 긴 것 선택 (빈 페이지·중복 페이지 안전)
+  const solMap = new Map<number, string>();
+  for (const s of solutions) {
+    const t = s.text.trim();
+    if (!t) continue;
+    const existing = solMap.get(s.no);
+    if (!existing || t.length > existing.length) {
+      solMap.set(s.no, t);
+    }
+  }
+
+  return problems.map((p) => {
+    const sol = solMap.get(p.no) || "";
+    // 풀이에서 [정답] 라인 추출
+    const answerMatch = sol.match(/\[정답\]\s*([^\n]+)/);
+    return {
+      problem_no: p.no,
+      question: p.text,
+      solution: sol,
+      answer: answerMatch ? answerMatch[1].trim() : "",
+    };
+  });
+}
+
+/** "1.", "1)", "[문항 1]", "1번" 같은 번호 헤더로 문항을 분리. */
+function parseNumberedItems(text: string): { no: number; text: string }[] {
+  const re = /(?:^|\n)\s*(?:\[문항\s*(\d{1,3})\]|\[해설\s*(\d{1,3})\]|(\d{1,3})\s*[\.\)]|(\d{1,3})\s*번\s)/g;
+  const matches: { no: number; start: number; headerEnd: number }[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    const noStr = m[1] ?? m[2] ?? m[3] ?? m[4];
+    if (!noStr) continue;
+    const no = Number(noStr);
+    if (!Number.isFinite(no) || no <= 0 || no > 100) continue;
+    matches.push({ no, start: m.index, headerEnd: m.index + m[0].length });
+  }
+  if (matches.length === 0) return [];
+
+  // 단조 증가 시퀀스 우선 (1, 2, 3, ...) 선택해 노이즈 제거
+  const filtered = filterMonotonic(matches);
+
+  const items: { no: number; text: string }[] = [];
+  for (let i = 0; i < filtered.length; i++) {
+    const start = filtered[i].headerEnd;
+    const end = i + 1 < filtered.length ? filtered[i + 1].start : text.length;
+    items.push({ no: filtered[i].no, text: text.slice(start, end).trim() });
+  }
+  return items;
+}
+
+/** [해설 N] 마커가 본문 안에 흩어져 있는 케이스. 별도 풀이 섹션 없을 때 fallback. */
+function parseInlineSolutionMarkers(text: string): { no: number; text: string }[] {
+  const re = /\[해설\s*(\d{1,3})\]/g;
+  const matches: { no: number; start: number; headerEnd: number }[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    const no = Number(m[1]);
+    if (!Number.isFinite(no) || no <= 0 || no > 100) continue;
+    matches.push({ no, start: m.index, headerEnd: m.index + m[0].length });
+  }
+  return matches.map((mt, i) => {
+    const start = mt.headerEnd;
+    const end = i + 1 < matches.length ? matches[i + 1].start : text.length;
+    return { no: mt.no, text: text.slice(start, end).trim() };
+  });
+}
+
+/** 가장 긴 단조 증가 부분수열 선택 (1,2,3,... 흐름 우선). */
+function filterMonotonic(
+  list: { no: number; start: number; headerEnd: number }[],
+): { no: number; start: number; headerEnd: number }[] {
+  if (list.length === 0) return [];
+  // DP: longest non-decreasing subsequence by no, position-ordered
+  const n = list.length;
+  const lengths = new Array<number>(n).fill(1);
+  const prev = new Array<number>(n).fill(-1);
+  let bestEnd = 0;
+  for (let i = 0; i < n; i++) {
+    for (let j = 0; j < i; j++) {
+      if (list[j].no <= list[i].no && lengths[j] + 1 > lengths[i]) {
+        lengths[i] = lengths[j] + 1;
+        prev[i] = j;
+      }
+    }
+    if (lengths[i] > lengths[bestEnd]) bestEnd = i;
+  }
+  const out: typeof list = [];
+  for (let i = bestEnd; i !== -1; i = prev[i]) out.push(list[i]);
+  out.reverse();
+  return out;
 }
 
 function buildRecord(

@@ -22,11 +22,17 @@ export function buildExplanationPrompt({
 }: PromptInput): string {
   const fewShot = references
     .map((r, i) => {
+      // 1:1 페어링된 record 면 분석자료의 문제 본문 + 풀이 단계까지 모두 보여줌
+      const hasPaired = !!(r.solution_text && r.solution_text.trim());
+      const problemBody = hasPaired ? r.content : r.problem_hint;
+      const solution = hasPaired
+        ? cleanForPrompt(r.solution_text || '')
+        : cleanForPrompt(r.content);
       return `<예시 ${i + 1}>
-[문제] ${r.problem_hint}
+[문제] ${cleanForPrompt(problemBody)}
 [정답] ${cleanForPrompt(r.answer)}
 [해설]
-${cleanForPrompt(r.content)}
+${solution}
 </예시 ${i + 1}>`;
     })
     .join('\n\n');

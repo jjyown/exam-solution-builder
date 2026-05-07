@@ -20,6 +20,11 @@ export interface ReferenceRecord {
   problem_hint: string;
   content: string;
   equations: string[];
+  // 1:1 매핑 (문제 ↔ 풀이) — 분석용 자료에서만 채워짐. kb.jsonl 등에는 없을 수 있음.
+  problem_no?: number;
+  solution_text?: string;
+  solution_equations?: string[];
+  pair_series?: string;
 }
 
 interface IndexedRecord extends ReferenceRecord {
@@ -100,9 +105,9 @@ export class ReferenceRetriever {
   }
 
   private index(records: ReferenceRecord[]): void {
-    // 각 문서 토큰화
+    // 각 문서 토큰화 (문제·풀이·힌트 모두 포함해 풀이 키워드로도 매칭 가능)
     this.records = records.map((rec) => {
-      const docText = `${rec.problem_hint} ${rec.content}`;
+      const docText = [rec.problem_hint, rec.content, rec.solution_text || ""].join(" ");
       const freq = buildTokenFreq(docText);
       return { ...rec, tokens: new Set(freq.keys()), tokenFreq: freq };
     });
