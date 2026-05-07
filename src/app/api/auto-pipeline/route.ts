@@ -28,6 +28,13 @@ import { buildAutoChecklist } from '@/lib/autoPipelineChecklist';
 import { recordAutoPipelineRun } from '@/lib/autoPipelineLog';
 import { extractTextFromUploadedFile } from '@/lib/fileExtraction';
 import { extractQuestionsFromText, type ExtractedQuestion } from '@/lib/questionSplit';
+import {
+  approxCostCents,
+  geminiModelFor,
+  inferDifficulty,
+  openaiModelFor,
+  type Profile,
+} from '@/lib/profileRouting';
 
 // ── KB 1회 인덱싱 후 재사용 ─────────────────────────────────────────────────
 let retrieverPromise: Promise<ReferenceRetriever> | null = null;
@@ -62,10 +69,10 @@ class GeminiQuotaError extends Error {
   }
 }
 
-async function callGemini(prompt: string): Promise<string> {
+async function callGemini(prompt: string, modelOverride?: string): Promise<string> {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) throw new Error('GEMINI_API_KEY 미설정');
-  const model = process.env.GEMINI_MODEL || 'gemini-2.5-pro';
+  const model = modelOverride || process.env.GEMINI_MODEL || 'gemini-2.5-pro';
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
   const res = await fetch(url, {
     method: 'POST',
@@ -89,10 +96,10 @@ async function callGemini(prompt: string): Promise<string> {
   );
 }
 
-async function callOpenAI(prompt: string): Promise<string> {
+async function callOpenAI(prompt: string, modelOverride?: string): Promise<string> {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) throw new Error('OPENAI_API_KEY 미설정');
-  const model = process.env.OPENAI_MODEL || 'gpt-4-turbo';
+  const model = modelOverride || process.env.OPENAI_MODEL || 'gpt-4o-mini';
   const res = await fetch('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
     headers: {
@@ -113,22 +120,32 @@ async function callOpenAI(prompt: string): Promise<string> {
 }
 
 /**
- * 모델 선택 + Gemini 한도 초과 시 OpenAI 자동 폴백.
- * 한 번 폴백되면 같은 요청 안 다른 문항도 OpenAI 사용 (state는 클로저로).
+ * Profile 기반 모델 라우터.
+ * - vendor: 'gemini' | 'openai' (사용자 선택)
+ * - profile: 'easy' | 'balanced' | 'killer' (난이도 자동 추정)
+ * - 비용 폭증 방지: 쉬운 문제에는 flash-lite/4o-mini, 킬러는 2.5-pro/4o
+ * - Gemini 한도 초과 → OpenAI 자동 폴백 (요청 단위로 sticky)
+ *
+ * 반환: 호출 함수 + 사용된 model을 회신할 수 있는 wrapper.
  */
-function pickLlmCall(modelPref: string | undefined) {
+type RoutedCall = (prompt: string, profile: Profile) => Promise<{ text: string; usedModel: string; usedVendor: 'gemini' | 'openai' }>;
+
+function makeRoutedLlmCall(modelPref: string | undefined): RoutedCall {
   let fallenBack = (modelPref || '').toLowerCase() === 'openai';
-  if (fallenBack) return callOpenAI;
-  return async (prompt: string): Promise<string> => {
-    if (fallenBack) return callOpenAI(prompt);
+  return async (prompt, profile) => {
+    if (fallenBack) {
+      const m = openaiModelFor(profile);
+      return { text: await callOpenAI(prompt, m), usedModel: m, usedVendor: 'openai' };
+    }
+    const geminiModel = geminiModelFor(profile);
     try {
-      return await callGemini(prompt);
+      return { text: await callGemini(prompt, geminiModel), usedModel: geminiModel, usedVendor: 'gemini' };
     } catch (e) {
       if (e instanceof GeminiQuotaError) {
         fallenBack = true;
         if (process.env.OPENAI_API_KEY) {
-          // 자동 폴백
-          return callOpenAI(prompt);
+          const m = openaiModelFor(profile);
+          return { text: await callOpenAI(prompt, m), usedModel: m, usedVendor: 'openai' };
         }
         throw new Error(
           `Gemini 한도 초과 + OPENAI_API_KEY 없음. https://ai.studio/spend 또는 Railway에 OPENAI_API_KEY 추가 후 재시도.`,
@@ -252,21 +269,46 @@ type RunRow = {
   manualReviewChecklist: string[];
   runId: string | null;
   persistError?: string;
+  profile: Profile;
+  profileReason: string;
+  usedModel?: string;
+  usedVendor?: 'gemini' | 'openai';
+  approxCostCents?: number;
 };
 
 async function executeOne(params: {
   retriever: ReferenceRetriever;
-  llmCall: (prompt: string) => Promise<string>;
+  routedCall: RoutedCall;
   topK: number;
   maxRetries: number;
   examName?: string;
-  model: string;
+  modelPref: string;
   persist: boolean;
   item: ResolvedItem;
+  /** 사용자가 강제 지정한 프로필 — 'auto' 면 자동 추정 */
+  profileOverride: Profile | 'auto';
 }): Promise<RunRow> {
+  // 1) 난이도 추정 또는 강제값
+  const inference =
+    params.profileOverride === 'auto'
+      ? inferDifficulty(params.item.questionNo, params.item.questionText)
+      : { profile: params.profileOverride, reason: '사용자 지정' };
+
+  let usedModel: string | undefined;
+  let usedVendor: 'gemini' | 'openai' | undefined;
+  let totalPromptChars = 0;
+
+  const llmCall = async (prompt: string): Promise<string> => {
+    totalPromptChars += prompt.length;
+    const r = await params.routedCall(prompt, inference.profile);
+    usedModel = r.usedModel;
+    usedVendor = r.usedVendor;
+    return r.text;
+  };
+
   const result = await runAutoPipeline(params.item.questionText, {
     retriever: params.retriever,
-    llmCall: params.llmCall,
+    llmCall,
     topK: params.topK,
     maxRetries: params.maxRetries,
   });
@@ -281,7 +323,7 @@ async function executeOne(params: {
         questionText: params.item.questionText,
         examName: params.examName,
         questionNo: params.item.questionNo,
-        model: params.model,
+        model: usedModel || params.modelPref,
         topK: params.topK,
         maxRetries: params.maxRetries,
       },
@@ -291,6 +333,10 @@ async function executeOne(params: {
     runId = log.id;
     persistError = log.error;
   }
+
+  const cost = usedModel
+    ? Math.round(approxCostCents(usedModel, totalPromptChars) * 1000) / 1000
+    : undefined;
 
   return {
     questionNo: params.item.questionNo,
@@ -302,6 +348,11 @@ async function executeOne(params: {
     manualReviewChecklist: checklist,
     runId,
     persistError,
+    profile: inference.profile,
+    profileReason: inference.reason,
+    usedModel,
+    usedVendor,
+    approxCostCents: cost,
   };
 }
 
@@ -314,6 +365,8 @@ export async function POST(req: Request) {
     maxRetries?: number;
     model?: string;
     persist?: boolean;
+    /** 'auto' | 'easy' | 'balanced' | 'killer' — 미지정 시 'auto' */
+    profile?: 'auto' | Profile;
   };
   try {
     body = await req.json();
@@ -330,6 +383,10 @@ export async function POST(req: Request) {
   const topK = body.topK ?? 3;
   const maxRetries = body.maxRetries ?? 2;
   const persist = body.persist !== false;
+  const profileOverride: Profile | 'auto' =
+    body.profile === 'easy' || body.profile === 'balanced' || body.profile === 'killer'
+      ? body.profile
+      : 'auto';
 
   // 텍스트 입력으로 들어왔지만 사용자가 questionNo를 지정한 경우 그걸로 덮어쓴다
   if (body.questionText && body.questionNo) {
@@ -338,19 +395,20 @@ export async function POST(req: Request) {
 
   try {
     const retriever = await getRetriever();
-    const llmCall = pickLlmCall(model);
+    const routedCall = makeRoutedLlmCall(model);
 
     // ─── 단일 문항 모드 ──────────────────────────────────────────────────
     if (resolved.items.length === 1) {
       const row = await executeOne({
         retriever,
-        llmCall,
+        routedCall,
         topK,
         maxRetries,
         examName: body.examName,
-        model,
+        modelPref: model,
         persist,
         item: resolved.items[0],
+        profileOverride,
       });
 
       // 추출 메타가 0문항이면 분리 실패 경고 추가
@@ -382,16 +440,21 @@ export async function POST(req: Request) {
       try {
         const row = await executeOne({
           retriever,
-          llmCall,
+          routedCall,
           topK,
           maxRetries,
           examName: body.examName,
-          model,
+          modelPref: model,
           persist,
           item,
+          profileOverride,
         });
         runs.push(row);
       } catch (e) {
+        const inf =
+          profileOverride === 'auto'
+            ? inferDifficulty(item.questionNo, item.questionText)
+            : { profile: profileOverride, reason: '사용자 지정' };
         runs.push({
           questionNo: item.questionNo,
           questionText: item.questionText,
@@ -401,6 +464,8 @@ export async function POST(req: Request) {
           trace: [],
           manualReviewChecklist: [`[문항 ${item.questionNo}] 예외 발생: ${(e as Error).message}`],
           runId: null,
+          profile: inf.profile,
+          profileReason: inf.reason,
         });
       }
     }

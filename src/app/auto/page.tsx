@@ -35,6 +35,11 @@ type RunRow = {
   manualReviewChecklist: string[];
   runId: string | null;
   persistError?: string;
+  profile?: 'easy' | 'balanced' | 'killer';
+  profileReason?: string;
+  usedModel?: string;
+  usedVendor?: 'gemini' | 'openai';
+  approxCostCents?: number;
 };
 
 type ExtractedMeta = {
@@ -91,6 +96,7 @@ export default function AutoPipelinePage() {
   const [explanationMode, setExplanationMode] = useState<'full' | 'partial'>('full');
   const [selectedQuestions, setSelectedQuestions] = useState<number[]>([]);
   const [model, setModel] = useState<'gemini' | 'openai'>('gemini');
+  const [profile, setProfile] = useState<'auto' | 'easy' | 'balanced' | 'killer'>('auto');
   const [topK, setTopK] = useState(3);
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState<PipelineResponse | null>(null);
@@ -244,6 +250,7 @@ export default function AutoPipelinePage() {
         examName: examName || undefined,
         questionNo: questionNo || undefined,
         model,
+        profile,
         topK,
         maxRetries,
       };
@@ -686,6 +693,19 @@ export default function AutoPipelinePage() {
                 <option value="openai">OpenAI</option>
               </select>
             </label>
+            <label className="flex items-center gap-1.5" title="문항 난이도별로 모델을 자동 선택해 비용을 줄입니다.">
+              난이도
+              <select
+                value={profile}
+                onChange={(e) => setProfile(e.target.value as typeof profile)}
+                className="rounded-md border border-slate-300 px-1.5 py-1 text-sm"
+              >
+                <option value="auto">자동 (권장)</option>
+                <option value="easy">easy (저렴)</option>
+                <option value="balanced">balanced</option>
+                <option value="killer">killer (고비용)</option>
+              </select>
+            </label>
             <label className="flex items-center gap-1.5">
               참고 예시
               <input
@@ -831,6 +851,7 @@ function ResultsSection(props: {
   const isMulti = runs.length > 1;
   const successCount = runs.filter((r) => r.parsed).length;
   const active = runs[activeIdx] ?? runs[0];
+  const totalCostCents = runs.reduce((s, r) => s + (r.approxCostCents ?? 0), 0);
   const [docxBusy, setDocxBusy] = useState<null | 'active' | 'all'>(null);
   async function handleDocx(scope: 'active' | 'all') {
     setDocxBusy(scope);
@@ -864,6 +885,11 @@ function ResultsSection(props: {
               {result.partialFailures && result.partialFailures > 0
                 ? ` · ${result.partialFailures}개 검수 필요`
                 : ''}
+              {totalCostCents > 0 && (
+                <span className="ml-2 text-[11px] font-normal text-indigo-800">
+                  · 추정 합산 비용 ≈ ${(totalCostCents / 100).toFixed(3)}
+                </span>
+              )}
             </p>
             <div className="flex items-center gap-2">
               {result.extracted && (
@@ -922,10 +948,40 @@ function ResultsSection(props: {
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         <div className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
           <div className="mb-2 flex items-center justify-between">
-            <h2 className="text-base font-semibold text-slate-900">
-              {isMulti ? `[${active.questionNo}번] ` : ''}
-              결과 {active.parsed ? '✓' : '✗'}
-            </h2>
+            <div>
+              <h2 className="text-base font-semibold text-slate-900">
+                {isMulti ? `[${active.questionNo}번] ` : ''}
+                결과 {active.parsed ? '✓' : '✗'}
+              </h2>
+              {(active.profile || active.usedModel) && (
+                <div className="mt-0.5 flex flex-wrap items-center gap-1 text-[10px]">
+                  {active.profile && (
+                    <span
+                      className={`rounded px-1.5 py-0.5 font-semibold ${
+                        active.profile === 'killer'
+                          ? 'bg-rose-100 text-rose-900'
+                          : active.profile === 'easy'
+                            ? 'bg-emerald-100 text-emerald-900'
+                            : 'bg-slate-100 text-slate-800'
+                      }`}
+                      title={active.profileReason ?? ''}
+                    >
+                      {active.profile}
+                    </span>
+                  )}
+                  {active.usedModel && (
+                    <span className="rounded bg-slate-100 px-1.5 py-0.5 text-slate-700">
+                      {active.usedVendor === 'openai' ? '⊙' : '◇'} {active.usedModel}
+                    </span>
+                  )}
+                  {typeof active.approxCostCents === 'number' && active.approxCostCents > 0 && (
+                    <span className="rounded bg-amber-100 px-1.5 py-0.5 text-amber-900">
+                      ≈ ${(active.approxCostCents / 100).toFixed(4)}
+                    </span>
+                  )}
+                </div>
+              )}
+            </div>
             <div className="flex gap-1">
               <button
                 onClick={() => handleDocx('active')}
