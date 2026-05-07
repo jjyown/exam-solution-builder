@@ -21,6 +21,7 @@ import { explanationLineToParagraphChildren } from "@/lib/docxOmmlBuilder";
 import {
   imageRunFromBuffer,
   isDocxOmittedTypingReferenceCropMarkdownLine,
+  bufferFromDataUrl,
   parseMarkdownImageLine,
   readImageRelativeToBase,
 } from "@/lib/docxMarkdownImage";
@@ -474,6 +475,14 @@ async function paragraphChildrenForDocxLine(
 ): Promise<ParagraphChild[]> {
   const normalizedLine = normalizeLineForDocxRender(line);
   const img = parseMarkdownImageLine(normalizedLine);
+  if (img) {
+    // dataURL 직접 임베딩 (크롭 탭 결과물 등) — assetBaseDir 없어도 OK
+    const dataBuf = bufferFromDataUrl(img.src);
+    if (dataBuf) {
+      const run = imageRunFromBuffer(dataBuf, img.alt);
+      if (run) return [run];
+    }
+  }
   if (img && assetBaseDir) {
     const buf = await readImageRelativeToBase(assetBaseDir, img.src);
     if (buf) {

@@ -54,6 +54,13 @@ type CropEntry = {
   parsed: ParsedExplanation | null;
   status: "idle" | "processing" | "done" | "error";
   error?: string;
+  /** 풀이 결과 영속화 ID — Supabase 에 기록된 row. 피드백 저장에 사용. */
+  runId?: string | null;
+  /** 사용자 피드백 (1~5 별점 + 메모) — 다음 풀이 호출에 반영됨 */
+  rating?: number | null;
+  feedbackNote?: string;
+  feedbackSaving?: boolean;
+  feedbackSaved?: boolean;
 };
 
 type SourceImage = {
@@ -282,6 +289,42 @@ export default function CropPage() {
     setCrops((prev) => prev.map((c) => (c.id === id ? { ...c, questionNo: no } : c)));
   }
 
+  /** 별점·메모를 Supabase 에 저장 — 다음 풀이 호출 프롬프트에 같은 문항 피드백이 반영됨 */
+  async function saveFeedbackForCrop(entry: CropEntry) {
+    if (!entry.runId) {
+      alert("Supabase 영속화가 비활성화되어 있어 피드백을 저장할 수 없습니다. (auto_pipeline_runs 테이블·환경변수 확인)");
+      return;
+    }
+    setCrops((prev) =>
+      prev.map((c) => (c.id === entry.id ? { ...c, feedbackSaving: true } : c)),
+    );
+    try {
+      const res = await fetch("/api/auto-pipeline/feedback", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          runId: entry.runId,
+          userRating: entry.rating ?? undefined,
+          userFeedback: entry.feedbackNote || undefined,
+        }),
+      });
+      const data = await res.json();
+      setCrops((prev) =>
+        prev.map((c) =>
+          c.id === entry.id
+            ? { ...c, feedbackSaving: false, feedbackSaved: !!data.ok }
+            : c,
+        ),
+      );
+    } catch {
+      setCrops((prev) =>
+        prev.map((c) =>
+          c.id === entry.id ? { ...c, feedbackSaving: false, feedbackSaved: false } : c,
+        ),
+      );
+    }
+  }
+
   async function processCrop(entry: CropEntry) {
     setCrops((prev) =>
       prev.map((c) => (c.id === entry.id ? { ...c, status: "processing", error: undefined } : c)),
@@ -316,7 +359,10 @@ export default function CropPage() {
                 ...c,
                 status: "done",
                 parsed: row.parsed ?? null,
+                runId: row.runId ?? null,
                 error: row.parsed ? undefined : (row.errors || []).join(" / "),
+                // 새 풀이 도착 → 이전 피드백 상태 초기화
+                feedbackSaved: false,
               }
             : c,
         ),
@@ -342,7 +388,8 @@ export default function CropPage() {
       .filter((c) => c.parsed)
       .map((c) => ({
         questionNo: c.questionNo,
-        questionText: `(크롭 이미지 — ${c.pageLabel})`,
+        // 잘라낸 이미지를 마크다운 이미지 라인으로 전달 → DOCX 빌더가 dataURL 디코드해 임베드
+        questionText: `![문제 원본 — ${c.pageLabel}](${c.imageDataUrl})`,
         parsed: c.parsed,
       }));
     if (successRuns.length === 0) {
@@ -681,6 +728,72 @@ export default function CropPage() {
                           ))}
                         </ol>
                       </details>
+                    )}
+
+                    {/* 피드백 패널 — 풀이 후 별점·메모 → 다음 호출 프롬프트에 반영 */}
+                    {c.parsed && c.runId && (
+                      <div className="mt-2 rounded border border-indigo-200 bg-indigo-50 p-2 text-[11px] text-indigo-950">
+                        <p className="font-semibold">결과 피드백</p>
+                        <div className="mt-1 flex items-center gap-1">
+                          {[1, 2, 3, 4, 5].map((n) => (
+                            <button
+                              key={n}
+                              onClick={() =>
+                                setCrops((prev) =>
+                                  prev.map((x) =>
+                                    x.id === c.id ? { ...x, rating: n, feedbackSaved: false } : x,
+                                  ),
+                                )
+                              }
+                              className={`h-6 w-6 rounded-full border text-xs font-bold ${
+                                c.rating === n
+                                  ? "border-indigo-700 bg-indigo-700 text-white"
+                                  : "border-indigo-300 bg-white text-indigo-800 hover:bg-indigo-100"
+                              }`}
+                              title={`${n}점`}
+                            >
+                              {n}
+                            </button>
+                          ))}
+                          <span className="ml-1 text-[10px] text-indigo-900">
+                            1=재생성 · 5=그대로 사용
+                          </span>
+                        </div>
+                        <textarea
+                          value={c.feedbackNote ?? ""}
+                          onChange={(e) =>
+                            setCrops((prev) =>
+                              prev.map((x) =>
+                                x.id === c.id
+                                  ? { ...x, feedbackNote: e.target.value, feedbackSaved: false }
+                                  : x,
+                              ),
+                            )
+                          }
+                          placeholder="이 결과의 문제점·개선 메모 (선택, 객관식인데 단답으로 답함 등)"
+                          rows={2}
+                          className="mt-1 w-full rounded border border-indigo-200 bg-white p-1.5 text-[11px]"
+                        />
+                        <div className="mt-1 flex items-center gap-2">
+                          <button
+                            onClick={() => saveFeedbackForCrop(c)}
+                            disabled={
+                              c.feedbackSaving || (c.rating == null && !c.feedbackNote?.trim())
+                            }
+                            className="rounded border border-indigo-700 bg-indigo-700 px-2 py-0.5 text-[10px] font-semibold text-white hover:bg-indigo-800 disabled:opacity-50"
+                          >
+                            {c.feedbackSaving ? "저장 중…" : "피드백 저장"}
+                          </button>
+                          {c.feedbackSaved && (
+                            <span className="text-[10px] text-emerald-700">✓ 저장됨</span>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                    {c.parsed && !c.runId && (
+                      <p className="mt-1 rounded border border-amber-200 bg-amber-50 px-2 py-1 text-[10px] text-amber-900">
+                        Supabase 영속화 비활성 — 피드백은 auto_pipeline_runs 테이블이 있어야 저장됩니다.
+                      </p>
                     )}
                   </div>
                 </div>

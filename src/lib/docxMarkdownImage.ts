@@ -131,6 +131,21 @@ export async function readImageRelativeToBase(
   }
 }
 
+/**
+ * data:image/...;base64,... → Buffer.
+ * 크롭 탭이 만든 dataURL 이미지를 DOCX 에 직접 임베딩하는 데 사용.
+ */
+export function bufferFromDataUrl(src: string): Buffer | null {
+  const m = src.match(/^data:image\/[a-z0-9.+-]+;base64,(.+)$/i);
+  if (!m) return null;
+  try {
+    const data = Buffer.from(m[1].replace(/\s/g, ""), "base64");
+    return data.length > 0 ? data : null;
+  } catch {
+    return null;
+  }
+}
+
 export function imageRunFromBuffer(data: Buffer, alt: string): ImageRun | null {
   const t = detectRasterType(data);
   if (!t) return null;
