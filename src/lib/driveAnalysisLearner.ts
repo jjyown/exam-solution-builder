@@ -39,6 +39,17 @@ const fileCache = new Map<string, CacheEntry>(); // key = drive fileId
 
 const ALLOWED_EXTS = new Set([".pdf", ".png", ".jpg", ".jpeg", ".webp"]);
 
+/**
+ * 단일 파일 최대 크기 (바이트). 기본 35MB.
+ * Gemini inlineData 한도(50MB) 안에서, base64 변환 시 추가 메모리(약 1.33배)를
+ * 감안해 OOM 마진을 둔 값. 환경변수 ANALYSIS_FILE_MAX_MB 로 오버라이드 가능.
+ */
+const ANALYSIS_FILE_MAX_BYTES = (() => {
+  const raw = Number(process.env.ANALYSIS_FILE_MAX_MB);
+  const mb = Number.isFinite(raw) && raw > 0 ? raw : 35;
+  return mb * 1024 * 1024;
+})();
+
 export type AnalysisLearnSummary = {
   configured: boolean;
   folderResolved: boolean;
@@ -123,17 +134,35 @@ export async function loadDriveAnalysisRecords(): Promise<{
       continue;
     }
     // 3) 캐시 둘 다 miss → Gemini OCR + Supabase 저장
+    // OOM 방지: 너무 큰 파일은 download 자체를 skip (buffer + base64 동시 점유 시 위험)
+    if (typeof f.size === "number" && f.size > ANALYSIS_FILE_MAX_BYTES) {
+      const mb = (f.size / (1024 * 1024)).toFixed(1);
+      summary.errors.push(
+        `${f.name}: ${mb}MB — ANALYSIS_FILE_MAX_MB(${(ANALYSIS_FILE_MAX_BYTES / 1024 / 1024) | 0}MB) 초과로 OCR skip. 파일을 분할하거나 환경변수를 올려주세요.`,
+      );
+      continue;
+    }
     try {
-      const { buffer, mimeType } = await downloadDriveFileById(f.id);
-      const ext = path.extname(f.name).toLowerCase();
-      const effectiveMime =
-        mimeType ||
-        (ext === ".pdf"
-          ? "application/pdf"
-          : ext === ".png"
-            ? "image/png"
-            : "image/jpeg");
-      const v = await extractTextWithGeminiVision(buffer.toString("base64"), effectiveMime);
+      let buffer: Buffer | null = null;
+      let base64: string | null = null;
+      let effectiveMime: string;
+      {
+        const dl = await downloadDriveFileById(f.id);
+        buffer = dl.buffer;
+        const ext = path.extname(f.name).toLowerCase();
+        effectiveMime =
+          dl.mimeType ||
+          (ext === ".pdf"
+            ? "application/pdf"
+            : ext === ".png"
+              ? "image/png"
+              : "image/jpeg");
+        base64 = buffer.toString("base64");
+        // 같은 데이터를 두 번 들고 있을 필요 없음 → 즉시 GC 후보로
+        buffer = null;
+      }
+      const v = await extractTextWithGeminiVision(base64, effectiveMime);
+      base64 = null; // OCR 응답 받은 직후 즉시 해제
       if (!v.ok) {
         summary.errors.push(`${f.name}: ${v.error}`);
         continue;
