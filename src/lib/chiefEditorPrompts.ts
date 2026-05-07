@@ -1,6 +1,6 @@
 /**
  * OpenAI(또는 동일 지시를 다른 모델에 붙여넣기)용 **수석 편집장**·그래프·보내기 전 검수 프롬프트.
- * `/api/generate-explanation` 과 별개 — 배치·MCP·스크립트에서 선택적으로 사용.
+ * `/api/generate-explanation` 과 별개 — 배치·스크립트에서 선택적으로 사용.
  */
 
 /** Step 1: 초안 생성·재작성 시 system 역할 */

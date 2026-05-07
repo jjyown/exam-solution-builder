@@ -1,7 +1,5 @@
 /**
- * Mathpix OCR v3 `/v3/text` — 서버 전용.
- * MCP stdio는 `tsx`가 `../src/lib` named export를 불안정하게 로드하는 경우가 있어,
- * 동일 요청 옵션을 `mcp/mathpixClient.mts`에 복제해 두었으니 변경 시 둘을 맞출 것.
+ * Mathpix OCR v3 `/v3/text` — 서버 전용. Gemini multimodal 의 폴백.
  * @see https://docs.mathpix.com/reference/post-v3-text
  */
 
