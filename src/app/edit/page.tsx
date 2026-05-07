@@ -49,7 +49,11 @@ type Slot = {
   driveFileId?: string;
   /** 이미 휴지통으로 이동되었으면 true (UI 상태 표시용) */
   trashed?: boolean;
+  /** PDF 출력 포함 여부 — 좌측 사이드바 체크박스 (기본 true). 「체크한 것만 PDF」가 이 값으로 필터. */
+  includeInPdf: boolean;
 };
+
+type RangePreset = { id: string; name: string; range: string };
 
 const ACCEPTED_FILE_PATTERN = /\.(pdf|png|jpe?g|webp|heic|heif|gif)$/i;
 
@@ -81,7 +85,111 @@ export default function EditPage() {
   /** 가져오기 진행 표시: 「선택 N개 중 i 가져오는 중」 */
   const [driveBulkProgress, setDriveBulkProgress] = useState<{ done: number; total: number } | null>(null);
 
+  // 범위 입력·묶음 preset (사진 편집기 UX 차용)
+  const [rangeText, setRangeText] = useState("");
+  const [presets, setPresets] = useState<RangePreset[]>([]);
+  const [presetName, setPresetName] = useState("");
+  const [draggingId, setDraggingId] = useState<string | null>(null);
+
   const active = slots.find((s) => s.id === activeId) ?? null;
+
+  // ── 묶음 preset: localStorage 영속화 ─────────────────────────────────
+  useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem("edit_page_range_presets_v1");
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) setPresets(parsed.filter((p) => p && p.id && p.name && p.range));
+      }
+    } catch {
+      /* silent */
+    }
+  }, []);
+  function persistPresets(next: RangePreset[]): void {
+    setPresets(next);
+    try {
+      window.localStorage.setItem("edit_page_range_presets_v1", JSON.stringify(next));
+    } catch {
+      /* silent */
+    }
+  }
+
+  function applyRangeToInclude(text: string): void {
+    const wanted = parsePageRanges(text, slots.length);
+    if (wanted.size === 0) {
+      // 비어 있으면 전체 해제
+      setSlots((prev) => prev.map((s) => ({ ...s, includeInPdf: false })));
+      return;
+    }
+    setSlots((prev) =>
+      prev
+        .slice()
+        .sort((a, b) => a.pageNo - b.pageNo)
+        .reduce<Slot[]>((acc, s, i) => {
+          // 「순서 N」 = 정렬된 인덱스 + 1
+          acc.push({ ...s, includeInPdf: wanted.has(i + 1) });
+          return acc;
+        }, [])
+        .sort((a, b) => a.pageNo - b.pageNo),
+    );
+  }
+
+  function savePreset(): void {
+    const name = presetName.trim();
+    const range = rangeText.trim();
+    if (!name || !range) {
+      alert("묶음 이름과 범위를 모두 입력하세요.");
+      return;
+    }
+    const id = `preset-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    persistPresets([...presets, { id, name, range }]);
+    setPresetName("");
+  }
+  function applyPreset(p: RangePreset): void {
+    setRangeText(p.range);
+    applyRangeToInclude(p.range);
+  }
+  function removePreset(id: string): void {
+    persistPresets(presets.filter((p) => p.id !== id));
+  }
+
+  function selectAllSlots(): void {
+    setSlots((prev) => prev.map((s) => ({ ...s, includeInPdf: true })));
+  }
+  function clearAllSelection(): void {
+    setSlots((prev) => prev.map((s) => ({ ...s, includeInPdf: false })));
+  }
+  function removeUncheckedSlots(): void {
+    setSlots((prev) => prev.filter((s) => s.includeInPdf));
+  }
+  function clearAllSlots(): void {
+    if (slots.length === 0) return;
+    if (!confirm(`전체 ${slots.length}개 슬롯을 비웁니다. 진행할까요? (Drive 원본은 그대로)`)) return;
+    setSlots([]);
+    setActiveId(null);
+  }
+
+  // ── 드래그 reorder ─────────────────────────────────────────────────
+  function onDragStartSlot(id: string) {
+    setDraggingId(id);
+  }
+  function onDropSlot(targetId: string) {
+    if (!draggingId || draggingId === targetId) return;
+    setSlots((prev) => {
+      const fromIdx = prev.findIndex((s) => s.id === draggingId);
+      const toIdx = prev.findIndex((s) => s.id === targetId);
+      if (fromIdx < 0 || toIdx < 0) return prev;
+      const next = prev.slice();
+      const [moved] = next.splice(fromIdx, 1);
+      next.splice(toIdx, 0, moved);
+      // pageNo 재부여 — 정렬 순서대로 1, 2, 3 ...
+      return next.map((s, i) => ({ ...s, pageNo: i + 1 }));
+    });
+    setDraggingId(null);
+  }
+  function onDragEndSlot() {
+    setDraggingId(null);
+  }
 
   // ── Drive 시험지 원안 ────────────────────────────────────────────────
   const loadDriveFiles = useCallback(async () => {
@@ -218,6 +326,7 @@ export default function EditPage() {
               // PDF 원본은 Drive 한 파일이지만 페이지마다 슬롯이 됨 → fileId 동일하게 부여.
               // 한 페이지만 휴지통 이동은 의미 없음 → 모든 페이지 슬롯이 동일 fileId 공유.
               driveFileId: it.driveFileId,
+              includeInPdf: true,
             });
           }
         } else {
@@ -232,6 +341,7 @@ export default function EditPage() {
             suggestedName: null,
             busy: null,
             driveFileId: it.driveFileId,
+            includeInPdf: true,
           });
         }
       }
@@ -411,12 +521,18 @@ export default function EditPage() {
   }
 
   // ── 출력: PDF 만들기 + Drive 「시험지」 폴더에 업로드 ─────────────────
-  async function buildPdfBlob(): Promise<Blob | null> {
+  async function buildPdfBlob(opts?: { onlyChecked?: boolean }): Promise<Blob | null> {
+    const onlyChecked = !!opts?.onlyChecked;
     const pages = slots
       .filter((s) => s.croppedDataUrl)
+      .filter((s) => (onlyChecked ? s.includeInPdf : true))
       .sort((a, b) => a.pageNo - b.pageNo);
     if (pages.length === 0) {
-      alert("자르기가 적용된 페이지가 없습니다.");
+      alert(
+        onlyChecked
+          ? "체크되어 있고 자르기가 적용된 페이지가 없습니다."
+          : "자르기가 적용된 페이지가 없습니다.",
+      );
       return null;
     }
     type JsPDFInstance = {
@@ -460,13 +576,14 @@ export default function EditPage() {
     return doc.output("blob");
   }
 
-  async function downloadPdf() {
-    const blob = await buildPdfBlob();
+  async function downloadPdf(opts?: { onlyChecked?: boolean }) {
+    const blob = await buildPdfBlob(opts);
     if (!blob) return;
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `${sanitizeFilename(examName || "편집_시험지")}.pdf`;
+    const suffix = opts?.onlyChecked ? "_체크" : "";
+    a.download = `${sanitizeFilename(examName || "편집_시험지")}${suffix}.pdf`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -530,11 +647,11 @@ export default function EditPage() {
     );
   }
 
-  async function uploadToDriveExamEditAfterFolder() {
+  async function uploadToDriveExamEditAfterFolder(opts?: { onlyChecked?: boolean }) {
     setSavingToDrive(true);
     setSaveResult(null);
     try {
-      const blob = await buildPdfBlob();
+      const blob = await buildPdfBlob(opts);
       if (!blob) return;
       const base64 = await blobToBase64(blob);
       const fileName = `${sanitizeFilename(examName || "편집_시험지")}.pdf`;
@@ -778,99 +895,216 @@ export default function EditPage() {
 
       {/* 2단계: 슬롯 목록 + 작업 영역 */}
       {slots.length > 0 && (
-        <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-[280px_1fr]">
-          {/* 좌측 슬롯 목록 */}
+        <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-[300px_1fr]">
+          {/* 좌측 슬롯 목록 — 사진 편집기 UX 차용 */}
           <aside className="rounded-lg border border-slate-200 bg-white p-3 shadow-sm">
             <div className="mb-2 flex items-center justify-between">
-              <h2 className="text-xs font-bold text-slate-900">페이지 ({slots.length})</h2>
+              <h2 className="text-xs font-bold text-slate-900">
+                페이지 순서 (드래그) · {slots.length}장
+              </h2>
+              <span className="text-[10px] text-emerald-700">
+                체크 {slots.filter((s) => s.includeInPdf).length}
+              </span>
+            </div>
+
+            {/* 전체 선택/해제 */}
+            <div className="mb-2 grid grid-cols-2 gap-1">
               <button
-                onClick={reorderByPageNo}
-                className="text-[10px] text-slate-600 underline hover:text-slate-900"
-                title="페이지 번호 순으로 목록 재정렬"
+                type="button"
+                onClick={selectAllSlots}
+                className="rounded border border-slate-300 bg-white px-2 py-1 text-[11px] font-semibold text-slate-700 hover:bg-slate-50"
               >
-                번호순 정렬
+                전체 선택
+              </button>
+              <button
+                type="button"
+                onClick={clearAllSelection}
+                className="rounded border border-slate-300 bg-white px-2 py-1 text-[11px] font-semibold text-slate-700 hover:bg-slate-50"
+              >
+                전체 해제
               </button>
             </div>
-            <ul className="max-h-[640px] space-y-1 overflow-y-auto">
-              {slots.map((s) => (
-                <li
-                  key={s.id}
-                  className={`flex cursor-pointer items-center gap-2 rounded border p-2 ${
-                    s.id === activeId
-                      ? "border-indigo-500 bg-indigo-50"
-                      : "border-slate-200 bg-white hover:bg-slate-50"
-                  }`}
-                  onClick={() => setActiveId(s.id)}
+
+            {/* 범위 입력 */}
+            <label className="block text-[11px] font-semibold text-slate-700">
+              PDF 포함할 순서 번호
+              <div className="mt-1 flex gap-1">
+                <input
+                  type="text"
+                  value={rangeText}
+                  onChange={(e) => setRangeText(e.target.value)}
+                  placeholder="예: 1,3,5-8"
+                  className="flex-1 rounded border border-slate-300 px-1.5 py-1 text-xs font-normal"
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") applyRangeToInclude(rangeText);
+                  }}
+                />
+                <button
+                  type="button"
+                  onClick={() => applyRangeToInclude(rangeText)}
+                  className="rounded border border-indigo-700 bg-indigo-600 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-indigo-700"
                 >
-                  <input
-                    type="number"
-                    value={s.pageNo}
-                    onChange={(e) =>
-                      setSlot(s.id, {
-                        pageNo: Number.parseInt(e.target.value, 10) || 0,
-                      })
-                    }
-                    onClick={(e) => e.stopPropagation()}
-                    className="w-12 rounded border border-slate-300 px-1 py-0.5 text-center text-xs"
-                    title="페이지 번호 — PDF 정렬 기준"
-                  />
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img
-                    src={s.croppedDataUrl || s.sourceDataUrl}
-                    alt={s.sourceLabel}
-                    className="h-12 w-12 rounded border border-slate-200 bg-slate-100 object-cover"
-                  />
-                  <div className="min-w-0 flex-1 text-[11px]">
-                    <div className="truncate font-semibold text-slate-800">
-                      {s.sourceLabel}
-                      {s.driveFileId && (
-                        <span
-                          className="ml-1 rounded bg-emerald-100 px-1 text-[9px] font-medium text-emerald-800"
-                          title="Drive 「시험지 편집 전」 폴더에서 가져옴 → 처리 후 휴지통으로 이동 가능"
-                        >
-                          Drive
-                        </span>
-                      )}
-                      {s.trashed && (
-                        <span
-                          className="ml-1 rounded bg-rose-100 px-1 text-[9px] font-medium text-rose-700"
-                          title="원본이 「휴지통」 폴더로 이동됨"
-                        >
-                          🗑 이동됨
-                        </span>
-                      )}
-                    </div>
-                    <div className="truncate text-slate-500">
-                      {s.naturalBox ? "✓ 박스" : "박스 없음"}
-                      {s.busy && ` · ${labelBusy(s.busy)}`}
-                      {s.error && ` · ✗`}
-                    </div>
-                  </div>
-                  {s.driveFileId && !s.trashed && s.croppedDataUrl && (
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        trashOneSlot(s);
-                      }}
-                      disabled={s.busy === "trashing"}
-                      className="rounded border border-rose-400 bg-white px-1.5 text-[12px] text-rose-700 hover:bg-rose-50 disabled:opacity-50"
-                      title="이 원본 한 개를 Drive 휴지통으로 이동"
+                  적용
+                </button>
+              </div>
+            </label>
+            <p className="mt-1 text-[10px] text-slate-500">
+              「순서 N」 기준 1번부터. 비우고 적용하면 전체 해제. 1-4, 1~4, 5–10 모두 OK.
+            </p>
+
+            {/* 묶음 preset (학교·시험지 형식) */}
+            <div className="mt-3 rounded-md border border-slate-200 bg-slate-50 p-2">
+              <p className="text-[10px] font-semibold text-slate-700">미리 묶음 (학교·시험지 형식)</p>
+              {presets.length === 0 ? (
+                <p className="mt-1 text-[10px] text-slate-500">저장된 묶음 없음</p>
+              ) : (
+                <div className="mt-1 flex flex-wrap gap-1">
+                  {presets.map((p) => (
+                    <span
+                      key={p.id}
+                      className="inline-flex items-center gap-1 rounded-full border border-slate-300 bg-white px-2 py-0.5 text-[10px]"
                     >
-                      🗑
-                    </button>
-                  )}
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      removeSlot(s.id);
-                    }}
-                    className="rounded border border-rose-300 bg-white px-1.5 text-[10px] font-bold text-rose-700 hover:bg-rose-50"
-                    title="목록에서 제거 (Drive 파일은 그대로)"
+                      <button
+                        type="button"
+                        onClick={() => applyPreset(p)}
+                        className="font-semibold text-slate-800 hover:text-indigo-700"
+                        title={`범위 ${p.range} 적용`}
+                      >
+                        {p.name}{" "}
+                        <span className="text-slate-500">({p.range})</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => removePreset(p.id)}
+                        className="text-slate-400 hover:text-rose-600"
+                        title="묶음 삭제"
+                      >
+                        ✕
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              )}
+              <div className="mt-2 flex gap-1">
+                <input
+                  type="text"
+                  value={presetName}
+                  onChange={(e) => setPresetName(e.target.value)}
+                  placeholder="묶음 이름 (예: ㅇㅇ중)"
+                  className="flex-1 rounded border border-slate-300 px-1.5 py-1 text-xs font-normal"
+                />
+                <button
+                  type="button"
+                  onClick={savePreset}
+                  className="rounded border border-emerald-700 bg-emerald-600 px-2 py-1 text-[11px] font-semibold text-white hover:bg-emerald-700"
+                >
+                  묶음 저장
+                </button>
+              </div>
+              <p className="mt-1 text-[10px] text-slate-500">
+                범위 입력 후 「묶음 저장」. 칩을 누르면 범위가 채워지고 바로 적용됩니다.
+              </p>
+            </div>
+
+            {/* 페이지 카드 리스트 — 드래그 reorder + 체크박스 + 큰 썸네일 */}
+            <ul className="mt-3 max-h-[640px] space-y-1 overflow-y-auto">
+              {slots.map((s, i) => {
+                const orderIdx = i + 1; // 「순서 N」 = 현재 목록상 위치
+                return (
+                  <li
+                    key={s.id}
+                    draggable
+                    onDragStart={() => onDragStartSlot(s.id)}
+                    onDragOver={(e) => e.preventDefault()}
+                    onDrop={() => onDropSlot(s.id)}
+                    onDragEnd={onDragEndSlot}
+                    className={`flex cursor-pointer items-center gap-2 rounded border p-2 ${
+                      draggingId === s.id
+                        ? "border-amber-400 bg-amber-50 opacity-60"
+                        : s.id === activeId
+                          ? "border-indigo-500 bg-indigo-50"
+                          : "border-slate-200 bg-white hover:bg-slate-50"
+                    }`}
+                    onClick={() => setActiveId(s.id)}
                   >
-                    ✕
-                  </button>
-                </li>
-              ))}
+                    {/* 드래그 핸들 표시 */}
+                    <span
+                      className="cursor-grab select-none text-slate-400"
+                      title="드래그로 순서 변경"
+                    >
+                      ⋮⋮
+                    </span>
+                    {/* PDF 포함 체크박스 */}
+                    <input
+                      type="checkbox"
+                      checked={s.includeInPdf}
+                      onChange={(e) => setSlot(s.id, { includeInPdf: e.target.checked })}
+                      onClick={(e) => e.stopPropagation()}
+                      className="h-4 w-4 cursor-pointer accent-indigo-600"
+                      title="체크된 페이지만 「체크한 것만 PDF」 에 포함"
+                    />
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img
+                      src={s.croppedDataUrl || s.sourceDataUrl}
+                      alt={s.sourceLabel}
+                      className="h-14 w-14 rounded border border-slate-200 bg-slate-100 object-cover"
+                    />
+                    <div className="min-w-0 flex-1 text-[11px]">
+                      <div className="flex items-center gap-1">
+                        <span className="rounded bg-slate-200 px-1 text-[10px] font-bold text-slate-800">
+                          순서 {orderIdx}
+                        </span>
+                        {s.driveFileId && (
+                          <span
+                            className="rounded bg-emerald-100 px-1 text-[9px] font-medium text-emerald-800"
+                            title="Drive 출처 — 처리 후 휴지통으로 이동 가능"
+                          >
+                            Drive
+                          </span>
+                        )}
+                        {s.trashed && (
+                          <span className="rounded bg-rose-100 px-1 text-[9px] font-medium text-rose-700">
+                            🗑 이동됨
+                          </span>
+                        )}
+                      </div>
+                      <div className="mt-0.5 truncate text-slate-700" title={s.sourceLabel}>
+                        {s.sourceLabel}
+                      </div>
+                      <div className="truncate text-slate-500">
+                        {s.naturalBox ? "✓ 박스" : "박스 없음"}
+                        {s.busy && ` · ${labelBusy(s.busy)}`}
+                        {s.error && ` · ✗`}
+                      </div>
+                    </div>
+                    <div className="flex flex-col gap-1">
+                      {s.driveFileId && !s.trashed && s.croppedDataUrl && (
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            trashOneSlot(s);
+                          }}
+                          disabled={s.busy === "trashing"}
+                          className="rounded border border-rose-400 bg-white px-1.5 text-[11px] text-rose-700 hover:bg-rose-50 disabled:opacity-50"
+                          title="이 원본 한 개를 Drive 휴지통으로 이동"
+                        >
+                          🗑
+                        </button>
+                      )}
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          removeSlot(s.id);
+                        }}
+                        className="rounded border border-rose-300 bg-white px-1.5 text-[10px] font-bold text-rose-700 hover:bg-rose-50"
+                        title="목록에서 제거 (Drive 파일은 그대로)"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  </li>
+                );
+              })}
             </ul>
           </aside>
 
@@ -910,6 +1144,40 @@ export default function EditPage() {
                   title="현재 페이지 헤더에서 시험명을 한 줄 형식으로 추출 → 묶음 이름 자동 채움"
                 >
                   🏫 AI 학교명
+                </button>
+                <span className="mx-1 h-5 w-px bg-slate-200" />
+                {/* PDF / 정리 액션 — 사진 편집기와 같은 위치 */}
+                <button
+                  onClick={() => downloadPdf({ onlyChecked: false })}
+                  disabled={!slots.some((s) => s.croppedDataUrl)}
+                  className="rounded-md border border-slate-700 bg-slate-700 px-3 py-1.5 text-xs font-semibold text-white hover:bg-slate-800 disabled:opacity-50"
+                  title="자르기 적용된 모든 페이지를 한 PDF 로 다운로드"
+                >
+                  전체 PDF
+                </button>
+                <button
+                  onClick={() => downloadPdf({ onlyChecked: true })}
+                  disabled={!slots.some((s) => s.croppedDataUrl && s.includeInPdf)}
+                  className="rounded-md border border-indigo-700 bg-indigo-700 px-3 py-1.5 text-xs font-semibold text-white hover:bg-indigo-800 disabled:opacity-50"
+                  title="좌측에서 체크된 페이지만 PDF 로 다운로드"
+                >
+                  체크한 것만 PDF
+                </button>
+                <button
+                  onClick={removeUncheckedSlots}
+                  disabled={slots.length === 0 || slots.every((s) => s.includeInPdf)}
+                  className="rounded-md border border-rose-300 bg-white px-3 py-1.5 text-xs font-semibold text-rose-800 hover:bg-rose-50 disabled:opacity-50"
+                  title="체크 해제된 페이지를 목록에서 제거"
+                >
+                  선택 해제 항목 삭제
+                </button>
+                <button
+                  onClick={clearAllSlots}
+                  disabled={slots.length === 0}
+                  className="rounded-md border border-rose-700 bg-rose-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-rose-700 disabled:opacity-50"
+                  title="모든 페이지를 비우기 (Drive 원본은 그대로)"
+                >
+                  전부 비우기
                 </button>
                 {active?.busy && (
                   <span className="text-[11px] text-slate-600">
@@ -974,25 +1242,30 @@ export default function EditPage() {
         <section className="mt-4 rounded-lg border border-slate-200 bg-white p-3 shadow-sm">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="text-xs">
-              <span className="font-semibold text-slate-800">출력</span>
+              <span className="font-semibold text-slate-800">Drive 업로드 / 휴지통 정리</span>
               <span className="ml-2 text-slate-600">
                 자르기 적용 페이지 {slots.filter((s) => s.croppedDataUrl).length} / {slots.length}
+                {" · "}체크 {slots.filter((s) => s.croppedDataUrl && s.includeInPdf).length}
               </span>
             </div>
             <div className="flex flex-wrap gap-2">
               <button
-                onClick={downloadPdf}
-                className="rounded-md border border-slate-700 bg-slate-700 px-3 py-1.5 text-xs font-semibold text-white hover:bg-slate-800"
+                onClick={() => uploadToDriveExamEditAfterFolder({ onlyChecked: true })}
+                disabled={
+                  savingToDrive || !slots.some((s) => s.croppedDataUrl && s.includeInPdf)
+                }
+                className="rounded-md border border-indigo-700 bg-indigo-700 px-3 py-1.5 text-xs font-semibold text-white hover:bg-indigo-800 disabled:opacity-50"
+                title="체크된 페이지만 묶어 「시험지 편집 후」 폴더에 PDF 로 업로드"
               >
-                💾 PDF 다운로드
+                {savingToDrive ? "업로드 중…" : "☁ 체크 PDF Drive 업로드"}
               </button>
               <button
-                onClick={uploadToDriveExamEditAfterFolder}
-                disabled={savingToDrive}
-                className="rounded-md border border-indigo-700 bg-indigo-700 px-3 py-1.5 text-xs font-semibold text-white hover:bg-indigo-800 disabled:opacity-50"
-                title="Drive 「해설제작 / 분석용 자료 / 시험지 편집 / 시험지 편집 후」 폴더로 업로드"
+                onClick={() => uploadToDriveExamEditAfterFolder({ onlyChecked: false })}
+                disabled={savingToDrive || !slots.some((s) => s.croppedDataUrl)}
+                className="rounded-md border border-indigo-300 bg-white px-3 py-1.5 text-xs font-semibold text-indigo-800 hover:bg-indigo-50 disabled:opacity-50"
+                title="자르기 적용된 모든 페이지를 「시험지 편집 후」 폴더에 PDF 로 업로드"
               >
-                {savingToDrive ? "업로드 중…" : "☁ Drive 「시험지 편집 후」에 업로드"}
+                전체 PDF Drive 업로드
               </button>
               {(() => {
                 const trashable = new Set(
@@ -1140,6 +1413,35 @@ function DrivePreviewModal({
 
 function makeId(): string {
   return `slot-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+/**
+ * "1,3,5-8" → Set([1, 3, 5, 6, 7, 8])
+ * - 분리자: , 또는 공백
+ * - 범위: -, ~, –(en dash) 모두 허용
+ * - maxN 을 넘으면 자름. 0/음수/뒤집힌 범위는 무시.
+ */
+function parsePageRanges(text: string, maxN: number): Set<number> {
+  const out = new Set<number>();
+  const tokens = String(text || "")
+    .replace(/[~–]/g, "-")
+    .split(/[,\s]+/)
+    .map((t) => t.trim())
+    .filter(Boolean);
+  for (const tok of tokens) {
+    if (/^\d+$/.test(tok)) {
+      const n = Number.parseInt(tok, 10);
+      if (n >= 1 && n <= maxN) out.add(n);
+      continue;
+    }
+    const m = tok.match(/^(\d+)\s*-\s*(\d+)$/);
+    if (!m) continue;
+    let a = Number.parseInt(m[1], 10);
+    let b = Number.parseInt(m[2], 10);
+    if (a > b) [a, b] = [b, a];
+    for (let i = Math.max(1, a); i <= Math.min(maxN, b); i++) out.add(i);
+  }
+  return out;
 }
 
 function sanitizeFilename(s: string): string {
