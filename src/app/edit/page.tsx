@@ -660,10 +660,14 @@ export default function EditPage() {
   // ── AI 학교명 추출 ────────────────────────────────────────────────────
   async function suggestNameForActive() {
     if (!active) return;
-    // Gemini 는 base64 dataURL 필요 — sourceDataUrl 이 CDN URL 인 케이스 방지
-    const fullSrc = await ensureFullDataUrlSource(active.id);
-    if (!fullSrc) return;
-    const sourceForName = active.croppedDataUrl || fullSrc;
+    // 속도 최적화: 이미 잘라낸 작은 이미지가 있으면 그걸 그대로 사용.
+    // → 4MB 풀 원본 다운로드(5+초) 완전 생략. 헤더 영역만 잘랐으면 ~50KB 면 됨.
+    // 잘라낸 게 없을 때만 풀 원본 다운로드.
+    let sourceForName: string | null = active.croppedDataUrl;
+    if (!sourceForName) {
+      sourceForName = await ensureFullDataUrlSource(active.id);
+    }
+    if (!sourceForName) return;
     setSlot(active.id, { busy: "naming", error: undefined });
     try {
       const res = await fetch("/api/photo-edit/suggest-name", {

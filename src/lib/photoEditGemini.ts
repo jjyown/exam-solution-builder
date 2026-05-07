@@ -119,7 +119,26 @@ async function callGemini(opts: {
   }
 }
 
-const MODELS: string[] = ["gemini-2.5-flash-lite", "gemini-2.0-flash-lite", "gemini-2.5-flash"];
+/**
+ * 모델 우선순위 — thinking 이 없는 모델을 먼저.
+ * Gemini 2.5 시리즈는 기본적으로 thinking tokens 사용 → maxOutputTokens 안에서
+ * thinking 이 토큰을 다 먹으면 실제 출력이 잘리는(중간에 끊기는) 현상 발생.
+ * 2.0-flash-lite 는 thinking 없음 → 토큰 모두 출력에 사용 → 안전·빠름.
+ */
+const MODELS: string[] = ["gemini-2.0-flash-lite", "gemini-2.5-flash-lite", "gemini-2.0-flash"];
+
+/**
+ * Gemini 2.5 모델용 thinking 비활성화 + 표준 generation 옵션.
+ * 2.0 모델은 thinkingConfig 무시하므로 같은 옵션 안전하게 공유.
+ */
+function noThinkingConfig(maxOutputTokens: number, opts?: Record<string, unknown>): Record<string, unknown> {
+  return {
+    temperature: 0,
+    maxOutputTokens,
+    thinkingConfig: { thinkingBudget: 0 },
+    ...(opts ?? {}),
+  };
+}
 
 // ─── 1) 박스 자동 검출 ─────────────────────────────────────────────────────
 const PROMPT_DETECT_BOX = `역할: 태블릿·노트 앱 화면 속 **인쇄 시험지(흰 종이)** 영역만 남기는 정규화 크롭 박스(nx,ny,nw,nh)를 찾습니다.
@@ -162,7 +181,7 @@ export async function geminiDetectProblemBox(
       const json = await callGemini({
         model,
         timeoutMs: 11000,
-        generationConfig: { temperature: 0, maxOutputTokens: 200, responseMimeType: "application/json" },
+        generationConfig: noThinkingConfig(400, { responseMimeType: "application/json" }),
         parts: [
           { inline_data: { mime_type: parsed.mimeType, data: parsed.data } },
           { text: PROMPT_DETECT_BOX },
@@ -224,7 +243,7 @@ export async function geminiMimicCropBox(
       const json = await callGemini({
         model,
         timeoutMs: 14000,
-        generationConfig: { temperature: 0, maxOutputTokens: 220, responseMimeType: "application/json" },
+        generationConfig: noThinkingConfig(400, { responseMimeType: "application/json" }),
         parts: [
           { text: "REFERENCE 이미지:" },
           { inline_data: { mime_type: ref.mimeType, data: ref.data } },
@@ -302,16 +321,22 @@ export async function geminiSuggestExamName(
     try {
       const json = await callGemini({
         model,
-        timeoutMs: 9000,
-        generationConfig: { temperature: 0, maxOutputTokens: 96 },
+        timeoutMs: 15000,
+        // 256 토큰 + thinking 0 — Gemini 2.5 가 thinking 으로 토큰 소모해 출력이 「중2)」 처럼 잘리는 현상 방지.
+        // 한 줄 시험명은 보통 30~50 토큰이라 256 은 충분히 여유.
+        generationConfig: noThinkingConfig(256),
         parts: [
           { inline_data: { mime_type: parsed.mimeType, data: parsed.data } },
           { text: PROMPT_EXAM_NAME },
         ],
       });
-      const text = sanitizeNameLine(extractGeminiText(json));
-      if (text) return { ok: true, name: text, model };
-      lastErr = `${model}: 빈 응답`;
+      const raw = extractGeminiText(json);
+      const text = sanitizeNameLine(raw);
+      // 「중2)」 같은 prefix-only 응답은 추출 실패로 간주 — 다음 모델로 폴백.
+      if (text && text.length > 5 && !/^[중고]\s*\d\s*\)\s*$/.test(text)) {
+        return { ok: true, name: text, model };
+      }
+      lastErr = `${model}: 응답 너무 짧음/형식 미달 (raw="${raw.slice(0, 80)}")`;
     } catch (e) {
       const msg = (e as Error).message;
       if (/RESOURCE_EXHAUSTED|quota|429/i.test(msg)) lastQuota = true;
