@@ -456,12 +456,66 @@ export default function EditPage() {
     }
   }
 
-  function removeSlot(id: string) {
-    setSlots((prev) => {
-      const next = prev.filter((s) => s.id !== id);
-      if (activeId === id) setActiveId(next[0]?.id ?? null);
-      return next;
-    });
+  /**
+   * 슬롯 삭제 — Drive 출처면 「휴지통」 폴더로 이동(복구 가능) + 목록에서 제거.
+   * 로컬 업로드 슬롯이거나 이미 trashed 면 단순 목록 제거만.
+   * 실수 방지: Drive 휴지통 이동 시 확인 다이얼로그.
+   */
+  async function removeSlot(id: string) {
+    const s = slots.find((x) => x.id === id);
+    if (!s) return;
+
+    const removeFromList = () => {
+      setSlots((prev) => {
+        const next = prev.filter((x) => x.id !== id);
+        if (activeId === id) setActiveId(next[0]?.id ?? null);
+        return next;
+      });
+    };
+
+    // Drive 미연결·이미 휴지통 → 단순 제거
+    if (!s.driveFileId || s.trashed) {
+      removeFromList();
+      return;
+    }
+
+    // Drive 휴지통 이동 + 제거 (실수 시 Drive 「휴지통」 폴더에서 복구 가능)
+    if (
+      !confirm(
+        `${s.sourceLabel} 을(를) 삭제합니다.\n\n원본은 Drive 「휴지통」 폴더로 이동되며, 「시험지 편집 전」 폴더에서 사라집니다.\n실수했을 땐 Drive 에서 「휴지통」 → 원래 폴더로 다시 옮기면 복구됩니다.\n\n진행할까요?`,
+      )
+    ) {
+      return;
+    }
+    setSlot(id, { busy: "trashing", error: undefined });
+    try {
+      const res = await fetch("/api/drive/move-to-trash", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ fileId: s.driveFileId }),
+      });
+      const data = await res.json();
+      if (!data.ok) throw new Error(data.error || "휴지통 이동 실패");
+      // 같은 driveFileId 공유하는 다른 슬롯(같은 PDF 페이지 등) 도 trashed 표시 후 제거
+      setSlots((prev) =>
+        prev.filter(
+          (x) => !(x.driveFileId === s.driveFileId) || x.id === id,
+        ),
+      );
+      removeFromList();
+    } catch (e) {
+      const msg = (e as Error).message;
+      // 실패 시 그냥 목록에서만 제거할지 사용자에게 선택권
+      if (
+        confirm(
+          `Drive 휴지통 이동 실패: ${msg}\n\n그래도 목록에서만 제거할까요? (Drive 원본은 그대로 남음)`,
+        )
+      ) {
+        removeFromList();
+      } else {
+        setSlot(id, { busy: null, error: msg });
+      }
+    }
   }
 
   function reorderByPageNo() {
@@ -1213,10 +1267,15 @@ export default function EditPage() {
                       <button
                         onClick={(e) => {
                           e.stopPropagation();
-                          removeSlot(s.id);
+                          void removeSlot(s.id);
                         }}
-                        className="rounded border border-rose-300 bg-white px-1.5 text-[10px] font-bold text-rose-700 hover:bg-rose-50"
-                        title="목록에서 제거 (Drive 파일은 그대로)"
+                        disabled={s.busy === "trashing"}
+                        className="rounded border border-rose-300 bg-white px-1.5 text-[10px] font-bold text-rose-700 hover:bg-rose-50 disabled:opacity-50"
+                        title={
+                          s.driveFileId && !s.trashed
+                            ? "Drive 「휴지통」으로 이동 + 목록에서 제거 (실수 시 Drive 휴지통에서 복구 가능)"
+                            : "목록에서 제거"
+                        }
                       >
                         ✕
                       </button>
@@ -1267,21 +1326,32 @@ export default function EditPage() {
                 </button>
                 <span className="mx-1 h-5 w-px bg-slate-200" />
                 {/* PDF / 정리 액션 — 사진 편집기와 같은 위치 */}
+                {/* 주 동작은 Drive 「시험지 편집 후」 업로드, 보조 동작은 로컬 다운로드 */}
                 <button
-                  onClick={() => downloadPdf({ onlyChecked: false })}
-                  disabled={!slots.some((s) => s.croppedDataUrl)}
-                  className="rounded-md border border-slate-700 bg-slate-700 px-3 py-1.5 text-xs font-semibold text-white hover:bg-slate-800 disabled:opacity-50"
-                  title="자르기 적용된 모든 페이지를 한 PDF 로 다운로드"
+                  onClick={() => uploadToDriveExamEditAfterFolder({ onlyChecked: true })}
+                  disabled={
+                    savingToDrive || !slots.some((s) => s.croppedDataUrl && s.includeInPdf)
+                  }
+                  className="rounded-md border border-indigo-700 bg-indigo-700 px-3 py-1.5 text-xs font-semibold text-white hover:bg-indigo-800 disabled:opacity-50"
+                  title="체크된 페이지를 묶어 Drive 「시험지 편집 후」 폴더에 PDF 로 업로드"
                 >
-                  전체 PDF
+                  {savingToDrive ? "업로드 중…" : "☁ 체크 PDF → Drive 「편집 후」"}
                 </button>
                 <button
                   onClick={() => downloadPdf({ onlyChecked: true })}
                   disabled={!slots.some((s) => s.croppedDataUrl && s.includeInPdf)}
-                  className="rounded-md border border-indigo-700 bg-indigo-700 px-3 py-1.5 text-xs font-semibold text-white hover:bg-indigo-800 disabled:opacity-50"
-                  title="좌측에서 체크된 페이지만 PDF 로 다운로드"
+                  className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                  title="체크된 페이지만 로컬 PDF 로 다운로드 (Drive 업로드 안 함)"
                 >
-                  체크한 것만 PDF
+                  💾 로컬 다운로드
+                </button>
+                <button
+                  onClick={() => downloadPdf({ onlyChecked: false })}
+                  disabled={!slots.some((s) => s.croppedDataUrl)}
+                  className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                  title="자르기 적용된 모든 페이지를 로컬 PDF 로 다운로드"
+                >
+                  전체 PDF
                 </button>
                 <button
                   onClick={removeUncheckedSlots}
