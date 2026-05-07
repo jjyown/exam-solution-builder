@@ -267,6 +267,14 @@ export type DriveFileMeta = {
   mimeType: string;
   modifiedTime: string | null;
   size: number | null;
+  /**
+   * Drive 가 자동 생성한 썸네일의 직접 URL (lh3.googleusercontent.com).
+   *  - 시간제한 토큰이 박힌 서명 URL — 보통 수 시간 유효
+   *  - URL 끝의 `=s220` 등을 다른 사이즈로 치환해 재요청 가능 (예: =s320, =s1600)
+   *  - 클라이언트 `<img>` 가 직접 사용 → 서버 프록시 hop 1 회 절약 → 거의 즉시 표시
+   *  - 만료/실패 시 `/api/drive/thumb?fileId=…` 프록시로 fallback
+   */
+  thumbnailLink: string | null;
 };
 
 /** 폴더 안 파일을 메타데이터까지 함께 반환 (UI Picker 용) */
@@ -277,7 +285,7 @@ export async function listDriveFolderFiles(
   const drive = getDriveClient();
   const res = await drive.files.list({
     q: `'${folderId}' in parents and trashed=false`,
-    fields: "files(id, name, mimeType, modifiedTime, size)",
+    fields: "files(id, name, mimeType, modifiedTime, size, thumbnailLink)",
     orderBy: "modifiedTime desc",
     pageSize: 1000,
   });
@@ -295,6 +303,7 @@ export async function listDriveFolderFiles(
       mimeType: f.mimeType ?? "application/octet-stream",
       modifiedTime: f.modifiedTime ?? null,
       size: f.size ? Number(f.size) : null,
+      thumbnailLink: f.thumbnailLink ?? null,
     });
   }
   return out.filter((f) => f.id);
@@ -341,6 +350,7 @@ export async function listDriveFolderFilesRecursive(
         mimeType: f.mimeType ?? "application/octet-stream",
         modifiedTime: f.modifiedTime ?? null,
         size: f.size ? Number(f.size) : null,
+        thumbnailLink: null, // 재귀 list 는 thumbnailLink 미사용 (분석자료 등) — 필요시 별도 호출
         pathSegments: segments,
       });
     }

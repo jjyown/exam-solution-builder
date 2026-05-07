@@ -25,6 +25,8 @@ type DriveFile = {
   mimeType: string;
   modifiedTime: string | null;
   size: number | null;
+  /** Google CDN(lh3.googleusercontent.com) 직접 URL — 사이드바 썸네일에 즉시 사용 */
+  thumbnailLink: string | null;
 };
 
 type NaturalBox = { x: number; y: number; width: number; height: number };
@@ -246,11 +248,17 @@ export default function EditPage() {
       for (const f of files) {
         if (have.has(f.id)) continue;
         nextNo += 1;
+        // thumbnailLink 가 있으면 Google CDN 직접 URL (서버 hop 0회 — 거의 즉시 표시).
+        // =s220 같은 사이즈 접미를 320 으로 치환해 사이드바 카드에 적합한 크기로.
+        // 없거나 만료되어 실패 시 onError → /api/drive/thumb 프록시로 fallback (UI 측 처리).
+        const directThumb = f.thumbnailLink
+          ? f.thumbnailLink.replace(/=s\d+(-[a-z])?$/, "=s320")
+          : `/api/drive/thumb?fileId=${encodeURIComponent(f.id)}&size=320`;
         additions.push({
           id: makeId(),
           driveFileId: f.id,
           sourceDataUrl: null, // 지연 로드
-          thumbUrl: `/api/drive/thumb?fileId=${encodeURIComponent(f.id)}&size=320`,
+          thumbUrl: directThumb,
           sourceLabel: f.name,
           pageNo: nextNo,
           naturalBox: null,
@@ -269,7 +277,12 @@ export default function EditPage() {
    * 슬롯의 풀 sourceDataUrl 이 비어 있으면 다운로드해 채워넣는다.
    * 클릭 활성화·자르기·AI 호출 직전에 호출. 이미 채워져 있으면 즉시 반환.
    *
-   * PDF 인 경우 — 첫 페이지만 렌더해 사용한다. 다중 페이지 PDF 는 로컬 업로드 권장.
+   * 속도 최적화:
+   *  1) Drive thumbnailLink 가 있으면 먼저 큰 사이즈(s1600) 로 즉시 표시 — Google CDN 직접
+   *     이미지 한 장만 받아 dataURL 로 변환. 4MB 원본 대비 보통 100~400KB → 거의 즉시.
+   *  2) AI 호출/자르기 실행 정확도를 위해 풀 원본도 백그라운드에서 받아 sourceDataUrl 갱신.
+   *     자르기·AI 는 갱신된 풀 이미지를 사용 (조용히 더 선명한 이미지로 교체됨).
+   *  PDF 는 풀 원본 다운로드 후 페이지 렌더 (썸네일로는 부족).
    */
   async function ensureSlotSource(slotId: string): Promise<string | null> {
     const cur = slots.find((s) => s.id === slotId);
@@ -277,6 +290,40 @@ export default function EditPage() {
     if (cur.sourceDataUrl) return cur.sourceDataUrl;
     if (!cur.driveFileId) return null;
     setSlot(slotId, { busy: "loading", error: undefined });
+
+    // 1차: thumbnailLink 의 고해상도 (s1600) 를 dataURL 로 받아 즉시 표시
+    const driveFile = driveFiles.find((d) => d.id === cur.driveFileId);
+    const isPdf =
+      driveFile?.mimeType === "application/pdf" ||
+      /\.pdf$/i.test(driveFile?.name ?? cur.sourceLabel);
+
+    if (!isPdf && driveFile?.thumbnailLink) {
+      try {
+        const bigUrl = driveFile.thumbnailLink.replace(/=s\d+(-[a-z])?$/, "=s1600");
+        const res = await fetch(bigUrl);
+        if (res.ok) {
+          const blob = await res.blob();
+          const previewUrl = await blobToDataUrl(blob);
+          // 즉시 캔버스에 표시 — busy 해제
+          setSlot(slotId, { sourceDataUrl: previewUrl, busy: null });
+          // 백그라운드: 풀 원본을 받아 더 선명한 sourceDataUrl 로 교체 (자르기·AI 정확도용)
+          void (async () => {
+            try {
+              const fetched = await fetchDriveFile(cur.driveFileId!);
+              const fullUrl = await fileToDataUrl(fetched.file);
+              setSlot(slotId, { sourceDataUrl: fullUrl });
+            } catch {
+              /* preview 만으로도 작동 — silent */
+            }
+          })();
+          return previewUrl;
+        }
+      } catch {
+        /* fall through to 풀 다운로드 */
+      }
+    }
+
+    // 2차: 풀 원본 다운로드 (PDF 또는 thumbnailLink 실패 시)
     try {
       const fetched = await fetchDriveFile(cur.driveFileId);
       const f = fetched.file;
@@ -1057,6 +1104,14 @@ export default function EditPage() {
                       alt={s.sourceLabel}
                       loading="lazy"
                       className="h-14 w-14 rounded border border-slate-200 bg-slate-100 object-cover"
+                      referrerPolicy="no-referrer"
+                      onError={(e) => {
+                        // CDN 직접 URL 만료/실패 → 서버 프록시로 자동 폴백 (1회만)
+                        const img = e.currentTarget as HTMLImageElement & { _fallback?: boolean };
+                        if (img._fallback || !s.driveFileId) return;
+                        img._fallback = true;
+                        img.src = `/api/drive/thumb?fileId=${encodeURIComponent(s.driveFileId)}&size=320`;
+                      }}
                     />
                     <div className="min-w-0 flex-1 text-[11px]">
                       <div className="flex items-center gap-1">
@@ -1516,6 +1571,16 @@ async function blobToBase64(blob: Blob): Promise<string> {
       const base64 = dataUrl.split(",")[1] || "";
       resolve(base64);
     };
+    reader.onerror = () => reject(reader.error || new Error("blob 변환 실패"));
+    reader.readAsDataURL(blob);
+  });
+}
+
+/** Blob → 전체 dataURL 그대로 (data:mime;base64,...) — img.src 로 즉시 사용 가능 */
+async function blobToDataUrl(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as string);
     reader.onerror = () => reject(reader.error || new Error("blob 변환 실패"));
     reader.readAsDataURL(blob);
   });
