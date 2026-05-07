@@ -643,35 +643,37 @@ export default function EditPage() {
     // crop state 는 useEffect 가 active.cropNorm 변화 감지해 자동으로 다시 그려줌
   }
 
-  // ── AI 박스 자동 검출 ─────────────────────────────────────────────────
+  /**
+   * 빠른 휴리스틱 박스 — API 호출 없이 즉시 기본 크롭 비율 적용.
+   * 태블릿 스크린샷 기준 (대부분 케이스 커버):
+   *  - 상단 8% 제외 (앱 헤더/툴바)
+   *  - 하단 6% 제외 (앱 네비/인디케이터)
+   *  - 좌우 1% 베젤 제외
+   * 사용자가 박스 모서리 1~2번 드래그로 미세조정 → AI 호출 1~2초 대비 0초.
+   */
+  const FAST_BOX_DEFAULT: CropNorm = { x: 0.01, y: 0.08, width: 0.98, height: 0.86 };
+
   async function detectBoxForSlot(s: Slot): Promise<void> {
-    // Gemini API 는 base64 dataURL 필요 (CDN URL 직접 못 받음) — 풀 dataURL 보장
-    const src = await ensureFullDataUrlSource(s.id);
-    if (!src) {
-      setSlot(s.id, { busy: null, error: "원본 다운로드 실패" });
-      return;
-    }
     setSlot(s.id, { busy: "detecting", error: undefined });
+    // 풀 소스가 이미 dataURL 이면 그대로, 아니면 잠깐 받아 자른다.
+    // (캔버스 자르기를 풀 해상도로 해야 PDF 화질 유지)
+    const src = s.sourceDataUrl?.startsWith("data:")
+      ? s.sourceDataUrl
+      : await ensureFullDataUrlSource(s.id);
     try {
-      const res = await fetch("/api/photo-edit/detect-box", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ image: src }),
-      });
-      const data = await res.json();
-      if (!data.ok) throw new Error(data.error || "AI 박스 검출 실패");
-      const box = data.box as { nx: number; ny: number; nw: number; nh: number };
-      // Gemini 응답은 이미 정규화 0~1 — 그대로 cropNorm 으로 보관
-      const cropNorm: CropNorm = {
-        x: box.nx,
-        y: box.ny,
-        width: box.nw,
-        height: box.nh,
-      };
-      const img = await loadImage(src);
-      const naturalBox = normToNaturalBox(cropNorm, img.naturalWidth, img.naturalHeight);
-      const croppedDataUrl = captureCrop(img, naturalBox);
-      setSlot(s.id, { cropNorm, croppedDataUrl, busy: null });
+      if (src) {
+        const img = await loadImage(src);
+        const naturalBox = normToNaturalBox(
+          FAST_BOX_DEFAULT,
+          img.naturalWidth,
+          img.naturalHeight,
+        );
+        const croppedDataUrl = captureCrop(img, naturalBox);
+        setSlot(s.id, { cropNorm: FAST_BOX_DEFAULT, croppedDataUrl, busy: null });
+      } else {
+        // 이미지 못 받았어도 박스 좌표만이라도 적용 (미리보기 박스 표시)
+        setSlot(s.id, { cropNorm: FAST_BOX_DEFAULT, busy: null });
+      }
     } catch (e) {
       setSlot(s.id, { busy: null, error: (e as Error).message });
     }
@@ -774,15 +776,31 @@ export default function EditPage() {
   // ── AI 학교명 추출 ────────────────────────────────────────────────────
   async function suggestNameForActive() {
     if (!active) return;
-    // 속도 최적화: 이미 잘라낸 작은 이미지가 있으면 그걸 그대로 사용.
-    // → 4MB 풀 원본 다운로드(5+초) 완전 생략. 헤더 영역만 잘랐으면 ~50KB 면 됨.
-    // 잘라낸 게 없을 때만 풀 원본 다운로드.
+    // 속도 최적화: 잘라낸 작은 이미지(헤더 영역) 우선 사용. 4MB 다운로드 회피.
     let sourceForName: string | null = active.croppedDataUrl;
     if (!sourceForName) {
       sourceForName = await ensureFullDataUrlSource(active.id);
     }
     if (!sourceForName) return;
     setSlot(active.id, { busy: "naming", error: undefined });
+    // 1차: Mathpix OCR + 정규식 파싱 (보통 0.5~1.5초, 비용 ~$0.004)
+    // 2차: Mathpix 미설정·실패 시 Gemini 폴백 (1~2초)
+    try {
+      const mxRes = await fetch("/api/photo-edit/suggest-name-mathpix", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ image: sourceForName }),
+      });
+      const mxData = await mxRes.json();
+      if (mxRes.ok && mxData.ok && mxData.name && String(mxData.name).length >= 5) {
+        setSlot(active.id, { suggestedName: mxData.name, busy: null });
+        if (!examName.trim()) setExamName(String(mxData.name));
+        return;
+      }
+      // Mathpix 실패 또는 결과 부족 → Gemini 폴백
+    } catch {
+      /* 네트워크 실패 → Gemini 폴백 */
+    }
     try {
       const res = await fetch("/api/photo-edit/suggest-name", {
         method: "POST",
@@ -1355,17 +1373,17 @@ export default function EditPage() {
                   onClick={() => active && detectBoxForSlot(active)}
                   disabled={!active || active.busy === "detecting" || bulkBusy}
                   className="rounded-md border border-indigo-700 bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-indigo-700 disabled:opacity-50"
-                  title="현재 페이지에서 시험지 영역만 자동으로 박스 잡기 (Gemini)"
+                  title="현재 페이지에 기본 크롭 비율 즉시 적용 (API 호출 없음, 0초). 모서리 드래그로 미세조정"
                 >
-                  🤖 AI 박스 자동
+                  ⚡ 빠른 박스
                 </button>
                 <button
                   onClick={detectAllBoxes}
                   disabled={bulkBusy || slots.every((s) => s.cropNorm)}
                   className="rounded-md border border-indigo-300 bg-white px-3 py-1.5 text-xs font-semibold text-indigo-800 hover:bg-indigo-50 disabled:opacity-50"
-                  title="박스 없는 모든 페이지에 AI 자동 박스 적용"
+                  title="체크된 모든 페이지에 빠른 박스 일괄 적용 (즉시)"
                 >
-                  {bulkBusy ? "처리 중…" : "전체 AI 박스"}
+                  {bulkBusy ? "처리 중…" : "⚡ 전체 빠른 박스"}
                 </button>
                 <button
                   onClick={mimicBoxFromActive}
@@ -1475,7 +1493,7 @@ export default function EditPage() {
                 </p>
               )}
               <p className="mt-2 text-[11px] text-slate-500">
-                🖱 드래그 → 즉시 자르기 적용 · 🤖 AI 박스 자동 → 시험지 영역만 자동 검출 · 🪄 모방 → 현재 박스를 다른 페이지에도 같은 의도로
+                🖱 드래그 → 즉시 자르기 · ⚡ 빠른 박스 → 기본 크롭비율 즉시 적용 (모서리 드래그로 미세조정) · 🪄 모방 → 현재 박스를 다른 체크 페이지에 복제
               </p>
             </div>
 
