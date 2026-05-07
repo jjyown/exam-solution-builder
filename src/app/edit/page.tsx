@@ -32,8 +32,14 @@ type NaturalBox = { x: number; y: number; width: number; height: number };
 /** 편집 슬롯 — 한 장의 원본 이미지(또는 PDF 한 페이지)에 대응. */
 type Slot = {
   id: string;
-  /** 원본 dataUrl (PDF 한 페이지를 캔버스로 렌더한 결과 포함) */
-  sourceDataUrl: string;
+  /**
+   * 원본 풀 이미지 dataUrl. Drive 슬롯은 사용자가 클릭해 활성화하기 전엔 null —
+   * 그때 /api/drive/exam-originals/fetch 로 다운로드해 채워넣는다 (지연 로드).
+   * 로컬 업로드는 처음부터 채워져 있다.
+   */
+  sourceDataUrl: string | null;
+  /** 사이드바·작업 영역에서 미리보기로 쓸 작은 이미지 URL. Drive: /api/drive/thumb, 로컬: sourceDataUrl 같음. */
+  thumbUrl: string;
   sourceLabel: string;
   /** 사용자가 부여한 페이지 번호 — 출력 PDF 의 정렬 기준 */
   pageNo: number;
@@ -43,13 +49,13 @@ type Slot = {
   /** Gemini 가 추출해 준 시험명 한 줄 — 「묶음 이름」으로 사용 가능 */
   suggestedName: string | null;
   /** AI 호출 진행 상태 */
-  busy: null | "detecting" | "mimicking" | "naming" | "trashing";
+  busy: null | "detecting" | "mimicking" | "naming" | "trashing" | "loading";
   error?: string;
   /** Drive 「시험지 편집 전」 폴더에서 가져온 파일이면 그 fileId — 처리 끝난 후 휴지통으로 이동 가능 */
   driveFileId?: string;
   /** 이미 휴지통으로 이동되었으면 true (UI 상태 표시용) */
   trashed?: boolean;
-  /** PDF 출력 포함 여부 — 좌측 사이드바 체크박스 (기본 true). 「체크한 것만 PDF」가 이 값으로 필터. */
+  /** PDF 출력 포함 여부 — 좌측 사이드바 체크박스. Drive 자동로드는 false, 로컬은 true. */
   includeInPdf: boolean;
 };
 
@@ -213,13 +219,89 @@ export default function EditPage() {
         setDriveError(data.error ?? "Drive 목록 조회 실패");
         return;
       }
-      setDriveFiles(Array.isArray(data.files) ? data.files : []);
+      const list: DriveFile[] = Array.isArray(data.files) ? data.files : [];
+      setDriveFiles(list);
       setDriveStatus("ready");
+      // 모든 Drive 파일을 사이드바 슬롯으로 자동 생성 (풀 다운로드는 클릭 시 지연 로드)
+      autoCreateSlotsFromDriveList(list);
     } catch (e) {
       setDriveStatus("error");
       setDriveError((e as Error).message);
     }
+    // autoCreateSlotsFromDriveList 의 setSlots 클로저 안정 — slots 의존성 비움
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  /**
+   * Drive 파일 목록 → 사이드바 슬롯으로 자동 변환 (풀 파일은 다운로드 안 함).
+   * 같은 driveFileId 가 이미 슬롯에 있으면 건너뛴다 (중복 방지).
+   * 사용자가 슬롯을 클릭해야 ensureSlotSource() 가 풀 파일을 받아온다.
+   */
+  function autoCreateSlotsFromDriveList(files: DriveFile[]): void {
+    if (files.length === 0) return;
+    setSlots((prev) => {
+      const have = new Set(prev.filter((s) => s.driveFileId).map((s) => s.driveFileId!));
+      let nextNo = prev.reduce((m, s) => (s.pageNo > m ? s.pageNo : m), 0);
+      const additions: Slot[] = [];
+      for (const f of files) {
+        if (have.has(f.id)) continue;
+        nextNo += 1;
+        additions.push({
+          id: makeId(),
+          driveFileId: f.id,
+          sourceDataUrl: null, // 지연 로드
+          thumbUrl: `/api/drive/thumb?fileId=${encodeURIComponent(f.id)}&size=320`,
+          sourceLabel: f.name,
+          pageNo: nextNo,
+          naturalBox: null,
+          croppedDataUrl: null,
+          suggestedName: null,
+          busy: null,
+          // 자동 로드된 Drive 슬롯은 기본 미체크 — 사용자가 묶음별로 직접 체크
+          includeInPdf: false,
+        });
+      }
+      return [...prev, ...additions];
+    });
+  }
+
+  /**
+   * 슬롯의 풀 sourceDataUrl 이 비어 있으면 다운로드해 채워넣는다.
+   * 클릭 활성화·자르기·AI 호출 직전에 호출. 이미 채워져 있으면 즉시 반환.
+   *
+   * PDF 인 경우 — 첫 페이지만 렌더해 사용한다. 다중 페이지 PDF 는 로컬 업로드 권장.
+   */
+  async function ensureSlotSource(slotId: string): Promise<string | null> {
+    const cur = slots.find((s) => s.id === slotId);
+    if (!cur) return null;
+    if (cur.sourceDataUrl) return cur.sourceDataUrl;
+    if (!cur.driveFileId) return null;
+    setSlot(slotId, { busy: "loading", error: undefined });
+    try {
+      const fetched = await fetchDriveFile(cur.driveFileId);
+      const f = fetched.file;
+      let dataUrl = "";
+      if (f.type === "application/pdf" || /\.pdf$/i.test(f.name)) {
+        const pages = await renderPdfToImages(f);
+        dataUrl = pages[0]?.dataUrl || "";
+        const pageHint =
+          pages.length > 1 ? ` (PDF ${pages.length}쪽 중 첫 페이지만)` : "";
+        setSlot(slotId, {
+          sourceDataUrl: dataUrl,
+          thumbUrl: dataUrl,
+          sourceLabel: cur.sourceLabel + pageHint,
+          busy: null,
+        });
+      } else {
+        dataUrl = await fileToDataUrl(f);
+        setSlot(slotId, { sourceDataUrl: dataUrl, busy: null });
+      }
+      return dataUrl;
+    } catch (e) {
+      setSlot(slotId, { busy: null, error: `다운로드 실패: ${(e as Error).message}` });
+      return null;
+    }
+  }
 
   /** 단일 fileId 다운로드 → File + driveFileId 객체 반환 */
   async function fetchDriveFile(
@@ -317,6 +399,7 @@ export default function EditPage() {
             newSlots.push({
               id: makeId(),
               sourceDataUrl: p.dataUrl,
+              thumbUrl: p.dataUrl,
               sourceLabel: `${f.name} ${p.pageLabel}`,
               pageNo: 0,
               naturalBox: null,
@@ -334,6 +417,7 @@ export default function EditPage() {
           newSlots.push({
             id: makeId(),
             sourceDataUrl: dataUrl,
+            thumbUrl: dataUrl,
             sourceLabel: f.name,
             pageNo: 0,
             naturalBox: null,
@@ -408,24 +492,30 @@ export default function EditPage() {
 
   // ── AI 박스 자동 검출 ─────────────────────────────────────────────────
   async function detectBoxForSlot(s: Slot): Promise<void> {
+    // 풀 소스 없으면 먼저 다운로드
+    const src = s.sourceDataUrl ?? (await ensureSlotSource(s.id));
+    if (!src) {
+      setSlot(s.id, { busy: null, error: "원본 다운로드 실패" });
+      return;
+    }
     setSlot(s.id, { busy: "detecting", error: undefined });
     try {
       const res = await fetch("/api/photo-edit/detect-box", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ image: s.sourceDataUrl }),
+        body: JSON.stringify({ image: src }),
       });
       const data = await res.json();
       if (!data.ok) throw new Error(data.error || "AI 박스 검출 실패");
       const box = data.box as { nx: number; ny: number; nw: number; nh: number };
-      const dim = await imageDimensions(s.sourceDataUrl);
+      const dim = await imageDimensions(src);
       const naturalBox: NaturalBox = {
         x: box.nx * dim.w,
         y: box.ny * dim.h,
         width: box.nw * dim.w,
         height: box.nh * dim.h,
       };
-      const img = await loadImage(s.sourceDataUrl);
+      const img = await loadImage(src);
       const croppedDataUrl = captureCrop(img, naturalBox);
       setSlot(s.id, { naturalBox, croppedDataUrl, busy: null });
     } catch (e) {
@@ -436,8 +526,13 @@ export default function EditPage() {
   async function detectAllBoxes() {
     setBulkBusy(true);
     try {
-      for (const s of slots) {
-        if (s.naturalBox) continue; // 이미 잡힌 건 건너뜀
+      // 체크된 슬롯만 처리 (115장 자동로드 환경에서 「전체 AI 박스」가 모든 파일 처리하면 곤란)
+      const targets = slots.filter((s) => s.includeInPdf && !s.naturalBox);
+      if (targets.length === 0) {
+        alert("AI 박스를 적용할 체크된 페이지가 없습니다.");
+        return;
+      }
+      for (const s of targets) {
         // eslint-disable-next-line no-await-in-loop
         await detectBoxForSlot(s);
       }
@@ -448,11 +543,12 @@ export default function EditPage() {
 
   // ── AI 박스 모방 (현재 슬롯 박스를 기준으로 나머지에 같은 의도 적용) ────
   async function mimicBoxFromActive() {
-    if (!active?.naturalBox || !active?.croppedDataUrl) {
+    if (!active?.naturalBox || !active?.croppedDataUrl || !active.sourceDataUrl) {
       alert("현재 페이지에 박스가 잡혀 있어야 합니다 (드래그 또는 AI 자동).");
       return;
     }
-    const refImg = await loadImage(active.sourceDataUrl);
+    const refSrc = active.sourceDataUrl;
+    const refImg = await loadImage(refSrc);
     const refBox = {
       nx: active.naturalBox.x / refImg.naturalWidth,
       ny: active.naturalBox.y / refImg.naturalHeight,
@@ -461,9 +557,20 @@ export default function EditPage() {
     };
     setBulkBusy(true);
     try {
-      for (const s of slots) {
-        if (s.id === active.id) continue;
-        if (s.naturalBox) continue;
+      // 체크된 슬롯만 모방 대상 — Drive 자동 로드 시 미체크가 기본이므로 명시적 묶음만 처리
+      const targets = slots.filter((s) => s.id !== active.id && s.includeInPdf && !s.naturalBox);
+      if (targets.length === 0) {
+        alert("모방 대상이 없습니다. 사이드바에서 같은 묶음 페이지들을 체크하세요.");
+        return;
+      }
+      for (const s of targets) {
+        // 풀 소스 없으면 먼저 다운로드
+        // eslint-disable-next-line no-await-in-loop
+        const tgtSrc = s.sourceDataUrl ?? (await ensureSlotSource(s.id));
+        if (!tgtSrc) {
+          setSlot(s.id, { busy: null, error: "원본 다운로드 실패" });
+          continue;
+        }
         setSlot(s.id, { busy: "mimicking", error: undefined });
         try {
           // eslint-disable-next-line no-await-in-loop
@@ -471,9 +578,9 @@ export default function EditPage() {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-              referenceImage: active.sourceDataUrl,
+              referenceImage: refSrc,
               referenceBox: refBox,
-              targetImage: s.sourceDataUrl,
+              targetImage: tgtSrc,
             }),
           });
           // eslint-disable-next-line no-await-in-loop
@@ -481,7 +588,7 @@ export default function EditPage() {
           if (!data.ok) throw new Error(data.error || "박스 모방 실패");
           const tgtBox = data.box as { nx: number; ny: number; nw: number; nh: number };
           // eslint-disable-next-line no-await-in-loop
-          const tgtImg = await loadImage(s.sourceDataUrl);
+          const tgtImg = await loadImage(tgtSrc);
           const naturalBox: NaturalBox = {
             x: tgtBox.nx * tgtImg.naturalWidth,
             y: tgtBox.ny * tgtImg.naturalHeight,
@@ -502,7 +609,10 @@ export default function EditPage() {
   // ── AI 학교명 추출 ────────────────────────────────────────────────────
   async function suggestNameForActive() {
     if (!active) return;
-    const sourceForName = active.croppedDataUrl || active.sourceDataUrl;
+    // 풀 소스 없으면 먼저 다운로드
+    const fullSrc = active.sourceDataUrl ?? (await ensureSlotSource(active.id));
+    if (!fullSrc) return;
+    const sourceForName = active.croppedDataUrl || fullSrc;
     setSlot(active.id, { busy: "naming", error: undefined });
     try {
       const res = await fetch("/api/photo-edit/suggest-name", {
@@ -686,6 +796,24 @@ export default function EditPage() {
     return () => window.removeEventListener("keydown", onKey);
   }, [slots, activeId]);
 
+  // ── 페이지 마운트 시 Drive 자동 로드 — 사이드바에 모든 파일이 즉시 보이도록 ──
+  useEffect(() => {
+    void loadDriveFiles();
+    // 한 번만
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // ── 활성 슬롯 풀 소스 지연 로드 — 사이드바에서 클릭한 순간 다운로드 ──
+  useEffect(() => {
+    if (!activeId) return;
+    const s = slots.find((x) => x.id === activeId);
+    if (!s) return;
+    if (s.sourceDataUrl) return; // 이미 로드됨
+    if (!s.driveFileId) return; // 로컬은 항상 로드된 상태
+    void ensureSlotSource(activeId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeId]);
+
   return (
     <div className="mx-auto max-w-7xl px-4 py-6">
       <header className="mb-3">
@@ -715,13 +843,12 @@ export default function EditPage() {
           <div className="flex flex-wrap items-end gap-2">
             <button
               type="button"
-              onClick={() => {
-                if (!drivePickerOpen && driveStatus !== "ready") loadDriveFiles();
-                setDrivePickerOpen((v) => !v);
-              }}
-              className="rounded-md border border-emerald-600 bg-emerald-50 px-3 py-1.5 text-xs font-semibold text-emerald-800 hover:bg-emerald-100"
+              onClick={loadDriveFiles}
+              disabled={driveStatus === "loading"}
+              className="rounded-md border border-emerald-600 bg-emerald-50 px-3 py-1.5 text-xs font-semibold text-emerald-800 hover:bg-emerald-100 disabled:opacity-50"
+              title="Drive 「시험지 편집 전」 폴더 다시 읽어 사이드바에 추가"
             >
-              {drivePickerOpen ? "Drive 패널 닫기" : "Drive 「시험지 편집 전」"}
+              {driveStatus === "loading" ? "불러오는 중…" : "🔄 Drive 새로고침"}
             </button>
             <label className="cursor-pointer rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50">
               로컬 파일 추가
@@ -740,161 +867,35 @@ export default function EditPage() {
           </div>
         </div>
 
-        {drivePickerOpen && (
-          <div className="mt-2 rounded-md border border-emerald-200 bg-emerald-50 p-2 text-xs">
-            {driveStatus === "loading" && <p className="text-emerald-900">목록 불러오는 중…</p>}
-            {driveStatus === "no-config" && (
-              <p className="text-amber-900">
-                Drive 키 미설정 — Railway Variables 에 GOOGLE_CLIENT_ID/SECRET/REFRESH_TOKEN 등록 필요.
-                {driveError ? ` (${driveError})` : ""}
-              </p>
-            )}
-            {driveStatus === "no-folder" && (
-              <p className="text-amber-900">
-                「시험지 편집 전」 폴더가 Drive 에 없습니다. 「해설제작 / 분석용 자료 / 시험지
-                편집」 안에 「시험지 편집 전」 폴더를 만들거나
-                GOOGLE_DRIVE_EXAM_EDIT_BEFORE_FOLDER_ID 를 직접 지정하세요.
-                {driveError ? ` (${driveError})` : ""}
-              </p>
-            )}
-            {driveStatus === "error" && (
-              <p className="text-rose-900">✗ {driveError ?? "Drive 오류"}</p>
-            )}
-            {driveStatus === "ready" && driveFiles.length === 0 && (
-              <p className="text-slate-700">「시험지 원안」 폴더가 비어 있습니다.</p>
-            )}
-            {driveStatus === "ready" && driveFiles.length > 0 && (
-              <div className="space-y-2">
-                {/* 헤더: 카운트 + 일괄 선택 + 가져오기 */}
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <p className="text-emerald-900">
-                    최신순 {driveFiles.length}개 ·{" "}
-                    <span className="font-semibold">
-                      선택 {driveSelected.size}
-                      {driveSelected.size > 0 && ` / ${driveFiles.length}`}
-                    </span>
-                    {driveBulkProgress &&
-                      ` · ${driveBulkProgress.done}/${driveBulkProgress.total} 가져오는 중…`}
-                  </p>
-                  <div className="flex flex-wrap gap-1">
-                    <button
-                      type="button"
-                      onClick={selectAllDrive}
-                      className="rounded border border-emerald-300 bg-white px-2 py-0.5 text-[10px] font-semibold text-emerald-800 hover:bg-emerald-50"
-                    >
-                      전체 선택
-                    </button>
-                    <button
-                      type="button"
-                      onClick={clearDriveSelection}
-                      disabled={driveSelected.size === 0}
-                      className="rounded border border-slate-300 bg-white px-2 py-0.5 text-[10px] font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
-                    >
-                      전체 해제
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => pickDriveFilesBulk(Array.from(driveSelected))}
-                      disabled={drivePicking || driveSelected.size === 0}
-                      className="rounded border border-emerald-700 bg-emerald-600 px-2.5 py-0.5 text-[11px] font-semibold text-white hover:bg-emerald-700 disabled:opacity-50"
-                      title="체크된 파일을 한 번에 슬롯으로 가져오기 (같은 학교 묶음을 한 번에 작업)"
-                    >
-                      ➕ 선택 {driveSelected.size}개 추가
-                    </button>
-                  </div>
-                </div>
+        {/* Drive 상태줄 — 사이드바에 자동 로드된 파일 수 안내 */}
+        <div className="mt-2 text-[11px]">
+          {driveStatus === "loading" && <span className="text-emerald-900">Drive 목록 로드 중…</span>}
+          {driveStatus === "no-config" && (
+            <span className="text-amber-900">
+              Drive 키 미설정 — Railway Variables 에 GOOGLE_CLIENT_ID/SECRET/REFRESH_TOKEN 등록 필요.
+              {driveError ? ` (${driveError})` : ""}
+            </span>
+          )}
+          {driveStatus === "no-folder" && (
+            <span className="text-amber-900">
+              「시험지 편집 전」 폴더가 Drive 에 없습니다.
+              {driveError ? ` (${driveError})` : ""}
+            </span>
+          )}
+          {driveStatus === "error" && <span className="text-rose-900">✗ {driveError ?? "Drive 오류"}</span>}
+          {driveStatus === "ready" && (
+            <span className="text-emerald-900">
+              ✓ Drive 「시험지 편집 전」: <strong>{driveFiles.length}장</strong> 자동 로드됨 · 로컬:{" "}
+              <strong>{slots.filter((s) => !s.driveFileId).length}장</strong> · 사이드바에서 묶음 선택 후 작업하세요.
+            </span>
+          )}
+        </div>
 
-                {/* 썸네일 그리드 */}
-                <div className="max-h-[560px] overflow-y-auto rounded border border-emerald-200 bg-white p-2">
-                  <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6">
-                    {driveFiles.map((f) => {
-                      const checked = driveSelected.has(f.id);
-                      return (
-                        <div
-                          key={f.id}
-                          className={`group relative overflow-hidden rounded border ${
-                            checked
-                              ? "border-emerald-600 ring-2 ring-emerald-300"
-                              : "border-slate-200 hover:border-emerald-400"
-                          } bg-slate-50`}
-                        >
-                          {/* 썸네일 — 클릭하면 큰 미리보기 모달 */}
-                          <button
-                            type="button"
-                            onClick={() => setDrivePreviewId(f.id)}
-                            className="relative block w-full"
-                            title="클릭해서 확대 미리보기"
-                          >
-                            {/* eslint-disable-next-line @next/next/no-img-element */}
-                            <img
-                              src={`/api/drive/thumb?fileId=${encodeURIComponent(f.id)}&size=320`}
-                              alt={f.name}
-                              loading="lazy"
-                              className="block h-32 w-full bg-slate-100 object-cover sm:h-36"
-                              onError={(e) => {
-                                (e.currentTarget as HTMLImageElement).style.opacity = "0.3";
-                              }}
-                            />
-                            {/* 호버 시 살짝 어둡게 */}
-                            <span className="pointer-events-none absolute inset-0 bg-black/0 transition-colors group-hover:bg-black/10" />
-                            <span className="pointer-events-none absolute right-1 bottom-1 rounded bg-black/60 px-1 py-0.5 text-[9px] font-semibold text-white opacity-0 transition-opacity group-hover:opacity-100">
-                              🔍 확대
-                            </span>
-                          </button>
-                          {/* 체크박스 — 좌상단 */}
-                          <label
-                            className="absolute left-1 top-1 flex h-5 w-5 cursor-pointer items-center justify-center rounded border border-emerald-300 bg-white/90 shadow"
-                            title="체크하면 「선택 N개 추가」 로 한 번에 가져오기"
-                            onClick={(e) => e.stopPropagation()}
-                          >
-                            <input
-                              type="checkbox"
-                              checked={checked}
-                              onChange={() => toggleDriveSelected(f.id)}
-                              className="h-3.5 w-3.5 cursor-pointer accent-emerald-600"
-                            />
-                          </label>
-                          {/* 단일 추가 버튼 — 우상단 */}
-                          <button
-                            type="button"
-                            onClick={() => pickDriveFile(f.id)}
-                            disabled={drivePicking}
-                            className="absolute right-1 top-1 rounded border border-emerald-600 bg-white/90 px-1.5 py-0.5 text-[9px] font-semibold text-emerald-800 hover:bg-white disabled:opacity-50"
-                            title="이 파일 한 개만 추가"
-                          >
-                            추가
-                          </button>
-                          <div className="px-1.5 py-1 text-[10px]">
-                            <div className="truncate font-semibold text-slate-800" title={f.name}>
-                              {f.name}
-                            </div>
-                            {f.size !== null && (
-                              <div className="text-slate-500">{(f.size / 1024 / 1024).toFixed(1)}MB</div>
-                            )}
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-
-                <div className="flex flex-wrap items-center justify-between gap-2 text-[10px] text-emerald-800">
-                  <button type="button" onClick={loadDriveFiles} className="underline">
-                    목록 새로고침
-                  </button>
-                  <span className="text-slate-600">
-                    💡 썸네일 클릭 → 확대 보기 / 체크 → 같은 학교 묶음을 한 번에 추가
-                  </span>
-                </div>
-              </div>
-            )}
-          </div>
-        )}
         {loadingFile && <p className="mt-2 text-xs text-slate-600">파일 처리 중…</p>}
       </section>
 
-      {/* 2단계: 슬롯 목록 + 작업 영역 */}
-      {slots.length > 0 && (
+      {/* 2단계: 슬롯 목록 + 작업 영역 — 항상 표시. Drive 자동 로드된 파일이 사이드바에 즉시 채워짐. */}
+      {(
         <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-[300px_1fr]">
           {/* 좌측 슬롯 목록 — 사진 편집기 UX 차용 */}
           <aside className="rounded-lg border border-slate-200 bg-white p-3 shadow-sm">
@@ -1007,6 +1008,13 @@ export default function EditPage() {
             </div>
 
             {/* 페이지 카드 리스트 — 드래그 reorder + 체크박스 + 큰 썸네일 */}
+            {slots.length === 0 ? (
+              <p className="mt-3 rounded border border-dashed border-slate-300 p-3 text-center text-[11px] text-slate-500">
+                Drive 「시험지 편집 전」 폴더가 비어 있거나 로드 중입니다.
+                <br />
+                위 「🔄 Drive 새로고침」 또는 「로컬 파일 추가」를 사용하세요.
+              </p>
+            ) : (
             <ul className="mt-3 max-h-[640px] space-y-1 overflow-y-auto">
               {slots.map((s, i) => {
                 const orderIdx = i + 1; // 「순서 N」 = 현재 목록상 위치
@@ -1045,8 +1053,9 @@ export default function EditPage() {
                     />
                     {/* eslint-disable-next-line @next/next/no-img-element */}
                     <img
-                      src={s.croppedDataUrl || s.sourceDataUrl}
+                      src={s.croppedDataUrl || s.thumbUrl || s.sourceDataUrl || ""}
                       alt={s.sourceLabel}
+                      loading="lazy"
                       className="h-14 w-14 rounded border border-slate-200 bg-slate-100 object-cover"
                     />
                     <div className="min-w-0 flex-1 text-[11px]">
@@ -1106,6 +1115,7 @@ export default function EditPage() {
                 );
               })}
             </ul>
+            )}
           </aside>
 
           {/* 우측 작업 영역 */}
@@ -1190,24 +1200,35 @@ export default function EditPage() {
               </div>
 
               {active ? (
-                <div className="overflow-auto rounded border border-slate-200 bg-slate-50 p-2">
-                  <ReactCrop
-                    crop={crop}
-                    onChange={(_, percentCrop) => setCrop(percentCrop)}
-                    onComplete={handleCropComplete}
-                  >
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img
-                      ref={imgRef}
-                      src={active.sourceDataUrl}
-                      alt={active.sourceLabel}
-                      className="block max-w-full"
-                    />
-                  </ReactCrop>
-                </div>
+                active.sourceDataUrl ? (
+                  <div className="overflow-auto rounded border border-slate-200 bg-slate-50 p-2">
+                    <ReactCrop
+                      crop={crop}
+                      onChange={(_, percentCrop) => setCrop(percentCrop)}
+                      onComplete={handleCropComplete}
+                    >
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img
+                        ref={imgRef}
+                        src={active.sourceDataUrl}
+                        alt={active.sourceLabel}
+                        className="block max-w-full"
+                      />
+                    </ReactCrop>
+                  </div>
+                ) : (
+                  <div className="rounded border border-emerald-200 bg-emerald-50 p-6 text-center text-xs text-emerald-900">
+                    {active.busy === "loading"
+                      ? "📥 Drive 에서 풀 이미지 다운로드 중…"
+                      : "이 페이지의 풀 이미지가 아직 로드되지 않았습니다. 잠시 기다리거나 다시 클릭하세요."}
+                    {active.error && (
+                      <div className="mt-1 text-rose-700">✗ {active.error}</div>
+                    )}
+                  </div>
+                )
               ) : (
                 <p className="rounded border border-dashed border-slate-300 p-6 text-center text-xs text-slate-500">
-                  목록에서 페이지를 선택하세요.
+                  좌측 목록에서 페이지를 선택하세요. (Drive 자동 로드 후 슬롯 클릭하면 풀 이미지가 다운로드됩니다.)
                 </p>
               )}
               <p className="mt-2 text-[11px] text-slate-500">
