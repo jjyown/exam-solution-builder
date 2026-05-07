@@ -5,8 +5,10 @@
  *  주기적으로 「분석용 자료」 폴더를 자동 동기화 → 사용자가 「새로 학습」을
  *  누르지 않아도 새 파일이 KB 에 자동 반영된다.
  *
- *  ▷ 주기: DRIVE_ANALYSIS_AUTO_SYNC_MS (기본 30분 = 1,800,000ms).
- *           0 또는 음수 값이면 비활성.
+ *  ▷ 주기: DRIVE_ANALYSIS_AUTO_SYNC_MS (기본 4시간 = 14,400,000ms).
+ *           0 또는 음수 값이면 비활성. 비용 최소화 우선.
+ *           실시간성 필요 없음 — /auto-pipeline 호출 시에도 60초 throttle
+ *           안에서 자동 감지가 따로 동작하므로, 활동 중이면 거의 즉시 반영됨.
  *  ▷ 첫 실행: startup 후 60초 뒤 (healthcheck/콜드스타트 방해 안 함).
  *  ▷ 동시 실행 방지: loadDriveAnalysisRecords() 자체에 in-memory cache 가
  *    있어 같은 파일은 modifiedTime 기반 skip. 또한 inProgress 플래그로 중복 실행 차단.
@@ -26,7 +28,7 @@ export function startDriveAnalysisAutoSync(): void {
   started = true;
 
   const raw = process.env.DRIVE_ANALYSIS_AUTO_SYNC_MS?.trim();
-  const intervalMs = raw ? Number(raw) : 30 * 60 * 1000; // 기본 30분
+  const intervalMs = raw ? Number(raw) : 4 * 60 * 60 * 1000; // 기본 4시간 (비용 최적화)
   if (!Number.isFinite(intervalMs) || intervalMs <= 0) {
     // 비활성
     return;
