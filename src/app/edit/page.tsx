@@ -43,8 +43,12 @@ type Slot = {
   /** Gemini 가 추출해 준 시험명 한 줄 — 「묶음 이름」으로 사용 가능 */
   suggestedName: string | null;
   /** AI 호출 진행 상태 */
-  busy: null | "detecting" | "mimicking" | "naming";
+  busy: null | "detecting" | "mimicking" | "naming" | "trashing";
   error?: string;
+  /** Drive 「시험지 편집 전」 폴더에서 가져온 파일이면 그 fileId — 처리 끝난 후 휴지통으로 이동 가능 */
+  driveFileId?: string;
+  /** 이미 휴지통으로 이동되었으면 true (UI 상태 표시용) */
+  trashed?: boolean;
 };
 
 const ACCEPTED_FILE_PATTERN = /\.(pdf|png|jpe?g|webp|heic|heif|gif)$/i;
@@ -117,7 +121,8 @@ export default function EditPage() {
       const bytes = new Uint8Array(bin.length);
       for (let i = 0; i < bin.length; i += 1) bytes[i] = bin.charCodeAt(i);
       const file = new File([bytes], data.fileName, { type: data.mimeType });
-      await addFiles([file]);
+      // Drive 출처 표시 — driveFileId 를 슬롯에 보존해 나중에 「휴지통 이동」 가능
+      await addFiles([{ file, driveFileId: fileId }]);
     } catch (e) {
       alert(`Drive 가져오기 실패: ${(e as Error).message}`);
     } finally {
@@ -127,11 +132,12 @@ export default function EditPage() {
   }, []);
 
   // ── 파일 → Slot 추가 ────────────────────────────────────────────────
-  async function addFiles(files: File[]) {
+  async function addFiles(items: Array<{ file: File; driveFileId?: string }>) {
     setLoadingFile(true);
     try {
       const newSlots: Slot[] = [];
-      for (const f of files) {
+      for (const it of items) {
+        const f = it.file;
         if (!ACCEPTED_FILE_PATTERN.test(f.name) && !f.type.startsWith("image/") && f.type !== "application/pdf") {
           continue;
         }
@@ -147,6 +153,9 @@ export default function EditPage() {
               croppedDataUrl: null,
               suggestedName: null,
               busy: null,
+              // PDF 원본은 Drive 한 파일이지만 페이지마다 슬롯이 됨 → fileId 동일하게 부여.
+              // 한 페이지만 휴지통 이동은 의미 없음 → 모든 페이지 슬롯이 동일 fileId 공유.
+              driveFileId: it.driveFileId,
             });
           }
         } else {
@@ -160,6 +169,7 @@ export default function EditPage() {
             croppedDataUrl: null,
             suggestedName: null,
             busy: null,
+            driveFileId: it.driveFileId,
           });
         }
       }
@@ -401,6 +411,63 @@ export default function EditPage() {
     URL.revokeObjectURL(url);
   }
 
+  // ── Drive 「휴지통」으로 원본 이동 ───────────────────────────────────
+  async function trashOneSlot(s: Slot): Promise<{ ok: boolean; error?: string }> {
+    if (!s.driveFileId) return { ok: false, error: "Drive 출처가 아님" };
+    setSlot(s.id, { busy: "trashing", error: undefined });
+    try {
+      const res = await fetch("/api/drive/move-to-trash", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ fileId: s.driveFileId }),
+      });
+      const data = await res.json();
+      if (!data.ok) throw new Error(data.error || "휴지통 이동 실패");
+      setSlot(s.id, { busy: null, trashed: true });
+      return { ok: true };
+    } catch (e) {
+      const msg = (e as Error).message;
+      setSlot(s.id, { busy: null, error: msg });
+      return { ok: false, error: msg };
+    }
+  }
+
+  /** 같은 driveFileId 가 여러 슬롯(=PDF 페이지) 에 걸쳐 있을 수 있으므로 한 번씩만 처리. */
+  async function trashAllProcessedOriginals(): Promise<void> {
+    const fileIds = new Set<string>();
+    for (const s of slots) {
+      if (s.driveFileId && !s.trashed && s.croppedDataUrl) fileIds.add(s.driveFileId);
+    }
+    if (fileIds.size === 0) {
+      alert("처리(자르기 적용)된 Drive 원본이 없습니다.");
+      return;
+    }
+    if (!confirm(`Drive 원본 파일 ${fileIds.size}개를 「휴지통」 폴더로 이동합니다. 진행할까요?`)) return;
+    setBulkBusy(true);
+    let okCount = 0;
+    let failCount = 0;
+    for (const fileId of fileIds) {
+      // 같은 fileId 를 공유하는 모든 슬롯 — 첫 번째 것을 대표로 호출
+      const slot = slots.find((s) => s.driveFileId === fileId);
+      if (!slot) continue;
+      // eslint-disable-next-line no-await-in-loop
+      const r = await trashOneSlot(slot);
+      if (r.ok) {
+        // 같은 fileId 의 나머지 슬롯에도 trashed 표시
+        setSlots((prev) =>
+          prev.map((s) => (s.driveFileId === fileId ? { ...s, trashed: true, busy: null } : s)),
+        );
+        okCount += 1;
+      } else {
+        failCount += 1;
+      }
+    }
+    setBulkBusy(false);
+    alert(
+      `휴지통 이동 완료 — 성공 ${okCount}건${failCount > 0 ? ` · 실패 ${failCount}건 (슬롯 에러 메시지 확인)` : ""}.`,
+    );
+  }
+
   async function uploadToDriveExamEditAfterFolder() {
     setSavingToDrive(true);
     setSaveResult(null);
@@ -486,7 +553,7 @@ export default function EditPage() {
                 hidden
                 onChange={async (e) => {
                   const files = Array.from(e.target.files || []);
-                  if (files.length > 0) await addFiles(files);
+                  if (files.length > 0) await addFiles(files.map((file) => ({ file })));
                   e.target.value = "";
                 }}
               />
@@ -595,20 +662,51 @@ export default function EditPage() {
                     className="h-12 w-12 rounded border border-slate-200 bg-slate-100 object-cover"
                   />
                   <div className="min-w-0 flex-1 text-[11px]">
-                    <div className="truncate font-semibold text-slate-800">{s.sourceLabel}</div>
+                    <div className="truncate font-semibold text-slate-800">
+                      {s.sourceLabel}
+                      {s.driveFileId && (
+                        <span
+                          className="ml-1 rounded bg-emerald-100 px-1 text-[9px] font-medium text-emerald-800"
+                          title="Drive 「시험지 편집 전」 폴더에서 가져옴 → 처리 후 휴지통으로 이동 가능"
+                        >
+                          Drive
+                        </span>
+                      )}
+                      {s.trashed && (
+                        <span
+                          className="ml-1 rounded bg-rose-100 px-1 text-[9px] font-medium text-rose-700"
+                          title="원본이 「휴지통」 폴더로 이동됨"
+                        >
+                          🗑 이동됨
+                        </span>
+                      )}
+                    </div>
                     <div className="truncate text-slate-500">
                       {s.naturalBox ? "✓ 박스" : "박스 없음"}
-                      {s.busy && ` · ${s.busy}`}
+                      {s.busy && ` · ${labelBusy(s.busy)}`}
                       {s.error && ` · ✗`}
                     </div>
                   </div>
+                  {s.driveFileId && !s.trashed && s.croppedDataUrl && (
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        trashOneSlot(s);
+                      }}
+                      disabled={s.busy === "trashing"}
+                      className="rounded border border-rose-400 bg-white px-1.5 text-[12px] text-rose-700 hover:bg-rose-50 disabled:opacity-50"
+                      title="이 원본 한 개를 Drive 휴지통으로 이동"
+                    >
+                      🗑
+                    </button>
+                  )}
                   <button
                     onClick={(e) => {
                       e.stopPropagation();
                       removeSlot(s.id);
                     }}
                     className="rounded border border-rose-300 bg-white px-1.5 text-[10px] font-bold text-rose-700 hover:bg-rose-50"
-                    title="제거"
+                    title="목록에서 제거 (Drive 파일은 그대로)"
                   >
                     ✕
                   </button>
@@ -737,6 +835,23 @@ export default function EditPage() {
               >
                 {savingToDrive ? "업로드 중…" : "☁ Drive 「시험지 편집 후」에 업로드"}
               </button>
+              {(() => {
+                const trashable = new Set(
+                  slots
+                    .filter((s) => s.driveFileId && !s.trashed && s.croppedDataUrl)
+                    .map((s) => s.driveFileId!),
+                ).size;
+                return (
+                  <button
+                    onClick={trashAllProcessedOriginals}
+                    disabled={bulkBusy || trashable === 0}
+                    className="rounded-md border border-rose-700 bg-rose-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-rose-700 disabled:opacity-50"
+                    title="자르기 적용된 Drive 원본을 「해설제작/휴지통」 폴더로 이동 — 「시험지 편집 전」 폴더에서 사라져 다음 작업 목록을 깨끗하게 유지"
+                  >
+                    🗑 처리된 원본 휴지통으로 ({trashable})
+                  </button>
+                );
+              })()}
             </div>
           </div>
           {saveResult && saveResult.ok && (
@@ -776,7 +891,11 @@ function sanitizeFilename(s: string): string {
 }
 
 function labelBusy(b: NonNullable<Slot["busy"]>): string {
-  return b === "detecting" ? "AI 박스 검출" : b === "mimicking" ? "박스 모방" : "시험명 추출";
+  if (b === "detecting") return "AI 박스 검출";
+  if (b === "mimicking") return "박스 모방";
+  if (b === "naming") return "시험명 추출";
+  if (b === "trashing") return "휴지통 이동";
+  return b;
 }
 
 async function fileToDataUrl(file: File): Promise<string> {

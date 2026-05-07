@@ -164,6 +164,47 @@ export async function resolveDriveExamOriginalsFolderId(
   return resolveDriveExamEditBeforeFolderId(drive);
 }
 
+/**
+ * 「휴지통」 폴더 ID — 해설제작 바로 아래.
+ * 시험지 편집 탭에서 작업 끝난 원본을 옮기는 위치 (Drive 의 시스템 휴지통과는 별개).
+ *
+ *  ENV 오버라이드:
+ *   - GOOGLE_DRIVE_TRASH_FOLDER_ID
+ *   - GOOGLE_DRIVE_TRASH_FOLDER_NAME (기본 "휴지통")
+ */
+export async function resolveDriveTrashFolderId(
+  drive: drive_v3.Drive,
+): Promise<string | null> {
+  const direct = env("GOOGLE_DRIVE_TRASH_FOLDER_ID");
+  if (direct) return direct;
+  const folderName = env("GOOGLE_DRIVE_TRASH_FOLDER_NAME") || "휴지통";
+  const parentId = await resolveDriveParentFolderId(drive);
+  return findChildFolderId(drive, parentId, folderName);
+}
+
+/**
+ * Drive 파일을 다른 폴더로 이동.
+ * 기존 부모를 모두 제거하고 destFolderId 만 부여 — 「하나의 진짜 위치」 유지.
+ */
+export async function moveDriveFileToFolder(
+  drive: drive_v3.Drive,
+  fileId: string,
+  destFolderId: string,
+): Promise<{ id: string; name: string }> {
+  const meta = await drive.files.get({ fileId, fields: "id, name, parents" });
+  const oldParents = (meta.data.parents ?? []).join(",");
+  const updated = await drive.files.update({
+    fileId,
+    addParents: destFolderId,
+    removeParents: oldParents || undefined,
+    fields: "id, name, parents",
+  });
+  return {
+    id: updated.data.id ?? fileId,
+    name: updated.data.name ?? meta.data.name ?? "(unnamed)",
+  };
+}
+
 export async function uploadBufferToDriveFolder(params: {
   folderId: string;
   fileName: string;
