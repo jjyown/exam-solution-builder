@@ -300,19 +300,10 @@ export default function EditPage() {
 
     if (!isPdf && driveFile?.thumbnailLink) {
       const bigUrl = driveFile.thumbnailLink.replace(/=s\d+(-[a-z])?$/, "=s1600");
-      // 즉시 표시 — img.src 가 CDN 에서 병렬 다운로드 (브라우저 캐시 / parallel)
+      // 즉시 표시 — img.src 가 CDN 에서 직접 다운로드 (브라우저 native, 병렬)
+      // 풀 원본은 자르기·AI 호출할 때 ensureFullDataUrlSource 가 on-demand 받음
+      // → 단순 브라우징 시 낭비되는 백그라운드 4MB 다운로드 제거.
       setSlot(slotId, { sourceDataUrl: bigUrl, busy: null });
-      // 백그라운드: 풀 원본 dataURL 로 조용히 교체 (자르기·AI 정확도 + canvas tainted 회피)
-      void (async () => {
-        try {
-          const fetched = await fetchDriveFile(cur.driveFileId!);
-          const fullUrl = await fileToDataUrl(fetched.file);
-          // 사용자가 그 사이 다른 슬롯으로 이동해도 안전 — id 기반으로 갱신
-          setSlot(slotId, { sourceDataUrl: fullUrl });
-        } catch {
-          /* preview 만으로도 보기는 가능 — silent */
-        }
-      })();
       return bigUrl;
     }
 
@@ -339,6 +330,35 @@ export default function EditPage() {
       return dataUrl;
     } catch (e) {
       setSlot(slotId, { busy: null, error: `다운로드 실패: ${(e as Error).message}` });
+      return null;
+    }
+  }
+
+  /**
+   * 자르기·AI 호출용 — 반드시 dataURL(`data:image/...;base64,...`) 을 반환.
+   * sourceDataUrl 이 CDN URL("https://...") 인 경우 풀 원본을 받아 dataURL 로 교체하고 반환.
+   * 이미 dataURL 이면 그대로 반환 (중복 다운로드 없음).
+   */
+  async function ensureFullDataUrlSource(slotId: string): Promise<string | null> {
+    const cur = slots.find((s) => s.id === slotId);
+    if (!cur) return null;
+    if (cur.sourceDataUrl?.startsWith("data:")) return cur.sourceDataUrl;
+    if (!cur.driveFileId) return cur.sourceDataUrl ?? null; // 로컬은 항상 dataURL
+    setSlot(slotId, { busy: "loading", error: undefined });
+    try {
+      const fetched = await fetchDriveFile(cur.driveFileId);
+      const f = fetched.file;
+      let dataUrl = "";
+      if (f.type === "application/pdf" || /\.pdf$/i.test(f.name)) {
+        const pages = await renderPdfToImages(f);
+        dataUrl = pages[0]?.dataUrl || "";
+      } else {
+        dataUrl = await fileToDataUrl(f);
+      }
+      setSlot(slotId, { sourceDataUrl: dataUrl, busy: null });
+      return dataUrl;
+    } catch (e) {
+      setSlot(slotId, { busy: null, error: `풀 원본 다운로드 실패: ${(e as Error).message}` });
       return null;
     }
   }
@@ -513,7 +533,7 @@ export default function EditPage() {
     return canvas.toDataURL("image/jpeg", 0.92);
   }
 
-  function handleCropComplete(sel: PixelCrop) {
+  async function handleCropComplete(sel: PixelCrop) {
     if (!active || !imgRef.current) return;
     if (sel.width < 10 || sel.height < 10) return;
     const imageEl = imgRef.current;
@@ -525,16 +545,35 @@ export default function EditPage() {
       width: sel.width * scaleX,
       height: sel.height * scaleY,
     };
-    const croppedDataUrl = captureCrop(imageEl, naturalBox);
-    setSlot(active.id, { naturalBox, croppedDataUrl, error: undefined });
+    // 빨간 박스 즉시 표시 (사용자 피드백) — naturalBox 만 먼저 저장.
+    // croppedDataUrl 은 풀 dataURL 이 있어야 toDataURL 가능 (CDN URL 은 canvas tainted).
+    setSlot(active.id, { naturalBox, error: undefined });
+
+    // captureCrop 시도 — imgRef 가 dataURL 이면 즉시 OK, CDN URL 이면 SecurityError.
+    try {
+      const croppedDataUrl = captureCrop(imageEl, naturalBox);
+      setSlot(active.id, { croppedDataUrl });
+      return;
+    } catch {
+      /* tainted — 풀 dataURL 받아 다시 시도 */
+    }
+    // 폴백: 풀 dataURL 다운로드 → 별도 Image 로 그려 captureCrop
+    const fullSrc = await ensureFullDataUrlSource(active.id);
+    if (!fullSrc) return;
+    try {
+      const fullImg = await loadImage(fullSrc);
+      const croppedDataUrl = captureCrop(fullImg, naturalBox);
+      setSlot(active.id, { croppedDataUrl });
+    } catch (e) {
+      setSlot(active.id, { error: `자르기 실패: ${(e as Error).message}` });
+    }
     // crop state 는 useEffect 가 active.naturalBox 변화 감지해 자동으로 다시 그려줌
-    // (clearing here causes flash + 사용자가 박스 위치를 잃어버린 듯한 인상)
   }
 
   // ── AI 박스 자동 검출 ─────────────────────────────────────────────────
   async function detectBoxForSlot(s: Slot): Promise<void> {
-    // 풀 소스 없으면 먼저 다운로드
-    const src = s.sourceDataUrl ?? (await ensureSlotSource(s.id));
+    // Gemini API 는 base64 dataURL 필요 (CDN URL 직접 못 받음) — 풀 dataURL 보장
+    const src = await ensureFullDataUrlSource(s.id);
     if (!src) {
       setSlot(s.id, { busy: null, error: "원본 다운로드 실패" });
       return;
@@ -584,11 +623,16 @@ export default function EditPage() {
 
   // ── AI 박스 모방 (현재 슬롯 박스를 기준으로 나머지에 같은 의도 적용) ────
   async function mimicBoxFromActive() {
-    if (!active?.naturalBox || !active?.croppedDataUrl || !active.sourceDataUrl) {
+    if (!active?.naturalBox || !active?.croppedDataUrl) {
       alert("현재 페이지에 박스가 잡혀 있어야 합니다 (드래그 또는 AI 자동).");
       return;
     }
-    const refSrc = active.sourceDataUrl;
+    // Gemini 는 base64 dataURL 필요
+    const refSrc = await ensureFullDataUrlSource(active.id);
+    if (!refSrc) {
+      alert("기준 페이지 풀 원본을 불러오지 못했습니다.");
+      return;
+    }
     const refImg = await loadImage(refSrc);
     const refBox = {
       nx: active.naturalBox.x / refImg.naturalWidth,
@@ -605,9 +649,9 @@ export default function EditPage() {
         return;
       }
       for (const s of targets) {
-        // 풀 소스 없으면 먼저 다운로드
+        // Gemini 는 base64 dataURL 필요 (CDN URL 직접 못 받음)
         // eslint-disable-next-line no-await-in-loop
-        const tgtSrc = s.sourceDataUrl ?? (await ensureSlotSource(s.id));
+        const tgtSrc = await ensureFullDataUrlSource(s.id);
         if (!tgtSrc) {
           setSlot(s.id, { busy: null, error: "원본 다운로드 실패" });
           continue;
@@ -650,8 +694,8 @@ export default function EditPage() {
   // ── AI 학교명 추출 ────────────────────────────────────────────────────
   async function suggestNameForActive() {
     if (!active) return;
-    // 풀 소스 없으면 먼저 다운로드
-    const fullSrc = active.sourceDataUrl ?? (await ensureSlotSource(active.id));
+    // Gemini 는 base64 dataURL 필요 — sourceDataUrl 이 CDN URL 인 케이스 방지
+    const fullSrc = await ensureFullDataUrlSource(active.id);
     if (!fullSrc) return;
     const sourceForName = active.croppedDataUrl || fullSrc;
     setSlot(active.id, { busy: "naming", error: undefined });
@@ -899,8 +943,8 @@ export default function EditPage() {
       if (isPdf || !meta?.thumbnailLink) continue;
       const bigUrl = meta.thumbnailLink.replace(/=s\d+(-[a-z])?$/, "=s1600");
       // 브라우저 백그라운드 디코드 — `<link rel=prefetch>` 효과
+      // crossOrigin 미설정 → 실제 표시용 img 와 같은 cache 엔트리 사용 (matched cache)
       const img = new Image();
-      img.crossOrigin = "anonymous";
       img.src = bigUrl;
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1312,8 +1356,6 @@ export default function EditPage() {
                         ref={imgRef}
                         src={active.sourceDataUrl}
                         alt={active.sourceLabel}
-                        // CDN 직접 URL 일 때 canvas drawImage 를 위한 CORS — Drive lh3 는 일반적으로 허용
-                        crossOrigin="anonymous"
                         className="block max-w-full"
                         onLoad={() => setImgLoadTick((t) => t + 1)}
                       />
