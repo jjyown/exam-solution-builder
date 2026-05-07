@@ -112,6 +112,24 @@ export async function resolveDriveAnalysisFolderId(drive: drive_v3.Drive): Promi
   return id ?? null;
 }
 
+/**
+ * 「시험지 원안」 — 사용자 원본 사진/스캔 묶음.
+ * 시험지 편집 탭의 입력 폴더. (편집·정리·자르기 거친 결과는 「시험지」 폴더에 저장)
+ * 미설정·미존재 시 null. 환경변수:
+ *   - GOOGLE_DRIVE_EXAM_ORIGINALS_FOLDER_ID
+ *   - GOOGLE_DRIVE_EXAM_ORIGINALS_FOLDER_NAME (기본 "시험지 원안")
+ */
+export async function resolveDriveExamOriginalsFolderId(
+  drive: drive_v3.Drive,
+): Promise<string | null> {
+  const direct = env("GOOGLE_DRIVE_EXAM_ORIGINALS_FOLDER_ID");
+  if (direct) return direct;
+  const folderName = env("GOOGLE_DRIVE_EXAM_ORIGINALS_FOLDER_NAME") || "시험지 원안";
+  const parentId = await resolveDriveParentFolderId(drive);
+  const id = await findChildFolderId(drive, parentId, folderName);
+  return id ?? null;
+}
+
 export async function uploadBufferToDriveFolder(params: {
   folderId: string;
   fileName: string;

@@ -15,8 +15,7 @@ const TABS: Array<{ href: string; label: string; hint: string; comingSoon?: bool
   {
     href: "/edit",
     label: "시험지 편집",
-    hint: "(준비 중) 시험지 본문 직접 편집",
-    comingSoon: true,
+    hint: "원안 사진 → AI/수동 자르기 → 학교명 자동 → Drive 「시험지」 저장",
   },
 ];
 
