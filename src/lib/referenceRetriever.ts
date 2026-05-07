@@ -118,6 +118,21 @@ export class ReferenceRetriever {
     }
   }
 
+  /** 인덱스에 추가 학습 자료 합치기 (Drive 분석용 자료 폴더에서 가져온 자료 등) */
+  addRecords(extra: ReferenceRecord[]): number {
+    if (extra.length === 0) return 0;
+    const merged: ReferenceRecord[] = [
+      ...this.records.map(({ tokens, tokenFreq, ...clean }) => {
+        void tokens;
+        void tokenFreq;
+        return clean;
+      }),
+      ...extra,
+    ];
+    this.index(merged);
+    return extra.length;
+  }
+
   search(queryText: string, k: number = 3): ReferenceRecord[] {
     const q = buildTokenFreq(queryText);
     const scored = this.records

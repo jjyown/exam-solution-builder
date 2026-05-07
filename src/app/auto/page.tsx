@@ -48,6 +48,14 @@ type ExtractedMeta = {
   source: string;
 };
 
+type DriveFile = {
+  id: string;
+  name: string;
+  mimeType: string;
+  modifiedTime: string | null;
+  size: number | null;
+};
+
 type PipelineResponse = {
   ok: boolean;
   // 단일 문항 모드 (텍스트 입력 또는 1문항만 추출): top-level 필드 채워짐
@@ -107,6 +115,99 @@ export default function AutoPipelinePage() {
   const [showTrace, setShowTrace] = useState(false);
   const [activeIdx, setActiveIdx] = useState(0);
   const [extractState, setExtractState] = useState<ExtractState>({ status: 'idle' });
+
+  // Google Drive 시험지 폴더 연동
+  const [driveFiles, setDriveFiles] = useState<DriveFile[]>([]);
+  const [driveStatus, setDriveStatus] = useState<'idle' | 'loading' | 'ready' | 'no-config' | 'error'>('idle');
+  const [driveError, setDriveError] = useState<string | null>(null);
+  const [drivePickerOpen, setDrivePickerOpen] = useState(false);
+  const [drivePicking, setDrivePicking] = useState(false);
+  const [driveUploadInfo, setDriveUploadInfo] = useState<
+    { link: string | null; fileName: string; error: string | null } | null
+  >(null);
+  const [analysisSyncing, setAnalysisSyncing] = useState(false);
+  const [analysisSyncResult, setAnalysisSyncResult] = useState<
+    | { ok: true; totalFiles: number; records: number; errors: string[] }
+    | { ok: false; error: string }
+    | null
+  >(null);
+
+  const syncDriveAnalysis = useCallback(async () => {
+    setAnalysisSyncing(true);
+    setAnalysisSyncResult(null);
+    try {
+      const res = await fetch('/api/drive/analysis/sync', { method: 'POST' });
+      const data = await res.json();
+      if (!data.ok) {
+        setAnalysisSyncResult({ ok: false, error: data.error ?? '동기화 실패' });
+        return;
+      }
+      const s = data.summary;
+      setAnalysisSyncResult({
+        ok: true,
+        totalFiles: s.totalFiles ?? 0,
+        records: s.records ?? 0,
+        errors: Array.isArray(s.errors) ? s.errors : [],
+      });
+    } catch (e) {
+      setAnalysisSyncResult({ ok: false, error: (e as Error).message });
+    } finally {
+      setAnalysisSyncing(false);
+    }
+  }, []);
+
+  const loadDriveFiles = useCallback(async () => {
+    setDriveStatus('loading');
+    setDriveError(null);
+    try {
+      const res = await fetch('/api/drive/exams');
+      const data = await res.json();
+      if (data.configured === false) {
+        setDriveStatus('no-config');
+        setDriveError(data.reason ?? null);
+        return;
+      }
+      if (!data.ok) {
+        setDriveStatus('error');
+        setDriveError(data.error ?? 'Drive 목록 조회 실패');
+        return;
+      }
+      setDriveFiles(Array.isArray(data.files) ? data.files : []);
+      setDriveStatus('ready');
+    } catch (e) {
+      setDriveStatus('error');
+      setDriveError((e as Error).message);
+    }
+  }, []);
+
+  const pickDriveFile = useCallback(async (fileId: string) => {
+    setDrivePicking(true);
+    setExtractState({ status: 'idle' });
+    try {
+      const res = await fetch('/api/drive/exams/fetch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fileId }),
+      });
+      const data = await res.json();
+      if (!data.ok) throw new Error(data.error ?? 'Drive 파일 다운로드 실패');
+      const bin = atob(data.fileData);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i += 1) bytes[i] = bin.charCodeAt(i);
+      const file = new File([bytes], data.fileName, { type: data.mimeType });
+      setUploadedFile(file);
+      if (!examName.trim()) {
+        // 파일명 끝의 확장자만 떼서 시험지명 자동 채움
+        const baseName = data.fileName.replace(/\.[^.]+$/, '');
+        setExamName(baseName);
+      }
+      setDrivePickerOpen(false);
+    } catch (e) {
+      setExtractState({ status: 'error', error: `Drive 가져오기 실패: ${(e as Error).message}` });
+    } finally {
+      setDrivePicking(false);
+    }
+  }, [examName]);
 
   // base64 인코딩 후 JSON으로 보내므로 4MB 정도가 안전한 한계 (1MB body * ~1.37 인코딩 오버헤드 + JSON 래핑)
   // Next 16 기본은 1MB body. 큰 PDF는 multipart 또는 페이지 분할 필요.
@@ -447,6 +548,17 @@ export default function AutoPipelinePage() {
     a.download = filename;
     a.click();
     URL.revokeObjectURL(url);
+
+    // Drive 작업완료 폴더에도 자동 업로드된 결과를 페이지에 노출
+    const driveLink = res.headers.get('x-drive-web-view-link');
+    const driveErr = res.headers.get('x-drive-upload-error');
+    if (driveLink) {
+      setDriveUploadInfo({ link: driveLink, fileName: filename, error: null });
+    } else if (driveErr) {
+      setDriveUploadInfo({ link: null, fileName: filename, error: decodeURIComponent(driveErr) });
+    } else {
+      setDriveUploadInfo(null);
+    }
   }
 
   return (
@@ -459,13 +571,38 @@ export default function AutoPipelinePage() {
             결과는 Supabase에 기록되며 사용자 피드백이 다음 호출에 반영됩니다.
           </p>
         </div>
-        <button
-          onClick={() => setHistoryOpen((v) => !v)}
-          className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50"
-        >
-          최근 이력 {historyOpen ? '닫기' : '열기'} ({history.length})
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={syncDriveAnalysis}
+            disabled={analysisSyncing}
+            className="rounded-md border border-emerald-300 bg-white px-3 py-1.5 text-xs font-semibold text-emerald-800 hover:bg-emerald-50 disabled:opacity-50"
+            title="Drive 「분석용 자료」 폴더를 다시 읽어 KB 에 합칩니다 (양식·교재 학습)"
+          >
+            {analysisSyncing ? '분석자료 동기화 중…' : '분석자료 새로 학습'}
+          </button>
+          <button
+            onClick={() => setHistoryOpen((v) => !v)}
+            className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+          >
+            최근 이력 {historyOpen ? '닫기' : '열기'} ({history.length})
+          </button>
+        </div>
       </header>
+
+      {analysisSyncResult && (
+        <div className={`mb-4 rounded-lg border p-3 text-xs ${analysisSyncResult.ok ? 'border-emerald-300 bg-emerald-50 text-emerald-950' : 'border-rose-300 bg-rose-50 text-rose-950'}`}>
+          {analysisSyncResult.ok ? (
+            <p>
+              ✓ 분석용 자료 학습 완료 — 파일 {analysisSyncResult.totalFiles}개,
+              chunk {analysisSyncResult.records}개 인덱싱됨.
+              {analysisSyncResult.errors.length > 0 && ` (경고 ${analysisSyncResult.errors.length}개)`}
+            </p>
+          ) : (
+            <p>✗ 분석용 자료 학습 실패: {analysisSyncResult.error}</p>
+          )}
+        </div>
+      )}
 
       {/* Supabase 셋업 안내 배너 */}
       {(supabaseStatus === 'no-env' || supabaseStatus === 'no-table') && (
@@ -525,6 +662,84 @@ export default function AutoPipelinePage() {
               disabled={!!uploadedFile}
             />
           </label>
+
+          {/* Google Drive 시험지 폴더 — 파일 업로드 위에 노출 */}
+          <div className="mt-3">
+            <div className="flex items-center justify-between gap-2">
+              <label className="block text-xs font-semibold text-slate-700">
+                Google Drive 「시험지」 폴더에서 가져오기
+              </label>
+              <button
+                type="button"
+                onClick={() => {
+                  if (!drivePickerOpen && driveStatus !== 'ready') loadDriveFiles();
+                  setDrivePickerOpen((v) => !v);
+                }}
+                className="rounded-md border border-emerald-600 bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-800 hover:bg-emerald-100"
+                disabled={!!questionText.trim()}
+              >
+                {drivePickerOpen ? 'Drive 패널 닫기' : 'Drive에서 가져오기'}
+              </button>
+            </div>
+            {drivePickerOpen && (
+              <div className="mt-2 rounded-md border border-emerald-200 bg-emerald-50 p-2 text-xs">
+                {driveStatus === 'loading' && <p className="text-emerald-900">목록 불러오는 중…</p>}
+                {driveStatus === 'no-config' && (
+                  <p className="text-amber-900">
+                    Drive 키 미설정 — Railway Variables 에 GOOGLE_CLIENT_ID/SECRET/REFRESH_TOKEN 추가가 필요합니다.
+                    {driveError ? ` (${driveError})` : ''}
+                  </p>
+                )}
+                {driveStatus === 'error' && (
+                  <p className="text-rose-900">✗ {driveError ?? 'Drive 오류'}</p>
+                )}
+                {driveStatus === 'ready' && driveFiles.length === 0 && (
+                  <p className="text-slate-700">
+                    「해설제작/시험지」 폴더가 비어 있습니다. PDF/이미지를 업로드하세요.
+                  </p>
+                )}
+                {driveStatus === 'ready' && driveFiles.length > 0 && (
+                  <div className="space-y-1">
+                    <p className="mb-1 text-emerald-900">최신순 {driveFiles.length}개:</p>
+                    <ul className="max-h-48 overflow-y-auto divide-y divide-emerald-100 rounded border border-emerald-200 bg-white">
+                      {driveFiles.map((f) => (
+                        <li key={f.id} className="flex items-center justify-between gap-2 px-2 py-1">
+                          <div className="flex-1 truncate">
+                            <span className="font-semibold text-slate-800">{f.name}</span>
+                            {f.size !== null && (
+                              <span className="ml-2 text-slate-500">
+                                {(f.size / 1024 / 1024).toFixed(1)}MB
+                              </span>
+                            )}
+                            {f.modifiedTime && (
+                              <span className="ml-2 text-slate-400">
+                                {new Date(f.modifiedTime).toLocaleDateString('ko-KR')}
+                              </span>
+                            )}
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => pickDriveFile(f.id)}
+                            disabled={drivePicking}
+                            className="rounded border border-emerald-600 bg-white px-2 py-0.5 font-semibold text-emerald-800 hover:bg-emerald-50 disabled:opacity-50"
+                          >
+                            {drivePicking ? '가져오는 중…' : '가져오기'}
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                    <button
+                      type="button"
+                      onClick={loadDriveFiles}
+                      className="mt-1 text-emerald-800 underline"
+                    >
+                      목록 새로고침
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
 
           {/* 파일 업로드 */}
           <div className="mt-3">
@@ -821,6 +1036,7 @@ export default function AutoPipelinePage() {
           onDownloadDocx={downloadDocx}
           onDownloadRunsCsv={downloadRunsCsv}
           onDownloadRunsJson={downloadRunsJson}
+          driveUploadInfo={driveUploadInfo}
         />
       )}
     </div>
@@ -845,6 +1061,7 @@ function ResultsSection(props: {
   onDownloadDocx: (scope: 'active' | 'all') => void;
   onDownloadRunsCsv: () => void;
   onDownloadRunsJson: () => void;
+  driveUploadInfo: { link: string | null; fileName: string; error: string | null } | null;
 }) {
   const { result, activeIdx, onActiveIdx } = props;
   const runs = result.runs ?? [];
@@ -876,6 +1093,30 @@ function ResultsSection(props: {
 
   return (
     <section className="mt-6 space-y-4">
+      {/* Drive 작업완료 자동 업로드 배너 */}
+      {props.driveUploadInfo && (
+        <div className={`rounded-lg border p-3 text-sm ${props.driveUploadInfo.link ? 'border-emerald-300 bg-emerald-50 text-emerald-950' : 'border-amber-300 bg-amber-50 text-amber-950'}`}>
+          {props.driveUploadInfo.link ? (
+            <p>
+              ✓ Drive 「작업완료」 폴더에 자동 저장됨 — {' '}
+              <a
+                href={props.driveUploadInfo.link}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="underline font-semibold"
+              >
+                {props.driveUploadInfo.fileName} 열기
+              </a>
+            </p>
+          ) : (
+            <p>
+              ⚠ Drive 자동 업로드 실패 — 다운로드는 정상.
+              {props.driveUploadInfo.error ? ` (${props.driveUploadInfo.error})` : ''}
+            </p>
+          )}
+        </div>
+      )}
+
       {/* 다중 문항 헤더 */}
       {isMulti && (
         <div className="rounded-lg border border-indigo-200 bg-indigo-50 p-3">

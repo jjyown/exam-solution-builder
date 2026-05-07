@@ -16,6 +16,12 @@
  */
 import { NextResponse } from "next/server";
 import { buildExamExplanationDocxBuffer } from "@/lib/examExplanationDocx";
+import {
+  getDriveClient,
+  isGoogleDriveConfigured,
+  resolveDriveWorkCompleteFolderId,
+  uploadBufferToDriveFolder,
+} from "@/lib/googleDrive";
 
 type ParsedStep = { text: string; equation: string };
 type Parsed = {
@@ -109,15 +115,44 @@ export async function POST(req: Request) {
       quickAnswer: quickAnswerLine || "-",
     });
 
-    return new NextResponse(new Uint8Array(buffer), {
-      status: 200,
-      headers: {
-        "Content-Type":
-          "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        "Content-Disposition": `attachment; filename="${encodeURIComponent(docxFileName)}"`,
-        "Content-Length": String(buffer.length),
-      },
-    });
+    // Drive 「작업완료」 폴더 자동 업로드 — 페이지에서 링크 받아 표시
+    let driveFileId = "";
+    let driveWebViewLink = "";
+    let driveError = "";
+    if (isGoogleDriveConfigured()) {
+      try {
+        const drive = getDriveClient();
+        const folderId = await resolveDriveWorkCompleteFolderId(drive);
+        const up = await uploadBufferToDriveFolder({
+          folderId,
+          fileName: docxFileName,
+          buffer,
+          mimeType:
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        });
+        driveFileId = up.id;
+        driveWebViewLink = up.webViewLink;
+      } catch (e) {
+        // 업로드 실패해도 다운로드 자체는 성공시켜서 사용자 작업이 끊기지 않게 한다
+        driveError = (e as Error).message;
+      }
+    }
+
+    const headers: Record<string, string> = {
+      "Content-Type":
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      "Content-Disposition": `attachment; filename="${encodeURIComponent(docxFileName)}"`,
+      "Content-Length": String(buffer.length),
+    };
+    if (driveFileId) {
+      headers["X-Drive-File-Id"] = driveFileId;
+      headers["X-Drive-Web-View-Link"] = driveWebViewLink;
+    }
+    if (driveError) headers["X-Drive-Upload-Error"] = encodeURIComponent(driveError);
+    headers["Access-Control-Expose-Headers"] =
+      "X-Drive-File-Id, X-Drive-Web-View-Link, X-Drive-Upload-Error, Content-Disposition";
+
+    return new NextResponse(new Uint8Array(buffer), { status: 200, headers });
   } catch (e) {
     return NextResponse.json(
       { ok: false, error: `DOCX 생성 실패: ${(e as Error).message}` },

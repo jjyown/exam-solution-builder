@@ -21,8 +21,7 @@
  * ────────────────────────────────────────────────────────────────────────────
  */
 import { NextResponse } from 'next/server';
-import path from 'node:path';
-import { ReferenceRetriever } from '@/lib/referenceRetriever';
+import type { ReferenceRetriever } from '@/lib/referenceRetriever';
 import { runAutoPipeline, type PipelineResult } from '@/lib/autoPipeline';
 import { buildAutoChecklist } from '@/lib/autoPipelineChecklist';
 import { recordAutoPipelineRun } from '@/lib/autoPipelineLog';
@@ -36,17 +35,10 @@ import {
   type Profile,
 } from '@/lib/profileRouting';
 
-// ── KB 1회 인덱싱 후 재사용 ─────────────────────────────────────────────────
-let retrieverPromise: Promise<ReferenceRetriever> | null = null;
-function getRetriever() {
-  if (!retrieverPromise) {
-    const kbPath =
-      process.env.REFERENCE_KB_PATH ||
-      path.join(process.cwd(), 'reference', 'kb.jsonl');
-    retrieverPromise = ReferenceRetriever.fromJsonl(kbPath);
-  }
-  return retrieverPromise;
-}
+// KB 캐시는 모듈 전역으로 1회 인덱싱 → 재사용 (lib/autoPipelineRetriever)
+const getRetriever = () =>
+  // 동적 import 로 동기 모듈 그래프 회피 — 타입 추론은 그대로 유지
+  import('@/lib/autoPipelineRetriever').then((m) => m.getAutoPipelineRetriever());
 
 // ── LLM 어댑터 ─────────────────────────────────────────────────────────────
 /**

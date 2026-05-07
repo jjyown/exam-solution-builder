@@ -101,12 +101,23 @@ export async function resolveDriveWorkCompleteFolderId(drive: drive_v3.Drive): P
   return id;
 }
 
+/** 분석용 자료 폴더 (KB 자동 학습 대상) */
+export async function resolveDriveAnalysisFolderId(drive: drive_v3.Drive): Promise<string | null> {
+  const direct = env("GOOGLE_DRIVE_ANALYSIS_FOLDER_ID");
+  if (direct) return direct;
+
+  const folderName = env("GOOGLE_DRIVE_ANALYSIS_FOLDER_NAME") || "분석용 자료";
+  const parentId = await resolveDriveParentFolderId(drive);
+  const id = await findChildFolderId(drive, parentId, folderName);
+  return id ?? null;
+}
+
 export async function uploadBufferToDriveFolder(params: {
   folderId: string;
   fileName: string;
   buffer: Buffer;
   mimeType: string;
-}): Promise<{ id: string; name: string }> {
+}): Promise<{ id: string; name: string; webViewLink: string }> {
   const drive = getDriveClient();
   const { Readable } = await import("node:stream");
   const stream = Readable.from(params.buffer);
@@ -119,12 +130,13 @@ export async function uploadBufferToDriveFolder(params: {
       mimeType: params.mimeType,
       body: stream,
     },
-    fields: "id, name",
+    fields: "id, name, webViewLink",
   });
   const id = res.data.id;
   const name = res.data.name ?? params.fileName;
   if (!id) throw new Error("Drive 업로드 응답에 file id가 없습니다.");
-  return { id, name };
+  const webViewLink = res.data.webViewLink ?? `https://drive.google.com/file/d/${id}/view`;
+  return { id, name, webViewLink };
 }
 
 export async function listDriveExamFiles(allowedExtensions: Set<string>): Promise<string[]> {
@@ -143,6 +155,58 @@ export async function listDriveExamFiles(allowedExtensions: Set<string>): Promis
     if (allowedExtensions.has(ext)) out.push(n);
   }
   return out;
+}
+
+export type DriveFileMeta = {
+  id: string;
+  name: string;
+  mimeType: string;
+  modifiedTime: string | null;
+  size: number | null;
+};
+
+/** 폴더 안 파일을 메타데이터까지 함께 반환 (UI Picker 용) */
+export async function listDriveFolderFiles(
+  folderId: string,
+  allowedExtensions?: Set<string>,
+): Promise<DriveFileMeta[]> {
+  const drive = getDriveClient();
+  const res = await drive.files.list({
+    q: `'${folderId}' in parents and trashed=false`,
+    fields: "files(id, name, mimeType, modifiedTime, size)",
+    orderBy: "modifiedTime desc",
+    pageSize: 1000,
+  });
+  const out: DriveFileMeta[] = [];
+  for (const f of res.data.files ?? []) {
+    const n = f.name ?? "";
+    if (!n) continue;
+    if (allowedExtensions) {
+      const ext = path.extname(n).toLowerCase();
+      if (!allowedExtensions.has(ext)) continue;
+    }
+    out.push({
+      id: f.id ?? "",
+      name: n,
+      mimeType: f.mimeType ?? "application/octet-stream",
+      modifiedTime: f.modifiedTime ?? null,
+      size: f.size ? Number(f.size) : null,
+    });
+  }
+  return out.filter((f) => f.id);
+}
+
+/** ID 기반 다운로드 — 폴더 의존 없이 임의 위치 파일 가져오기 */
+export async function downloadDriveFileById(
+  fileId: string,
+): Promise<{ buffer: Buffer; mimeType: string; name: string }> {
+  const drive = getDriveClient();
+  const meta = await drive.files.get({ fileId, fields: "name, mimeType" });
+  const name = meta.data.name ?? fileId;
+  const mimeType = meta.data.mimeType ?? "application/octet-stream";
+  const dest = await drive.files.get({ fileId, alt: "media" }, { responseType: "stream" });
+  const buffer = await streamToBuffer(dest.data as NodeJS.ReadableStream);
+  return { buffer, mimeType, name };
 }
 
 export async function downloadDriveExamFileByName(
