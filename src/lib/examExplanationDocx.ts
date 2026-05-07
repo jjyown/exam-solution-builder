@@ -871,18 +871,6 @@ export async function buildExamExplanationDocxBuffer(params: BuildExamExplanatio
             children: [bodyTextRun({ text: docDate })],
             spacing: { after: 120 },
           }),
-          new Paragraph({
-            alignment: AlignmentType.CENTER,
-            children: [
-              new TextRun({
-                text: "※ (1) **문제** 2단·문항 단위 `cantSplit` (2) **빠른정답**은 다음 **1단** 면 (3) **해설**은 그다음 **2단** 면. 문항 번호+발문, `![문제 원본](…)` 크롭은 DOCX에 넣지 않음. **N.** → **[정답]** → 값·**[해설]** 풀이. <보기>는 테두리 박스. 용지·여백·단 간격은 `[TEST] TEST1.hml` PAGEDEF/SECDEF·PARAMARGIN에 맞춤(B4 세로).",
-                italics: true,
-                size: EXAM_DOCX_BODY_SIZE_HALF_PT,
-                font: EXAM_DOCX_FONT,
-              }),
-            ],
-            spacing: { after: 180 },
-          }),
         ],
       },
       {

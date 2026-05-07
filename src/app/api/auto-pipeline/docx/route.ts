@@ -49,18 +49,17 @@ function cleanQuestionText(no: string, raw: string | undefined): string {
 }
 
 /**
- * ParsedExplanation 1건 → `[문항 N] / [정답] / [해설]` 형식.
- * examExplanationDocx의 parseExplanationBlocks가 이 형식을 인식해
- * 자동으로 (문제) → (빠른정답) → (해설) 3섹션 양식으로 분리한다.
+ * ParsedExplanation 1건 → `[문항 N] / [문제] / [정답] / [해설]` 형식.
+ * examExplanationDocx의 parseExplanationBlocks 가 [문제] 마커를 우선 인식해
+ * 자동으로 (문제) → (빠른정답) → (해설) 3섹션 양식 (TEST 1, 2 표준) 으로 분리한다.
+ * `[문제]` 마커를 명시해야 본문 누락 없이 안정적으로 분리된다.
  */
 function renderRunAsBlock(run: RunItem): string {
   const lines: string[] = [];
   lines.push(`[문항 ${run.questionNo}]`);
-  // 문제 본문 — [정답]/[해설] 헤더 직전까지가 「문제」 섹션이 된다.
+  lines.push(`[문제]`);
   const body = cleanQuestionText(run.questionNo, run.questionText);
-  if (body) {
-    lines.push(body);
-  }
+  lines.push(body || "(문제 본문 누락 — 운영자 검수 필요)");
   if (!run.parsed) {
     lines.push(`[정답] -`);
     lines.push(`[해설]`);
