@@ -165,12 +165,14 @@ export async function resolveDriveExamOriginalsFolderId(
 }
 
 /**
- * 「휴지통」 폴더 ID — 해설제작 바로 아래.
- * 시험지 편집 탭에서 작업 끝난 원본을 옮기는 위치 (Drive 의 시스템 휴지통과는 별개).
+ * 「휴지통」 폴더 ID.
+ * 시험지 편집 탭에서 작업 끝난 원본을 옮기는 위치 (Drive 시스템 휴지통과는 별개).
  *
- *  ENV 오버라이드:
- *   - GOOGLE_DRIVE_TRASH_FOLDER_ID
- *   - GOOGLE_DRIVE_TRASH_FOLDER_NAME (기본 "휴지통")
+ * 검색 순서:
+ *  1) GOOGLE_DRIVE_TRASH_FOLDER_ID (env 직접 ID)
+ *  2) 「분석용 자료/시험지 편집/휴지통」  — 시험지 편집 워크플로 안에 모은 신구조
+ *  3) 「해설제작/휴지통」                — 루트 직속 구구조 (호환)
+ *  ENV: GOOGLE_DRIVE_TRASH_FOLDER_NAME (기본 "휴지통")
  */
 export async function resolveDriveTrashFolderId(
   drive: drive_v3.Drive,
@@ -178,6 +180,15 @@ export async function resolveDriveTrashFolderId(
   const direct = env("GOOGLE_DRIVE_TRASH_FOLDER_ID");
   if (direct) return direct;
   const folderName = env("GOOGLE_DRIVE_TRASH_FOLDER_NAME") || "휴지통";
+
+  // 1차: 「분석용 자료/시험지 편집」 안에서 찾기 (현재 사용자 구조)
+  const editParentId = await resolveDriveExamEditParentFolderId(drive);
+  if (editParentId) {
+    const inEdit = await findChildFolderId(drive, editParentId, folderName);
+    if (inEdit) return inEdit;
+  }
+
+  // 2차: 「해설제작」 루트 직속 (구구조 호환)
   const parentId = await resolveDriveParentFolderId(drive);
   return findChildFolderId(drive, parentId, folderName);
 }
