@@ -196,6 +196,56 @@ export async function listDriveFolderFiles(
   return out.filter((f) => f.id);
 }
 
+/**
+ * 폴더 트리를 재귀로 훑어 파일 목록을 반환.
+ *  - 각 파일에 `pathSegments` (하위 폴더명 배열) 부여 → "분석용 자료/시중교재/foo.pdf" 같이 출처 태깅 가능
+ *  - 깊이 무한 재귀 방지를 위해 maxDepth (기본 4)
+ */
+export type DriveFileMetaWithPath = DriveFileMeta & { pathSegments: string[] };
+
+export async function listDriveFolderFilesRecursive(
+  rootFolderId: string,
+  allowedExtensions?: Set<string>,
+  maxDepth = 4,
+): Promise<DriveFileMetaWithPath[]> {
+  const drive = getDriveClient();
+  const out: DriveFileMetaWithPath[] = [];
+
+  async function walk(folderId: string, segments: string[], depth: number): Promise<void> {
+    if (depth > maxDepth) return;
+    const res = await drive.files.list({
+      q: `'${folderId}' in parents and trashed=false`,
+      fields: "files(id, name, mimeType, modifiedTime, size)",
+      orderBy: "modifiedTime desc",
+      pageSize: 1000,
+    });
+    for (const f of res.data.files ?? []) {
+      const id = f.id ?? "";
+      const name = f.name ?? "";
+      if (!id || !name) continue;
+      if (f.mimeType === "application/vnd.google-apps.folder") {
+        await walk(id, [...segments, name], depth + 1);
+        continue;
+      }
+      if (allowedExtensions) {
+        const ext = path.extname(name).toLowerCase();
+        if (!allowedExtensions.has(ext)) continue;
+      }
+      out.push({
+        id,
+        name,
+        mimeType: f.mimeType ?? "application/octet-stream",
+        modifiedTime: f.modifiedTime ?? null,
+        size: f.size ? Number(f.size) : null,
+        pathSegments: segments,
+      });
+    }
+  }
+
+  await walk(rootFolderId, [], 0);
+  return out;
+}
+
 /** ID 기반 다운로드 — 폴더 의존 없이 임의 위치 파일 가져오기 */
 export async function downloadDriveFileById(
   fileId: string,

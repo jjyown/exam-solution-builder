@@ -127,7 +127,13 @@ export default function AutoPipelinePage() {
   >(null);
   const [analysisSyncing, setAnalysisSyncing] = useState(false);
   const [analysisSyncResult, setAnalysisSyncResult] = useState<
-    | { ok: true; totalFiles: number; records: number; errors: string[] }
+    | {
+        ok: true;
+        totalFiles: number;
+        records: number;
+        errors: string[];
+        bySubfolder: Record<string, number>;
+      }
     | { ok: false; error: string }
     | null
   >(null);
@@ -148,6 +154,7 @@ export default function AutoPipelinePage() {
         totalFiles: s.totalFiles ?? 0,
         records: s.records ?? 0,
         errors: Array.isArray(s.errors) ? s.errors : [],
+        bySubfolder: s.bySubfolder ?? {},
       });
     } catch (e) {
       setAnalysisSyncResult({ ok: false, error: (e as Error).message });
@@ -628,11 +635,21 @@ export default function AutoPipelinePage() {
       {analysisSyncResult && (
         <div className={`mb-4 rounded-lg border p-3 text-xs ${analysisSyncResult.ok ? 'border-emerald-300 bg-emerald-50 text-emerald-950' : 'border-rose-300 bg-rose-50 text-rose-950'}`}>
           {analysisSyncResult.ok ? (
-            <p>
-              ✓ 분석용 자료 학습 완료 — 파일 {analysisSyncResult.totalFiles}개,
-              chunk {analysisSyncResult.records}개 인덱싱됨.
-              {analysisSyncResult.errors.length > 0 && ` (경고 ${analysisSyncResult.errors.length}개)`}
-            </p>
+            <div>
+              <p className="font-semibold">
+                ✓ 분석용 자료 학습 완료 — 파일 {analysisSyncResult.totalFiles}개,
+                chunk {analysisSyncResult.records}개 인덱싱
+                {analysisSyncResult.errors.length > 0 && ` (경고 ${analysisSyncResult.errors.length}개)`}
+              </p>
+              {Object.keys(analysisSyncResult.bySubfolder).length > 0 && (
+                <p className="mt-1 text-emerald-900">
+                  폴더별:{' '}
+                  {Object.entries(analysisSyncResult.bySubfolder)
+                    .map(([k, v]) => `${k} ${v}건`)
+                    .join(' · ')}
+                </p>
+              )}
+            </div>
           ) : (
             <p>✗ 분석용 자료 학습 실패: {analysisSyncResult.error}</p>
           )}

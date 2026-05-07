@@ -19,7 +19,7 @@ import {
   getDriveClient,
   isGoogleDriveConfigured,
   resolveDriveAnalysisFolderId,
-  listDriveFolderFiles,
+  listDriveFolderFilesRecursive,
   downloadDriveFileById,
 } from "./googleDrive";
 import { extractTextWithGeminiVision, isGeminiVisionAvailable } from "./geminiVisionExtract";
@@ -41,6 +41,8 @@ export type AnalysisLearnSummary = {
   newOrChanged: number;
   records: number;
   errors: string[];
+  /** 서브폴더(시중교재 / 개인자료 등) 별 파일 수 */
+  bySubfolder: Record<string, number>;
 };
 
 /**
@@ -58,6 +60,7 @@ export async function loadDriveAnalysisRecords(): Promise<{
     newOrChanged: 0,
     records: 0,
     errors: [],
+    bySubfolder: {},
   };
 
   if (!isGoogleDriveConfigured()) {
@@ -87,12 +90,17 @@ export async function loadDriveAnalysisRecords(): Promise<{
 
   let files;
   try {
-    files = await listDriveFolderFiles(folderId, ALLOWED_EXTS);
+    files = await listDriveFolderFilesRecursive(folderId, ALLOWED_EXTS);
   } catch (e) {
     summary.errors.push(`분석용 자료 폴더 목록 조회 실패: ${(e as Error).message}`);
     return { records: [], summary };
   }
   summary.totalFiles = files.length;
+  // 서브폴더별 파일 수 집계
+  for (const f of files) {
+    const key = f.pathSegments.length === 0 ? "(루트)" : f.pathSegments.join(" / ");
+    summary.bySubfolder[key] = (summary.bySubfolder[key] ?? 0) + 1;
+  }
 
   const all: ReferenceRecord[] = [];
   for (const f of files) {
@@ -114,11 +122,9 @@ export async function loadDriveAnalysisRecords(): Promise<{
       const v = await extractTextWithGeminiVision(buffer.toString("base64"), effectiveMime);
       if (!v.ok) {
         summary.errors.push(`${f.name}: ${v.error}`);
-        // 실패한 파일은 빈 records 로 캐시 (다음 호출에 재시도)
         continue;
       }
-      // 큰 PDF 는 페이지 단위로 나눠 RAG 매칭 정확도를 높임
-      const records = splitTextIntoRecords(f.id, f.name, v.text);
+      const records = splitTextIntoRecords(f.id, f.name, f.pathSegments, v.text);
       fileCache.set(f.id, { modifiedTime: f.modifiedTime, records });
       all.push(...records);
       summary.newOrChanged += 1;
@@ -145,6 +151,7 @@ export function invalidateAnalysisCache(): void {
 function splitTextIntoRecords(
   fileId: string,
   fileName: string,
+  pathSegments: string[],
   text: string,
 ): ReferenceRecord[] {
   const cleaned = text.trim();
@@ -153,7 +160,7 @@ function splitTextIntoRecords(
   // 문항 헤더 분리
   const labeled = cleaned.match(/\[문항\s*\d+\][\s\S]*?(?=\[문항\s*\d+\]|$)/g);
   if (labeled && labeled.length >= 2) {
-    return labeled.map((chunk, idx) => buildRecord(fileId, fileName, idx, chunk.trim()));
+    return labeled.map((chunk, idx) => buildRecord(fileId, fileName, pathSegments, idx, chunk.trim()));
   }
 
   // 문항 헤더가 없는 경우 — 1500자 단위 chunk
@@ -171,20 +178,23 @@ function splitTextIntoRecords(
   }
   if (buf.trim()) chunks.push(buf.trim());
   if (chunks.length === 0) return [];
-  return chunks.map((chunk, idx) => buildRecord(fileId, fileName, idx, chunk));
+  return chunks.map((chunk, idx) => buildRecord(fileId, fileName, pathSegments, idx, chunk));
 }
 
 function buildRecord(
   fileId: string,
   fileName: string,
+  pathSegments: string[],
   idx: number,
   content: string,
 ): ReferenceRecord {
+  // 서브폴더(시중교재 / 개인자료 등)는 출처에 명시해 RAG 디버깅 시 어디서 매칭됐는지 추적 가능
+  const subPath = pathSegments.length > 0 ? `${pathSegments.join("/")}/` : "";
   return {
     id: `drive:${fileId}#${idx}`,
-    source: `drive/분석용자료/${fileName}`,
+    source: `drive/분석용자료/${subPath}${fileName}`,
     answer: "",
-    problem_hint: `${fileName} (참고자료 #${idx + 1})`,
+    problem_hint: `${subPath}${fileName} (참고자료 #${idx + 1})`,
     content,
     equations: extractEquationsHeuristic(content),
   };
