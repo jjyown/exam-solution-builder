@@ -36,10 +36,11 @@ type NaturalBox = { x: number; y: number; width: number; height: number };
  * 캔버스 그리기·자르기 시 현재 imageEl 의 naturalWidth/Height 와 곱해 픽셀 좌표로 환산.
  */
 type CropNorm = { x: number; y: number; width: number; height: number };
-/** 태블릿 스크린 대비 종이 영역 마진 비율 (각각 0~1). 묶음 학습 — 첫 검출에서 산출 후 다른 슬롯에 재사용. */
+/**
+ * Stage 1 (AI 흰 종이 박스) 대비 사용자 검수 박스의 마진 비율 (각각 0~1).
+ * 카메라 위치 차이를 흡수한 좌표계에서의 4-corner 평균 학습 단위.
+ */
 type PaperOffset = { top: number; right: number; bottom: number; left: number };
-/** 검출 결과 — cropNorm + 묶음 학습용 paperOffset */
-type PaperDetection = { cropNorm: CropNorm; paperOffset: PaperOffset };
 
 function normToNaturalBox(
   n: CropNorm,
@@ -71,7 +72,14 @@ type Slot = {
   /** 자연 좌표 박스 — 비어있으면 미설정. 자르기 결과 imageDataUrl 도 같이 보관 */
   /** 자른 영역 — 정규화 0~1 좌표. null 이면 미설정. 이미지 해상도 변경에 안전. */
   cropNorm: CropNorm | null;
-  /** 자동 검출 시 산출된 태블릿 화면 대비 종이 마진 — 묶음 학습·히스토리 누적용 */
+  /**
+   * Stage 1 — AI(Gemini)가 잡은 「태블릿 화면 속 흰 종이」 박스. 0~1 정규화.
+   * - 카메라 각도 미세 차이를 흡수하는 **기준 좌표계** 역할.
+   * - paperOffset 의 분모(좌표 기준선) 가 이 박스. 사용자 드래그 후 재계산할 때도 사용.
+   * - AI 호출 결과를 슬롯에 캐시해 두 번째 드래그·재시도가 비용 0.
+   */
+  whiteAreaBox?: CropNorm;
+  /** Stage 2 — whiteAreaBox 기준 4-corner 마진 비율(상하좌우, 0~1). 히스토리 평균 학습용. */
   paperOffset?: PaperOffset;
   croppedDataUrl: string | null;
   /** Gemini 가 추출해 준 시험명 한 줄 — 「묶음 이름」으로 사용 가능 */
@@ -763,32 +771,32 @@ export default function EditPage() {
     };
     // 빨간 박스 즉시 표시 — cropNorm 먼저 저장. paperOffset 은 백그라운드로 비동기 갱신.
     setSlot(active.id, { cropNorm, error: undefined });
-    // 사용자 검수·드래그한 박스 → 화면 박스 대비 4-corner 마진(paperOffset) 재계산.
+    // 사용자 검수·드래그한 박스 → Stage 1 박스(AI 흰 종이 영역) 대비 4-corner 마진을 재계산.
     // 이 값이 Drive 업로드 시 히스토리에 누적되어 다음 자동 검출의 평균 시드로 사용됨.
+    // - 슬롯에 whiteAreaBox 가 이미 캐시돼 있으면 그걸 사용 (자동 감지 후 드래그 = 비용 0)
+    // - 없으면 AI(폴백 픽셀) 호출 — 사용자가 자동 감지 안 하고 바로 드래그한 경우
     if (active.sourceDataUrl) {
-      void detectScreenBoxByPixels(active.sourceDataUrl)
-        .then((screen) => {
-          if (!screen || screen.width < 0.05 || screen.height < 0.05) return;
-          const left = (cropNorm.x - screen.x) / screen.width;
-          const right =
-            (screen.x + screen.width - cropNorm.x - cropNorm.width) / screen.width;
-          const top = (cropNorm.y - screen.y) / screen.height;
-          const bottom =
-            (screen.y + screen.height - cropNorm.y - cropNorm.height) / screen.height;
-          // 화면 안쪽에 있어야 의미 있음 — 음수 일부는 허용(1~2% 오차), 너무 벗어나면 무시
-          const ok = (v: number) => v >= -0.05 && v <= 1.05;
-          if (!ok(left) || !ok(right) || !ok(top) || !ok(bottom)) return;
-          const paperOffset: PaperOffset = {
-            left: Math.max(0, left),
-            right: Math.max(0, right),
-            top: Math.max(0, top),
-            bottom: Math.max(0, bottom),
-          };
-          setSlot(active.id, { paperOffset });
-        })
-        .catch(() => {
-          /* 화면 검출 실패 — paperOffset 갱신 skip, cropNorm 만 유지 */
-        });
+      const cachedWhite = active.whiteAreaBox;
+      void (async () => {
+        const white = cachedWhite ?? (await detectWhitePaperBoxByAI(active.sourceDataUrl!));
+        if (!white || white.width < 0.05 || white.height < 0.05) return;
+        const left = (cropNorm.x - white.x) / white.width;
+        const right = (white.x + white.width - cropNorm.x - cropNorm.width) / white.width;
+        const top = (cropNorm.y - white.y) / white.height;
+        const bottom = (white.y + white.height - cropNorm.y - cropNorm.height) / white.height;
+        // Stage 1 박스 안쪽에 있어야 의미 있음 — 음수 일부는 허용(1~2% 오차), 너무 벗어나면 무시
+        const ok = (v: number) => v >= -0.05 && v <= 1.05;
+        if (!ok(left) || !ok(right) || !ok(top) || !ok(bottom)) return;
+        const paperOffset: PaperOffset = {
+          left: Math.max(0, left),
+          right: Math.max(0, right),
+          top: Math.max(0, top),
+          bottom: Math.max(0, bottom),
+        };
+        setSlot(active.id, { paperOffset, whiteAreaBox: white });
+      })().catch(() => {
+        /* 검출 실패 — paperOffset 갱신 skip, cropNorm 만 유지 */
+      });
     }
 
     // captureCrop 시도 — imgRef 가 dataURL 이면 즉시 OK, CDN URL 이면 SecurityError.
@@ -835,11 +843,16 @@ export default function EditPage() {
   // ── 검출 히스토리 — 사용자 검토·업로드 거친 박스 누적해 평균 학습 ─────
   // 사용자 인사이트: 「영역이 잡히면 한번 검토하는 과정을 거치니 자료가 쌓인다」.
   // Drive 업로드(최종 확정) 시점에 cropNorm + paperOffset 을 localStorage 에 누적.
-  // 다음 자동 검출에서 history median 을 seed 로 사용 → 일관성 + 픽셀 분석 흔들림 보정.
-  const HISTORY_KEY = "edit_paper_offset_history_v1";
+  // 다음 자동 검출에서 history median 을 seed 로 사용 → 일관성 + AI 검출 흔들림 보정.
+  // v2: paperOffset 의 기준 좌표계가 「픽셀 기반 태블릿 화면」 → 「AI 흰 종이 박스」 로 바뀜.
+  //     v1 데이터는 호환되지 않으므로 자동 무시 (key 가 다르면 빈 배열).
+  const HISTORY_KEY = "edit_paper_offset_history_v2";
   const HISTORY_MAX = 50;
   type HistorySample = {
     cropNorm: CropNorm;
+    /** AI 가 그 슬롯에서 잡은 흰 종이 박스 (기준 좌표계 기록) */
+    whiteAreaBox?: CropNorm;
+    /** 흰 종이 박스 대비 사용자 검수 박스의 4-corner 마진 비율 */
     paperOffset?: PaperOffset;
     t: number;
   };
@@ -923,12 +936,17 @@ export default function EditPage() {
   }
 
   /**
-   * 「전체 빠른 박스」 — 체크된 슬롯들에 픽셀 분석으로 자동 감지된 종이 영역 적용.
-   * - 태블릿 베젤·앱 헤더·하단 툴바 자동 제외 (밝기·색상 분석)
-   * - API 호출 0회, 보통 슬롯당 ~10~30ms
-   * - 감지 실패 시 기본 비율(빠른 박스) 폴백
-   * - 기존 cropNorm 이 있어도 덮어씀 (사용자가 일괄 재감지 의도)
+   * 「🔍 전체 자동 감지」 — 체크된 슬롯들에 2단계 자동 감지 적용.
+   *  Stage 1 : AI(Gemini)로 「태블릿 화면 속 흰 종이」 박스 검출 (per-slot)
+   *  Stage 2 : 누적 히스토리(검수 끝난 박스) 가 5개 이상이면 4-corner median 마진 적용
+   *           → 일관된 최종 크롭. 누적이 부족하면 Stage 1 박스 그대로.
+   *
+   * - Gemini 호출은 슬롯당 1회, 동시에 최대 4개씩 병렬 (Hobby tier 안전 마진).
+   * - 같은 source URL 재처리 시 세션 캐시 적중 → 비용 0.
+   * - 기존 cropNorm 이 있어도 덮어씀 (사용자가 일괄 재감지 의도).
    */
+  const [bulkProgress, setBulkProgress] = useState<{ done: number; total: number } | null>(null);
+
   async function detectAllBoxes() {
     const targets = slots.filter((s) => s.includeInPdf);
     if (targets.length === 0) {
@@ -945,42 +963,62 @@ export default function EditPage() {
         return;
     }
     setBulkBusy(true);
+    setBulkProgress({ done: 0, total: targets.length });
     const processed: Slot[] = [];
-    // 묶음 학습 — 첫 성공 검출의 paperOffset 을 다른 슬롯에 재사용.
-    // 누적 히스토리(검토·업로드 끝난 과거 데이터) 가 5개 이상이면 그 median 으로 시드 →
-    //   첫 슬롯도 픽셀 분석 대신 학습된 offset 적용 → 더 일관된 결과.
-    let learnedOffset: PaperOffset | null = medianPaperOffset();
-    try {
-      for (const s of targets) {
-        // eslint-disable-next-line no-await-in-loop
-        const src = await ensureFullDataUrlSource(s.id);
-        if (!src) continue;
-        // 1차: 픽셀 분석 (학습된 offset 있으면 Stage 2 대신 적용)
-        // eslint-disable-next-line no-await-in-loop
-        const detection = await detectPaperBoxByPixels(src, learnedOffset);
-        // 2차: 감지 실패 시 기본 비율 폴백
-        const cropNorm = detection?.cropNorm ?? FAST_BOX_DEFAULT;
-        const paperOffset = detection?.paperOffset ?? learnedOffset ?? undefined;
-        if (detection && !learnedOffset) {
-          learnedOffset = detection.paperOffset;
-        }
-        try {
-          // eslint-disable-next-line no-await-in-loop
-          const img = await loadImage(src);
-          const naturalBox = normToNaturalBox(
-            cropNorm,
-            img.naturalWidth,
-            img.naturalHeight,
-          );
-          const croppedDataUrl = captureCrop(img, naturalBox);
-          setSlot(s.id, { cropNorm, croppedDataUrl, paperOffset });
-          processed.push({ ...s, cropNorm, croppedDataUrl, paperOffset });
-        } catch {
-          setSlot(s.id, { cropNorm, paperOffset });
-        }
+    const learnedOffset: PaperOffset | null = medianPaperOffset();
+    let doneCount = 0;
+
+    // 한 슬롯 처리 — AI 호출 + crop 캡처
+    async function processOne(s: Slot): Promise<Slot | null> {
+      const src = await ensureFullDataUrlSource(s.id);
+      if (!src) {
+        doneCount += 1;
+        setBulkProgress({ done: doneCount, total: targets.length });
+        return null;
       }
+      const detection = await detectPaperBoxByAI(src, learnedOffset);
+      // AI/픽셀 폴백 모두 실패 시 빠른 박스 기본값
+      const cropNorm = detection?.cropNorm ?? FAST_BOX_DEFAULT;
+      const paperOffset =
+        detection?.paperOffset ??
+        (learnedOffset ?? { top: 0, right: 0, bottom: 0, left: 0 });
+      const whiteAreaBox = detection?.whiteAreaBox;
+      try {
+        const img = await loadImage(src);
+        const naturalBox = normToNaturalBox(
+          cropNorm,
+          img.naturalWidth,
+          img.naturalHeight,
+        );
+        const croppedDataUrl = captureCrop(img, naturalBox);
+        setSlot(s.id, { cropNorm, croppedDataUrl, paperOffset, whiteAreaBox });
+        return { ...s, cropNorm, croppedDataUrl, paperOffset, whiteAreaBox };
+      } catch {
+        setSlot(s.id, { cropNorm, paperOffset, whiteAreaBox });
+        return { ...s, cropNorm, paperOffset, whiteAreaBox };
+      } finally {
+        doneCount += 1;
+        setBulkProgress({ done: doneCount, total: targets.length });
+      }
+    }
+
+    // 동시에 최대 CONCURRENCY 개씩 — Gemini 호출 부하 관리
+    const CONCURRENCY = 4;
+    try {
+      let nextIdx = 0;
+      const workers = Array.from({ length: Math.min(CONCURRENCY, targets.length) }, async () => {
+        while (true) {
+          const idx = nextIdx;
+          nextIdx += 1;
+          if (idx >= targets.length) return;
+          const result = await processOne(targets[idx]);
+          if (result) processed.push(result);
+        }
+      });
+      await Promise.all(workers);
     } finally {
       setBulkBusy(false);
+      setBulkProgress(null);
     }
     // 박스 검출 끝나면 학교명도 자동 추출 (examName 이 비어있을 때만, 첫 슬롯 헤더로)
     void maybeAutoExtractExamName(processed);
@@ -1279,11 +1317,13 @@ export default function EditPage() {
       const data = await res.json();
       if (!data.ok) throw new Error(data.error || "업로드 실패");
       setSaveResult({ ok: true, link: data.webViewLink, name: data.name });
-      // 사용자 검토를 거쳐 업로드된 박스들을 히스토리에 누적 → 다음 자동 검출 시드로 사용
+      // 사용자 검토를 거쳐 업로드된 박스들을 히스토리에 누적 → 다음 자동 검출 시드로 사용.
+      // paperOffset 이 있는 샘플만 평균 학습에 의미가 있으므로 그것만 저장.
       const checkedConfirmed = slots
-        .filter((s) => s.cropNorm && s.includeInPdf && s.croppedDataUrl)
+        .filter((s) => s.cropNorm && s.includeInPdf && s.croppedDataUrl && s.paperOffset)
         .map<HistorySample>((s) => ({
           cropNorm: s.cropNorm!,
+          whiteAreaBox: s.whiteAreaBox,
           paperOffset: s.paperOffset,
           t: Date.now(),
         }));
@@ -1762,12 +1802,14 @@ export default function EditPage() {
                   className="rounded-md border border-indigo-300 bg-white px-3 py-1.5 text-xs font-semibold text-indigo-800 hover:bg-indigo-50 disabled:opacity-50"
                   title={
                     historyCount >= 5
-                      ? `1차: 태블릿 화면만 잘라냄 (베젤·바깥 제거) → 2차: 누적 학습 ${historyCount}개의 4-corner 평균 적용. 끝나면 학교명도 자동 추출`
-                      : `1차: 태블릿 화면만 잘라냄 (베젤·바깥 제거) → 2차: 사용자 드래그로 종이 영역 미세조정 → Drive 업로드 시 그 위치가 누적돼 ${5 - historyCount}개 더 쌓이면 평균 자동 적용`
+                      ? `1차: AI 가 태블릿 화면 속 흰 종이 영역만 잡음 (툴바·상태바·베젤 제외) → 2차: 누적 학습 ${historyCount}개의 4-corner 평균 적용. 끝나면 학교명도 자동 추출`
+                      : `1차: AI 가 태블릿 화면 속 흰 종이 영역만 잡음 (툴바·상태바·베젤 제외) → 2차: 사용자 드래그로 미세조정 → Drive 업로드 시 ${5 - historyCount}개 더 쌓이면 평균 자동 적용`
                   }
                 >
                   {bulkBusy
-                    ? "처리 중…"
+                    ? bulkProgress
+                      ? `AI 검출 중… ${bulkProgress.done}/${bulkProgress.total}`
+                      : "처리 중…"
                     : `🔍 전체 자동 감지 + 학교명${historyCount >= 5 ? ` (학습 ${historyCount})` : historyCount > 0 ? ` (학습 ${historyCount}/5)` : ""}`}
                 </button>
                 {historyCount > 0 && (
@@ -2291,41 +2333,100 @@ async function detectScreenBoxByPixels(imageDataUrl: string): Promise<CropNorm |
 }
 
 /**
- * 시험지 종이 영역 자동 검출 — 사용자 설계 그대로:
- *  1) Stage 1 : 태블릿 화면 검출 → 화면 바깥(베젤·손·책상) 잘라냄
- *  2) Stage 2 : 화면 안에서 누적 학습 4-corner 평균(`learnedOffset`) 으로 종이 박스 산출.
- *               학습 데이터 없으면 → **화면 전체** 가 종이 박스 (사용자 수동 드래그로 검수).
+ * Stage 1 — AI(Gemini)가 「태블릿 화면 속 흰 종이」 영역을 잡아 정규화 박스로 반환.
+ *  - `/api/photo-edit/detect-box` (geminiDetectProblemBox) 호출 — 모델 내부 폴백 포함.
+ *  - 프롬프트가 명시적으로 상태바/툴바/앱헤더/하단 네비/베젤을 모두 제외 → 깔끔한 종이 박스.
+ *  - 실패 시 픽셀 기반 화면 검출(`detectScreenBoxByPixels`)로 폴백 — 그래도 null 이면 호출자가 폴백.
+ *  - **세션 캐시**: 같은 source URL 은 한 번만 호출. 재드래그·재시도 비용 0.
  *
- * ❗ 픽셀 기반 종이 검출은 **사용하지 않는다** — 과거에는 「밝기 ≥ paperPeak-25 && 무채색」
- *    휴리스틱으로 종이를 추정했는데, UI 회색 헤더·반사 영역에서 일관되게 빗나가
- *    학습 히스토리에 편향이 누적됐다. Stage 1(견고) + 사용자 검수 학습(정직) 만 신뢰한다.
- *
- * 처리 시간: 1장당 ~20-30ms (API 0).
+ * 처리 시간: 1장당 ~1-2초 (Gemini flash-lite, 폴백은 ~30ms).
  */
-async function detectPaperBoxByPixels(
+const aiWhiteAreaCache = new Map<string, CropNorm | null>();
+
+async function detectWhitePaperBoxByAI(imageDataUrl: string): Promise<CropNorm | null> {
+  if (!imageDataUrl) return null;
+  // 세션 캐시 — 같은 source 두 번 호출 안 함 (사용자 드래그 후 재계산도 같은 박스 사용)
+  if (aiWhiteAreaCache.has(imageDataUrl)) {
+    return aiWhiteAreaCache.get(imageDataUrl) ?? null;
+  }
+  let result: CropNorm | null = null;
+  try {
+    const res = await fetch("/api/photo-edit/detect-box", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ image: imageDataUrl }),
+    });
+    const json = (await res.json()) as
+      | { ok: true; box: { nx: number; ny: number; nw: number; nh: number } }
+      | { ok: false; error: string };
+    if (res.ok && "ok" in json && json.ok && json.box) {
+      result = {
+        x: json.box.nx,
+        y: json.box.ny,
+        width: json.box.nw,
+        height: json.box.nh,
+      };
+    }
+  } catch {
+    /* AI 실패 — 폴백으로 진행 */
+  }
+  if (!result) {
+    // AI 실패 시 픽셀 기반 화면 검출(베젤만 제외) 로 폴백 — UI 가 박스 안에 들어오지만
+    // 적어도 베젤·바깥은 잘림. 다음 사용자 드래그가 학습 시드를 만든다.
+    result = await detectScreenBoxByPixels(imageDataUrl);
+  }
+  aiWhiteAreaCache.set(imageDataUrl, result);
+  return result;
+}
+
+/**
+ * 시험지 영역 자동 검출 — 2단계 + AI:
+ *  Stage 1 (AI) : 태블릿 화면 속 「인쇄 시험지(흰 종이)」 박스 → 카메라 위치 차이를 흡수하는 기준 좌표계.
+ *  Stage 2 (학습) : Stage 1 박스 안에서 누적 4-corner 평균(`learnedOffset`) 적용 → 일관된 최종 크롭.
+ *                   학습 데이터 없음(<5) → Stage 1 박스 그대로 (사용자 드래그로 검수 → 히스토리 누적).
+ *
+ * 학습이 망가지는 경로 차단:
+ *  - 픽셀 기반 종이 검출은 **사용 안 함** (UI/반사 오인식으로 편향 누적이 원인이었음).
+ *  - 사용자 검수 박스만 정확한 paperOffset 으로 환산되어 누적.
+ *
+ * 반환:
+ *  - `cropNorm`     : 최종 슬롯 박스
+ *  - `whiteAreaBox` : Stage 1 결과 (paperOffset 의 기준 좌표계 — 슬롯에 캐시)
+ *  - `paperOffset`  : 적용된 학습 마진 (학습 없으면 모두 0)
+ */
+type PaperDetectionFull = {
+  cropNorm: CropNorm;
+  whiteAreaBox: CropNorm;
+  paperOffset: PaperOffset;
+};
+
+async function detectPaperBoxByAI(
   imageDataUrl: string,
-  /** 누적 히스토리에서 산출한 4-corner 평균 (없으면 종이 박스 = 화면 전체) */
   learnedOffset?: PaperOffset | null,
-): Promise<PaperDetection | null> {
-  const screen = await detectScreenBoxByPixels(imageDataUrl);
-  if (!screen) return null;
+): Promise<PaperDetectionFull | null> {
+  const whiteAreaBox = await detectWhitePaperBoxByAI(imageDataUrl);
+  if (!whiteAreaBox) return null;
 
   if (!learnedOffset) {
-    // 학습 데이터 없음 → 화면 전체 표시. 사용자가 모서리 드래그로 종이 영역만 좁히면
-    // handleCropComplete 가 화면 대비 마진을 계산해 paperOffset 으로 저장하고,
-    // Drive 업로드 시 그 값이 히스토리에 누적된다.
+    // 학습 데이터 없음 → Stage 1 박스 그대로 표시. 사용자 드래그가 시드를 만든다.
     return {
-      cropNorm: screen,
+      cropNorm: whiteAreaBox,
+      whiteAreaBox,
       paperOffset: { top: 0, right: 0, bottom: 0, left: 0 },
     };
   }
 
-  // 학습된 4-corner 평균 적용 — 화면 박스에 마진 비율 그대로 투영
-  const x = screen.x + learnedOffset.left * screen.width;
-  const y = screen.y + learnedOffset.top * screen.height;
-  const width = Math.max(0.01, screen.width * (1 - learnedOffset.left - learnedOffset.right));
-  const height = Math.max(0.01, screen.height * (1 - learnedOffset.top - learnedOffset.bottom));
-  // 안전 클램프 — 음수·1 초과 방지
+  // 학습된 4-corner 마진을 Stage 1 박스 안쪽에 적용
+  const x = whiteAreaBox.x + learnedOffset.left * whiteAreaBox.width;
+  const y = whiteAreaBox.y + learnedOffset.top * whiteAreaBox.height;
+  const width = Math.max(
+    0.01,
+    whiteAreaBox.width * (1 - learnedOffset.left - learnedOffset.right),
+  );
+  const height = Math.max(
+    0.01,
+    whiteAreaBox.height * (1 - learnedOffset.top - learnedOffset.bottom),
+  );
   const cx = Math.max(0, Math.min(0.99, x));
   const cy = Math.max(0, Math.min(0.99, y));
   return {
@@ -2335,6 +2436,7 @@ async function detectPaperBoxByPixels(
       width: Math.min(1 - cx, width),
       height: Math.min(1 - cy, height),
     },
+    whiteAreaBox,
     paperOffset: learnedOffset,
   };
 }
