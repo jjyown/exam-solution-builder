@@ -15,7 +15,7 @@
   },
   "deploy": {
     "startCommand": "npm run start",
-    "healthcheckPath": "/api/auto-pipeline",
+    "healthcheckPath": "/api/health",
     "healthcheckTimeout": 30,
     "restartPolicyType": "ON_FAILURE",
     "restartPolicyMaxRetries": 3
