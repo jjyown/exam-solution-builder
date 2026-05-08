@@ -237,6 +237,11 @@ export default function EditPage() {
       }
       return next;
     });
+    // 다음 묶음 작업을 위해 묶음 관련 상태 초기화
+    // (시험명·범위 입력·체크 순서 편집 모두 이 묶음 한정 상태)
+    setExamName("");
+    setRangeText("");
+    setOrderEdit(null);
     setBulkBusy(false);
     if (failCount > 0) {
       alert(
