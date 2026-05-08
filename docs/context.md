@@ -1,6 +1,16 @@
 # 하이로드 수학 해설지 제작기 — 컨텍스트 노트
 
-- 문서 기준일: 2026-05-05
+- 문서 기준일: 2026-05-09
+
+## 자동 회고·개선 시스템 (2026-05-09 추가)
+
+누적된 `auto_pipeline_runs`(실행 로그) + `analysis_records`(시중교재 OCR) 를 분석해 **코드·프롬프트 개선 제안** 을 자동 생성:
+
+- **`src/lib/retrospective.ts`** — 분석기. 실패 카테고리·모델 성능·프롬프트 형식 미달·낮은 평점 케이스 추출 + 우선순위 분류된 `ImprovementSuggestion[]` 반환
+- **`GET /api/retrospective`** — 브라우저에서 즉시 조회 (JSON). `?days=7`, `?format=md` 등 쿼리 지원
+- **`npm run retrospective`** — CLI. `docs/retrospective/YYYY-MM-DD.md` 에 마크다운 리포트 저장
+- **개선 제안 카테고리**: 전체 성공률 / 모델 우선순위 / 프롬프트 형식 / 사용자 만족도 / RAG 자료 누적도 / API 한도·timeout·인증 에러
+- 주기 실행은 수동 (`npm run retrospective`) 또는 GitHub Actions cron 으로 확장 가능
 
 ## 제품·운영 컨텍스트
 

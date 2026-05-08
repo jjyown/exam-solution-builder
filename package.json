@@ -20,6 +20,7 @@
     "upload-solutions": "tsx scripts/upload-to-supabase.mts",
     "upload-solutions:watch": "tsx scripts/upload-to-supabase.mts --watch",
     "snapshot:compare": "tsx scripts/compare-supabase-snapshot.mts",
+    "retrospective": "tsx scripts/retrospective.mts",
     "graph:for-md": "tsx scripts/orchestrate-question-graph.mts",
     "build:md": "tsx scripts/build-markdown-assembly.mts",
     "build:md:agentic": "tsx scripts/build-markdown-assembly.mts --run-python-graphs",
