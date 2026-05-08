@@ -17,7 +17,13 @@
  *      - GEMINI_MODELS_OCR=gemini-2.0-flash,...
  * ────────────────────────────────────────────────────────────────────────────
  */
-import { recognizeMathpixFromImageBase64, resolveMathpixCredentials } from "./mathpixV3Text";
+import {
+  recognizeMathpixFromImageBase64,
+  resolveMathpixCredentials,
+  isMathpixUsableForOcr,
+  isMathpixQuotaError,
+  markMathpixExhausted,
+} from "./mathpixV3Text";
 import { extractTextWithGeminiVision, isGeminiVisionAvailable } from "./geminiVisionExtract";
 
 export type ExtractionResult =
@@ -66,41 +72,68 @@ async function extractFromImage(base64: string, mimeType: string): Promise<Extra
   const primary = extractionPrimary();
   const errors: string[] = [];
 
-  if (primary === "gemini" && isGeminiVisionAvailable()) {
+  // ── primary=mathpix 경로: 매쓰픽스 우선 → 소진 자동 감지 → Gemini 자동 전환 ──
+  if (primary === "mathpix") {
+    if (await isMathpixUsableForOcr()) {
+      const mp = await recognizeMathpixFromImageBase64(base64, mimeType);
+      if (mp.ok && mp.data.text?.trim()) {
+        return { ok: true, text: mp.data.text.trim(), source: "image-ocr" };
+      }
+      if (!mp.ok) {
+        if (isMathpixQuotaError(mp)) {
+          markMathpixExhausted(`HTTP ${mp.status}: ${mp.message.slice(0, 100)}`);
+          errors.push(`mathpix 소진 — Gemini 자동 전환`);
+        } else {
+          errors.push(`mathpix: ${mp.message}`);
+        }
+      } else {
+        errors.push(`mathpix: 빈 텍스트`);
+      }
+    } else {
+      errors.push("mathpix: 잔여 부족·1시간 백오프 중 — Gemini 사용");
+    }
+    // 매쓰픽스 실패/skip → Gemini 폴백
+    if (isGeminiVisionAvailable()) {
+      const r = await extractTextWithGeminiVision(base64, mimeType);
+      if (r.ok) return { ok: true, text: r.text, source: "image-gemini", model: r.model };
+      errors.push(`gemini-vision: ${r.error}`);
+    }
+    return { ok: false, error: errors.join(" | ") || "이미지 추출 실패" };
+  }
+
+  // ── primary=gemini 경로: Gemini 우선, 실패 시 Mathpix 폴백 ──
+  if (isGeminiVisionAvailable()) {
     const r = await extractTextWithGeminiVision(base64, mimeType);
     if (r.ok) {
       return { ok: true, text: r.text, source: "image-gemini", model: r.model };
     }
     errors.push(`gemini-vision: ${r.error}`);
-    // Gemini 한도 초과만 아니면 Mathpix 폴백 시도
-    if (!r.quotaExceeded && resolveMathpixCredentials()) {
+    // Gemini 한도 초과 + Mathpix 사용 가능하면 폴백
+    if (!r.quotaExceeded && (await isMathpixUsableForOcr())) {
       const mp = await recognizeMathpixFromImageBase64(base64, mimeType);
       if (mp.ok && mp.data.text?.trim()) {
         return { ok: true, text: mp.data.text.trim(), source: "image-ocr" };
+      }
+      if (!mp.ok && isMathpixQuotaError(mp)) {
+        markMathpixExhausted(`fallback HTTP ${mp.status}: ${mp.message.slice(0, 100)}`);
       }
       if (!mp.ok) errors.push(`mathpix: ${mp.message}`);
     }
     return { ok: false, error: errors.join(" | ") };
   }
 
-  // primary=mathpix 또는 Gemini 키 없을 때
-  if (resolveMathpixCredentials()) {
+  // Gemini 미설정 → Mathpix 직행
+  if (await isMathpixUsableForOcr()) {
     const mp = await recognizeMathpixFromImageBase64(base64, mimeType);
     if (mp.ok && mp.data.text?.trim()) {
       return { ok: true, text: mp.data.text.trim(), source: "image-ocr" };
     }
+    if (!mp.ok && isMathpixQuotaError(mp)) markMathpixExhausted(`HTTP ${mp.status}`);
     errors.push(`mathpix: ${mp.ok ? "빈 텍스트" : mp.message}`);
   } else {
     errors.push(
       "이미지 OCR 키가 없습니다 — GEMINI_API_KEY (권장) 또는 MATHPIX_APP_ID/KEY 가 필요합니다.",
     );
-  }
-
-  // Mathpix 실패 시 Gemini 한 번 더
-  if (isGeminiVisionAvailable()) {
-    const r = await extractTextWithGeminiVision(base64, mimeType);
-    if (r.ok) return { ok: true, text: r.text, source: "image-gemini", model: r.model };
-    errors.push(`gemini-vision: ${r.error}`);
   }
   return { ok: false, error: errors.join(" | ") || "이미지 추출 실패" };
 }
