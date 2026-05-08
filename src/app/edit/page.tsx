@@ -686,34 +686,46 @@ export default function EditPage() {
       height: (maxY - minY) / img.height,
     };
     setSlot(active.id, { cropNorm, error: undefined });
-    // 잘라낸 dataURL 도 만들기 (현재 표시 이미지 기준 — tainted 면 폴백)
-    const naturalBox = normToNaturalBox(
-      cropNorm,
-      img.naturalWidth,
-      img.naturalHeight,
-    );
+
+    // perspective warp — 4점이 만든 사각형(사다리꼴)을 직사각형으로 펼쳐 croppedDataUrl 저장
+    // display 좌표(점) → 자연 좌표 변환은 풀 dataURL 의 자연크기 기준
+    setSlot(active.id, { busy: "detecting" });
+    const fullSrc = active.sourceDataUrl?.startsWith("data:")
+      ? active.sourceDataUrl
+      : await ensureFullDataUrlSource(active.id);
+    if (!fullSrc) {
+      setSlot(active.id, { busy: null, error: "풀 원본 다운로드 실패" });
+      setCornerPoints([]);
+      return;
+    }
     try {
-      const croppedDataUrl = captureCrop(img, naturalBox);
-      setSlot(active.id, { croppedDataUrl });
-    } catch {
-      // CDN URL 로 tainted — 풀 dataURL 받아 재시도
-      const fullSrc = await ensureFullDataUrlSource(active.id);
-      if (fullSrc) {
-        try {
-          const fullImg = await loadImage(fullSrc);
-          const fullBox = normToNaturalBox(
-            cropNorm,
-            fullImg.naturalWidth,
-            fullImg.naturalHeight,
-          );
-          const croppedDataUrl = captureCrop(fullImg, fullBox);
-          setSlot(active.id, { croppedDataUrl });
-        } catch {
-          /* silent */
-        }
+      const fullImg = await loadImage(fullSrc);
+      const scaleX = fullImg.naturalWidth / img.width;
+      const scaleY = fullImg.naturalHeight / img.height;
+      const cornersNatural: QuadPoint[] = next.map((p) => ({
+        x: p.x * scaleX,
+        y: p.y * scaleY,
+      }));
+      const warped = await warpPerspective(fullImg, cornersNatural);
+      setSlot(active.id, { croppedDataUrl: warped, busy: null });
+    } catch (e) {
+      // perspective 실패 시 일반 자르기 폴백
+      try {
+        const fullImg = await loadImage(fullSrc);
+        const fullBox = normToNaturalBox(
+          cropNorm,
+          fullImg.naturalWidth,
+          fullImg.naturalHeight,
+        );
+        const croppedDataUrl = captureCrop(fullImg, fullBox);
+        setSlot(active.id, { croppedDataUrl, busy: null });
+      } catch {
+        setSlot(active.id, {
+          busy: null,
+          error: `4점 변환 실패: ${(e as Error).message}`,
+        });
       }
     }
-    // 점 초기화 — 다음 슬롯/다음 영역 마킹 가능하도록
     setCornerPoints([]);
   }
 
@@ -2078,6 +2090,187 @@ async function detectPaperBoxByPixels(imageDataUrl: string): Promise<CropNorm | 
   const height = Math.min(1 - y, (bestEnd - bestStart + 1) / sampleH);
   if (width < 0.2 || height < 0.2) return null;
   return { x, y, width, height };
+}
+
+// ── 4점 perspective correction ───────────────────────────────────────────
+// 4개 모서리 좌표 → 직사각형으로 펼친 dataURL (시험지 사다리꼴 보정용)
+
+type QuadPoint = { x: number; y: number };
+
+/**
+ * 4개 점을 (TL, TR, BR, BL) 시계방향 순서로 정렬.
+ * y 작은 2개 = 위, 큰 2개 = 아래. 각 쌍 안에서 x 작은 게 왼쪽.
+ */
+function sortQuadrilateral(pts: QuadPoint[]): {
+  tl: QuadPoint;
+  tr: QuadPoint;
+  br: QuadPoint;
+  bl: QuadPoint;
+} {
+  const byY = [...pts].sort((a, b) => a.y - b.y);
+  const top = byY.slice(0, 2).sort((a, b) => a.x - b.x);
+  const bot = byY.slice(2, 4).sort((a, b) => a.x - b.x);
+  return { tl: top[0], tr: top[1], bl: bot[0], br: bot[1] };
+}
+
+/**
+ * Gauss-Jordan elimination 으로 n×n 선형 시스템 Ax=b 해 반환. 특이행렬이면 [].
+ */
+function solveLinearSystem(A: number[][], b: number[]): number[] {
+  const n = b.length;
+  const M = A.map((row, i) => [...row, b[i]]);
+  for (let i = 0; i < n; i += 1) {
+    // 부분 피벗팅
+    let pivot = i;
+    for (let k = i + 1; k < n; k += 1) {
+      if (Math.abs(M[k][i]) > Math.abs(M[pivot][i])) pivot = k;
+    }
+    [M[i], M[pivot]] = [M[pivot], M[i]];
+    if (Math.abs(M[i][i]) < 1e-12) return [];
+    for (let k = i + 1; k < n; k += 1) {
+      const f = M[k][i] / M[i][i];
+      for (let j = i; j <= n; j += 1) M[k][j] -= f * M[i][j];
+    }
+  }
+  const x = new Array<number>(n);
+  for (let i = n - 1; i >= 0; i -= 1) {
+    let s = M[i][n];
+    for (let j = i + 1; j < n; j += 1) s -= M[i][j] * x[j];
+    x[i] = s / M[i][i];
+  }
+  return x;
+}
+
+/**
+ * src 4개 점 → dst 4개 점에 대응하는 homography 행렬 H (3x3, h33=1) 의 8개 계수 반환.
+ * dst 좌표를 src 좌표로 변환하려면 src→dst 행렬의 역행렬 필요. 호출자가 src/dst 순서 결정.
+ */
+function computeHomographyCoeffs(
+  src: QuadPoint[],
+  dst: QuadPoint[],
+): number[] {
+  const A: number[][] = [];
+  const b: number[] = [];
+  for (let i = 0; i < 4; i += 1) {
+    const { x, y } = src[i];
+    const { x: u, y: v } = dst[i];
+    A.push([x, y, 1, 0, 0, 0, -u * x, -u * y]);
+    b.push(u);
+    A.push([0, 0, 0, x, y, 1, -v * x, -v * y]);
+    b.push(v);
+  }
+  return solveLinearSystem(A, b);
+}
+
+/**
+ * srcImg 의 4개 모서리(자연 좌표)를 시계방향 정렬된 직사각형으로 perspective warp.
+ * 출력 캔버스 크기는 src 4점에서 산출한 평균 너비/높이.
+ * 반환: 변환된 직사각형 이미지의 dataURL (image/jpeg, 0.92).
+ *
+ * 수학:
+ *   dst→src 의 homography H' 로 dst 픽셀 (x,y) 마다 src 좌표 (sx,sy) 계산.
+ *   bilinear interpolation 으로 부드럽게 샘플.
+ *   sx = (h0*x + h1*y + h2) / (h6*x + h7*y + 1)
+ *   sy = (h3*x + h4*y + h5) / (h6*x + h7*y + 1)
+ */
+async function warpPerspective(
+  srcImg: HTMLImageElement,
+  cornersNatural: QuadPoint[],
+): Promise<string> {
+  if (cornersNatural.length !== 4) throw new Error("4점 필요");
+  const { tl, tr, br, bl } = sortQuadrilateral(cornersNatural);
+  const dist = (a: QuadPoint, b: QuadPoint) =>
+    Math.hypot(a.x - b.x, a.y - b.y);
+  // 출력 직사각형 크기 — 좌·우변 평균, 상·하변 평균
+  const widthTop = dist(tl, tr);
+  const widthBot = dist(bl, br);
+  const heightLeft = dist(tl, bl);
+  const heightRight = dist(tr, br);
+  const outW = Math.round(Math.max(widthTop, widthBot));
+  const outH = Math.round(Math.max(heightLeft, heightRight));
+  if (outW < 50 || outH < 50) throw new Error("출력 크기가 너무 작음");
+
+  // dst 사각형 (시계방향) — TL, TR, BR, BL
+  const dst: QuadPoint[] = [
+    { x: 0, y: 0 },
+    { x: outW, y: 0 },
+    { x: outW, y: outH },
+    { x: 0, y: outH },
+  ];
+  const src: QuadPoint[] = [tl, tr, br, bl];
+
+  // dst→src 역변환 행렬 (각 출력 픽셀이 어느 원본 픽셀에서 오는지)
+  const h = computeHomographyCoeffs(dst, src);
+  if (h.length !== 8) throw new Error("homography 계산 실패 (특이행렬)");
+
+  // 원본 픽셀 데이터 추출
+  const srcCanvas = document.createElement("canvas");
+  srcCanvas.width = srcImg.naturalWidth;
+  srcCanvas.height = srcImg.naturalHeight;
+  const srcCtx = srcCanvas.getContext("2d");
+  if (!srcCtx) throw new Error("canvas context 실패");
+  srcCtx.drawImage(srcImg, 0, 0);
+  let srcData: Uint8ClampedArray;
+  try {
+    srcData = srcCtx.getImageData(0, 0, srcImg.naturalWidth, srcImg.naturalHeight).data;
+  } catch {
+    throw new Error("이미지 픽셀 접근 실패 (CORS) — 풀 dataURL 다시 받아주세요");
+  }
+
+  // 출력 캔버스
+  const outCanvas = document.createElement("canvas");
+  outCanvas.width = outW;
+  outCanvas.height = outH;
+  const outCtx = outCanvas.getContext("2d");
+  if (!outCtx) throw new Error("canvas context 실패");
+  const outImgData = outCtx.createImageData(outW, outH);
+  const out = outImgData.data;
+
+  const sw = srcImg.naturalWidth;
+  const sh = srcImg.naturalHeight;
+
+  // dst 픽셀별 → src 좌표 → bilinear 샘플
+  for (let y = 0; y < outH; y += 1) {
+    for (let x = 0; x < outW; x += 1) {
+      const denom = h[6] * x + h[7] * y + 1;
+      const sx = (h[0] * x + h[1] * y + h[2]) / denom;
+      const sy = (h[3] * x + h[4] * y + h[5]) / denom;
+      if (sx < 0 || sx > sw - 1 || sy < 0 || sy > sh - 1) continue;
+      const x0 = Math.floor(sx);
+      const y0 = Math.floor(sy);
+      const x1 = Math.min(sw - 1, x0 + 1);
+      const y1 = Math.min(sh - 1, y0 + 1);
+      const dx = sx - x0;
+      const dy = sy - y0;
+      const w00 = (1 - dx) * (1 - dy);
+      const w10 = dx * (1 - dy);
+      const w01 = (1 - dx) * dy;
+      const w11 = dx * dy;
+      const i00 = (y0 * sw + x0) * 4;
+      const i10 = (y0 * sw + x1) * 4;
+      const i01 = (y1 * sw + x0) * 4;
+      const i11 = (y1 * sw + x1) * 4;
+      const di = (y * outW + x) * 4;
+      out[di] =
+        srcData[i00] * w00 +
+        srcData[i10] * w10 +
+        srcData[i01] * w01 +
+        srcData[i11] * w11;
+      out[di + 1] =
+        srcData[i00 + 1] * w00 +
+        srcData[i10 + 1] * w10 +
+        srcData[i01 + 1] * w01 +
+        srcData[i11 + 1] * w11;
+      out[di + 2] =
+        srcData[i00 + 2] * w00 +
+        srcData[i10 + 2] * w10 +
+        srcData[i01 + 2] * w01 +
+        srcData[i11 + 2] * w11;
+      out[di + 3] = 255;
+    }
+  }
+  outCtx.putImageData(outImgData, 0, 0);
+  return outCanvas.toDataURL("image/jpeg", 0.92);
 }
 
 async function loadImage(dataUrl: string): Promise<HTMLImageElement> {
