@@ -71,6 +71,8 @@ type Slot = {
   /** 자연 좌표 박스 — 비어있으면 미설정. 자르기 결과 imageDataUrl 도 같이 보관 */
   /** 자른 영역 — 정규화 0~1 좌표. null 이면 미설정. 이미지 해상도 변경에 안전. */
   cropNorm: CropNorm | null;
+  /** 자동 검출 시 산출된 태블릿 화면 대비 종이 마진 — 묶음 학습·히스토리 누적용 */
+  paperOffset?: PaperOffset;
   croppedDataUrl: string | null;
   /** Gemini 가 추출해 준 시험명 한 줄 — 「묶음 이름」으로 사용 가능 */
   suggestedName: string | null;
@@ -798,6 +800,70 @@ export default function EditPage() {
    */
   const FAST_BOX_DEFAULT: CropNorm = { x: 0.01, y: 0.08, width: 0.98, height: 0.86 };
 
+  // ── 검출 히스토리 — 사용자 검토·업로드 거친 박스 누적해 평균 학습 ─────
+  // 사용자 인사이트: 「영역이 잡히면 한번 검토하는 과정을 거치니 자료가 쌓인다」.
+  // Drive 업로드(최종 확정) 시점에 cropNorm + paperOffset 을 localStorage 에 누적.
+  // 다음 자동 검출에서 history median 을 seed 로 사용 → 일관성 + 픽셀 분석 흔들림 보정.
+  const HISTORY_KEY = "edit_paper_offset_history_v1";
+  const HISTORY_MAX = 50;
+  type HistorySample = {
+    cropNorm: CropNorm;
+    paperOffset?: PaperOffset;
+    t: number;
+  };
+  const [historyCount, setHistoryCount] = useState(0);
+
+  function loadHistory(): HistorySample[] {
+    try {
+      const raw = window.localStorage.getItem(HISTORY_KEY);
+      if (!raw) return [];
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed.slice(-HISTORY_MAX) : [];
+    } catch {
+      return [];
+    }
+  }
+  function saveHistorySamples(samples: HistorySample[]): void {
+    if (samples.length === 0) return;
+    const all = [...loadHistory(), ...samples].slice(-HISTORY_MAX);
+    try {
+      window.localStorage.setItem(HISTORY_KEY, JSON.stringify(all));
+      setHistoryCount(all.length);
+    } catch {
+      /* silent */
+    }
+  }
+  function clearHistory(): void {
+    try {
+      window.localStorage.removeItem(HISTORY_KEY);
+      setHistoryCount(0);
+    } catch {
+      /* silent */
+    }
+  }
+  function median(arr: number[]): number {
+    if (arr.length === 0) return 0;
+    const s = [...arr].sort((a, b) => a - b);
+    const m = Math.floor(s.length / 2);
+    return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+  }
+  /** 히스토리에서 paperOffset 의 중앙값 — 5개 이상 누적되면 사용 */
+  function medianPaperOffset(): PaperOffset | null {
+    const h = loadHistory().filter((s) => s.paperOffset);
+    if (h.length < 5) return null;
+    return {
+      top: median(h.map((s) => s.paperOffset!.top)),
+      bottom: median(h.map((s) => s.paperOffset!.bottom)),
+      left: median(h.map((s) => s.paperOffset!.left)),
+      right: median(h.map((s) => s.paperOffset!.right)),
+    };
+  }
+
+  // 마운트 시 히스토리 카운트 동기화
+  useEffect(() => {
+    setHistoryCount(loadHistory().length);
+  }, []);
+
   async function detectBoxForSlot(s: Slot): Promise<void> {
     setSlot(s.id, { busy: "detecting", error: undefined });
     // 풀 소스가 이미 dataURL 이면 그대로, 아니면 잠깐 받아 자른다.
@@ -848,19 +914,21 @@ export default function EditPage() {
     }
     setBulkBusy(true);
     const processed: Slot[] = [];
-    // 묶음 학습 — 첫 성공 검출의 paperOffset 을 다른 슬롯에 재사용
-    // → 같은 묶음에서 일관된 종이 위치 확보 + 검출 실패율 ↓
-    let learnedOffset: PaperOffset | null = null;
+    // 묶음 학습 — 첫 성공 검출의 paperOffset 을 다른 슬롯에 재사용.
+    // 누적 히스토리(검토·업로드 끝난 과거 데이터) 가 5개 이상이면 그 median 으로 시드 →
+    //   첫 슬롯도 픽셀 분석 대신 학습된 offset 적용 → 더 일관된 결과.
+    let learnedOffset: PaperOffset | null = medianPaperOffset();
     try {
       for (const s of targets) {
         // eslint-disable-next-line no-await-in-loop
         const src = await ensureFullDataUrlSource(s.id);
         if (!src) continue;
-        // 1차: 픽셀 분석 (첫 슬롯은 학습, 이후는 학습된 offset 적용)
+        // 1차: 픽셀 분석 (학습된 offset 있으면 Stage 2 대신 적용)
         // eslint-disable-next-line no-await-in-loop
         const detection = await detectPaperBoxByPixels(src, learnedOffset);
         // 2차: 감지 실패 시 기본 비율 폴백
         const cropNorm = detection?.cropNorm ?? FAST_BOX_DEFAULT;
+        const paperOffset = detection?.paperOffset ?? learnedOffset ?? undefined;
         if (detection && !learnedOffset) {
           learnedOffset = detection.paperOffset;
         }
@@ -873,10 +941,10 @@ export default function EditPage() {
             img.naturalHeight,
           );
           const croppedDataUrl = captureCrop(img, naturalBox);
-          setSlot(s.id, { cropNorm, croppedDataUrl });
-          processed.push({ ...s, cropNorm, croppedDataUrl });
+          setSlot(s.id, { cropNorm, croppedDataUrl, paperOffset });
+          processed.push({ ...s, cropNorm, croppedDataUrl, paperOffset });
         } catch {
-          setSlot(s.id, { cropNorm });
+          setSlot(s.id, { cropNorm, paperOffset });
         }
       }
     } finally {
@@ -1179,6 +1247,15 @@ export default function EditPage() {
       const data = await res.json();
       if (!data.ok) throw new Error(data.error || "업로드 실패");
       setSaveResult({ ok: true, link: data.webViewLink, name: data.name });
+      // 사용자 검토를 거쳐 업로드된 박스들을 히스토리에 누적 → 다음 자동 검출 시드로 사용
+      const checkedConfirmed = slots
+        .filter((s) => s.cropNorm && s.includeInPdf && s.croppedDataUrl)
+        .map<HistorySample>((s) => ({
+          cropNorm: s.cropNorm!,
+          paperOffset: s.paperOffset,
+          t: Date.now(),
+        }));
+      saveHistorySamples(checkedConfirmed);
     } catch (e) {
       setSaveResult({ ok: false, error: (e as Error).message });
     } finally {
@@ -1651,10 +1728,28 @@ export default function EditPage() {
                   onClick={detectAllBoxes}
                   disabled={bulkBusy || slots.every((s) => s.cropNorm)}
                   className="rounded-md border border-indigo-300 bg-white px-3 py-1.5 text-xs font-semibold text-indigo-800 hover:bg-indigo-50 disabled:opacity-50"
-                  title="체크된 모든 페이지의 시험지 종이 영역을 자동 검출 — 베젤·앱 UI 자동 제외. 끝나면 첫 페이지 헤더에서 학교명도 자동 추출 (묶음 이름 비어있을 때만)"
+                  title={
+                    historyCount >= 5
+                      ? `히스토리 ${historyCount}개로 학습된 평균 위치 사용 + 베젤·앱 UI 자동 제외. 끝나면 첫 페이지 헤더에서 학교명도 자동 추출`
+                      : `체크된 모든 페이지의 시험지 종이 영역을 픽셀 분석으로 자동 검출 — 끝나면 학교명도 자동 추출. Drive 업로드 시 박스 위치가 누적돼 점점 정확해짐`
+                  }
                 >
-                  {bulkBusy ? "처리 중…" : "🔍 전체 자동 감지 + 학교명"}
+                  {bulkBusy
+                    ? "처리 중…"
+                    : `🔍 전체 자동 감지 + 학교명${historyCount >= 5 ? ` (학습 ${historyCount})` : ""}`}
                 </button>
+                {historyCount >= 5 && (
+                  <button
+                    onClick={() => {
+                      if (confirm(`학습된 박스 히스토리 ${historyCount}개를 모두 삭제합니다. 진행할까요?\n\n(태블릿·카메라 셋업이 바뀌었을 때 사용)`))
+                        clearHistory();
+                    }}
+                    className="rounded border border-slate-300 bg-white px-1.5 py-1.5 text-[10px] font-semibold text-slate-500 hover:bg-slate-50"
+                    title="학습 히스토리 초기화 — 태블릿/카메라 셋업이 바뀌었을 때 사용"
+                  >
+                    학습 ↺
+                  </button>
+                )}
                 <button
                   onClick={mimicBoxFromActive}
                   disabled={!active?.cropNorm || bulkBusy}
