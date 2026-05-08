@@ -159,7 +159,21 @@ let exhaustedUntilMs = 0;
 let cachedUsage: { fetchedAtMs: number; data: MathpixAccountUsage | null } | null = null;
 
 const USAGE_CACHE_MS = 5 * 60 * 1000; // 5분 캐시
-const EXHAUSTED_BACKOFF_MS = 60 * 60 * 1000; // 소진 감지 후 1시간 비활성
+
+/**
+ * 소진 감지 후 비활성 시간 (ms).
+ *  - 디폴트: `Number.MAX_SAFE_INTEGER` = 영구 (프로세스 재시작 전까지 매쓰픽스 안 씀)
+ *  - 사용자 의도: 「소진하면 이제 사용 안 함」
+ *  - 충전 후 다시 쓰고 싶으면:
+ *      1) 서버 재시작 (Railway 재배포 시 자동 초기화)
+ *      2) 또는 GET /api/mathpix-status?resetExhaustion=1 호출
+ *      3) 또는 MATHPIX_RETRY_AFTER_EXHAUSTION_MIN env 로 자동 재시도 분 설정
+ */
+const EXHAUSTED_BACKOFF_MS = (() => {
+  const raw = Number(process.env.MATHPIX_RETRY_AFTER_EXHAUSTION_MIN);
+  if (Number.isFinite(raw) && raw > 0) return raw * 60 * 1000;
+  return Number.MAX_SAFE_INTEGER;
+})();
 const MATHPIX_LOW_THRESHOLD = (() => {
   const raw = Number(process.env.MATHPIX_LOW_THRESHOLD);
   return Number.isFinite(raw) && raw > 0 ? raw : 50;
@@ -232,10 +246,28 @@ export function isMathpixExhausted(): boolean {
 }
 
 export function markMathpixExhausted(reason?: string): void {
-  exhaustedUntilMs = Date.now() + EXHAUSTED_BACKOFF_MS;
-  if (reason && process.env.NODE_ENV !== "production") {
-    console.log(`[mathpix] marked exhausted (${reason}) — back off for 1 hour`);
+  // EXHAUSTED_BACKOFF_MS 가 MAX_SAFE_INTEGER 면 사실상 영구. 그대로 더하면 overflow → 그대로 사용.
+  exhaustedUntilMs =
+    EXHAUSTED_BACKOFF_MS >= Number.MAX_SAFE_INTEGER
+      ? Number.MAX_SAFE_INTEGER
+      : Date.now() + EXHAUSTED_BACKOFF_MS;
+  if (reason) {
+    const dur =
+      EXHAUSTED_BACKOFF_MS >= Number.MAX_SAFE_INTEGER
+        ? "영구 (재시작 또는 reset 까지)"
+        : `${(EXHAUSTED_BACKOFF_MS / 60000) | 0}분`;
+    console.log(`[mathpix] marked exhausted (${reason}) — disabled for ${dur}`);
   }
+}
+
+/**
+ * 소진 마킹을 수동 해제. 매쓰픽스 충전 후 다시 사용하려는 경우 호출.
+ * Usage 캐시도 같이 무효화하여 다음 호출에서 최신 잔여 재조회.
+ */
+export function resetMathpixExhausted(): void {
+  exhaustedUntilMs = 0;
+  cachedUsage = null;
+  console.log(`[mathpix] exhaustion reset — Mathpix re-enabled`);
 }
 
 export function getMathpixExhaustedUntilMs(): number {

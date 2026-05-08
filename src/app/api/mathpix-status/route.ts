@@ -26,11 +26,17 @@ import {
   isMathpixExhausted,
   getMathpixExhaustedUntilMs,
   resolveMathpixCredentials,
+  resetMathpixExhausted,
 } from "@/lib/mathpixV3Text";
 
 export async function GET(req: Request) {
   const url = new URL(req.url);
   const force = /^(1|true)$/i.test(url.searchParams.get("force") ?? "");
+  // 충전 후 매쓰픽스 다시 활성화 — ?resetExhaustion=1
+  const resetExhaustion = /^(1|true)$/i.test(url.searchParams.get("resetExhaustion") ?? "");
+  if (resetExhaustion) {
+    resetMathpixExhausted();
+  }
 
   const configured = !!resolveMathpixCredentials();
   const exhausted = isMathpixExhausted();
@@ -45,12 +51,21 @@ export async function GET(req: Request) {
     return v === "mathpix" ? "mathpix" : "gemini";
   })();
 
+  // exhaustedUntilMs 가 MAX_SAFE_INTEGER 이면 ISO 변환 X (Date 가 invalid)
+  const isPermanent = exhaustedUntilMs >= Number.MAX_SAFE_INTEGER;
+  const exhaustedUntilIso =
+    !exhaustedUntilMs || isPermanent
+      ? null
+      : new Date(exhaustedUntilMs).toISOString();
+
   return NextResponse.json({
     ok: true,
     configured,
     exhausted,
     exhaustedUntilMs,
-    exhaustedUntilIso: exhaustedUntilMs ? new Date(exhaustedUntilMs).toISOString() : null,
+    exhaustedUntilIso,
+    exhaustedPermanent: isPermanent,
+    resetPerformed: resetExhaustion,
     usage: usage
       ? {
           callsThisPeriod: usage.callsThisPeriod,
@@ -60,5 +75,8 @@ export async function GET(req: Request) {
       : null,
     lowThreshold,
     primary,
+    hint: isPermanent && exhausted
+      ? "매쓰픽스 영구 비활성 상태. 충전 후 다시 쓰려면 ?resetExhaustion=1 또는 서버 재시작."
+      : undefined,
   });
 }
