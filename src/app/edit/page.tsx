@@ -96,6 +96,10 @@ export default function EditPage() {
     null | { ok: true; link: string; name: string } | { ok: false; error: string }
   >(null);
   const [crop, setCrop] = useState<Crop>();
+  /** 4점 클릭 모드 — 모서리 4개 찍으면 그 점들로 둘러싼 사각형으로 cropNorm 자동 설정 */
+  const [pointMode, setPointMode] = useState(false);
+  /** 클릭으로 찍은 모서리 점들 (display 좌표). 4개 채워지면 자동 적용. */
+  const [cornerPoints, setCornerPoints] = useState<Array<{ x: number; y: number }>>([]);
   const imgRef = useRef<HTMLImageElement | null>(null);
 
   // Drive 「시험지 원안」 폴더
@@ -646,6 +650,81 @@ export default function EditPage() {
     ctx.drawImage(imageEl, box.x, box.y, box.width, box.height, 0, 0, canvas.width, canvas.height);
     return canvas.toDataURL("image/jpeg", 0.92);
   }
+
+  /**
+   * 4점 클릭 모드 — 캔버스 영역 클릭 시 점 추가. 4번째 클릭이면 자동 적용.
+   * 점들의 axis-aligned bounding rectangle 을 cropNorm 으로 저장.
+   * (perspective 보정은 추후 — 우선 사각 범위만)
+   */
+  async function handlePointClick(e: React.MouseEvent<HTMLDivElement>) {
+    if (!pointMode || !active || !imgRef.current) return;
+    const img = imgRef.current;
+    const rect = img.getBoundingClientRect();
+    const px = e.clientX - rect.left;
+    const py = e.clientY - rect.top;
+    if (px < 0 || px > img.width || py < 0 || py > img.height) return;
+    const next = [...cornerPoints, { x: px, y: py }];
+    setCornerPoints(next);
+    if (next.length < 4) return;
+
+    // 4점 모임 → bounding rect 계산 후 cropNorm 적용
+    const xs = next.map((p) => p.x);
+    const ys = next.map((p) => p.y);
+    const minX = Math.min(...xs);
+    const maxX = Math.max(...xs);
+    const minY = Math.min(...ys);
+    const maxY = Math.max(...ys);
+    if (maxX - minX < 10 || maxY - minY < 10 || !img.width || !img.height) {
+      // 너무 작거나 이미지 크기 모름 — 점만 초기화하고 종료
+      setCornerPoints([]);
+      return;
+    }
+    const cropNorm: CropNorm = {
+      x: minX / img.width,
+      y: minY / img.height,
+      width: (maxX - minX) / img.width,
+      height: (maxY - minY) / img.height,
+    };
+    setSlot(active.id, { cropNorm, error: undefined });
+    // 잘라낸 dataURL 도 만들기 (현재 표시 이미지 기준 — tainted 면 폴백)
+    const naturalBox = normToNaturalBox(
+      cropNorm,
+      img.naturalWidth,
+      img.naturalHeight,
+    );
+    try {
+      const croppedDataUrl = captureCrop(img, naturalBox);
+      setSlot(active.id, { croppedDataUrl });
+    } catch {
+      // CDN URL 로 tainted — 풀 dataURL 받아 재시도
+      const fullSrc = await ensureFullDataUrlSource(active.id);
+      if (fullSrc) {
+        try {
+          const fullImg = await loadImage(fullSrc);
+          const fullBox = normToNaturalBox(
+            cropNorm,
+            fullImg.naturalWidth,
+            fullImg.naturalHeight,
+          );
+          const croppedDataUrl = captureCrop(fullImg, fullBox);
+          setSlot(active.id, { croppedDataUrl });
+        } catch {
+          /* silent */
+        }
+      }
+    }
+    // 점 초기화 — 다음 슬롯/다음 영역 마킹 가능하도록
+    setCornerPoints([]);
+  }
+
+  function clearPointMarkers(): void {
+    setCornerPoints([]);
+  }
+
+  // 활성 슬롯 변경 또는 모드 토글 시 점 초기화
+  useEffect(() => {
+    setCornerPoints([]);
+  }, [activeId, pointMode]);
 
   async function handleCropComplete(sel: PixelCrop) {
     if (!active || !imgRef.current) return;
@@ -1523,6 +1602,27 @@ export default function EditPage() {
                 >
                   🪄 기준 박스로 모방
                 </button>
+                <button
+                  onClick={() => setPointMode((v) => !v)}
+                  disabled={!active}
+                  className={`rounded-md border px-3 py-1.5 text-xs font-semibold disabled:opacity-50 ${
+                    pointMode
+                      ? "border-amber-700 bg-amber-500 text-white hover:bg-amber-600"
+                      : "border-amber-300 bg-white text-amber-800 hover:bg-amber-50"
+                  }`}
+                  title="모서리 4개를 클릭하면 그 점들로 둘러싼 영역이 박스로 자동 설정됩니다"
+                >
+                  📍 4점 클릭{pointMode ? ` (${cornerPoints.length}/4)` : ""}
+                </button>
+                {pointMode && cornerPoints.length > 0 && (
+                  <button
+                    onClick={clearPointMarkers}
+                    className="rounded-md border border-slate-300 bg-white px-2 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+                    title="찍은 점 모두 초기화"
+                  >
+                    초기화
+                  </button>
+                )}
                 <span className="mx-1 h-5 w-px bg-slate-200" />
                 <button
                   onClick={suggestNameForActive}
@@ -1592,20 +1692,90 @@ export default function EditPage() {
               {active ? (
                 active.sourceDataUrl ? (
                   <div className="overflow-auto rounded border border-slate-200 bg-slate-50 p-2">
-                    <ReactCrop
-                      crop={crop}
-                      onChange={(_, percentCrop) => setCrop(percentCrop)}
-                      onComplete={handleCropComplete}
-                    >
-                      {/* eslint-disable-next-line @next/next/no-img-element */}
-                      <img
-                        ref={imgRef}
-                        src={active.sourceDataUrl}
-                        alt={active.sourceLabel}
-                        className="block max-w-full"
-                        onLoad={() => setImgLoadTick((t) => t + 1)}
-                      />
-                    </ReactCrop>
+                    {pointMode ? (
+                      // 4점 클릭 모드 — ReactCrop 비활성, 클릭 캡처 + SVG 오버레이
+                      <div
+                        className="relative inline-block cursor-crosshair"
+                        onClick={handlePointClick}
+                      >
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                        <img
+                          ref={imgRef}
+                          src={active.sourceDataUrl}
+                          alt={active.sourceLabel}
+                          className="block max-w-full select-none"
+                          draggable={false}
+                          onLoad={() => setImgLoadTick((t) => t + 1)}
+                        />
+                        {/* 점 + 연결선 SVG 오버레이 */}
+                        {imgRef.current && (
+                          <svg
+                            className="pointer-events-none absolute left-0 top-0"
+                            width={imgRef.current.width}
+                            height={imgRef.current.height}
+                          >
+                            {cornerPoints.length > 1 && (
+                              <polyline
+                                points={cornerPoints.map((p) => `${p.x},${p.y}`).join(" ")}
+                                fill="none"
+                                stroke="rgba(245, 158, 11, 0.9)"
+                                strokeWidth={2}
+                                strokeDasharray="4 3"
+                              />
+                            )}
+                            {cornerPoints.length === 4 && (
+                              // 4번째 점 → 1번째로 닫힘선
+                              <line
+                                x1={cornerPoints[3].x}
+                                y1={cornerPoints[3].y}
+                                x2={cornerPoints[0].x}
+                                y2={cornerPoints[0].y}
+                                stroke="rgba(245, 158, 11, 0.9)"
+                                strokeWidth={2}
+                                strokeDasharray="4 3"
+                              />
+                            )}
+                            {cornerPoints.map((p, i) => (
+                              <g key={i}>
+                                <circle
+                                  cx={p.x}
+                                  cy={p.y}
+                                  r={8}
+                                  fill="rgba(245, 158, 11, 0.95)"
+                                  stroke="white"
+                                  strokeWidth={2}
+                                />
+                                <text
+                                  x={p.x}
+                                  y={p.y + 3}
+                                  textAnchor="middle"
+                                  fontSize={10}
+                                  fontWeight="bold"
+                                  fill="white"
+                                >
+                                  {i + 1}
+                                </text>
+                              </g>
+                            ))}
+                          </svg>
+                        )}
+                      </div>
+                    ) : (
+                      <ReactCrop
+                        crop={crop}
+                        onChange={(_, percentCrop) => setCrop(percentCrop)}
+                        onComplete={handleCropComplete}
+                      >
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                        <img
+                          ref={imgRef}
+                          src={active.sourceDataUrl}
+                          alt={active.sourceLabel}
+                          className="block max-w-full"
+                          onLoad={() => setImgLoadTick((t) => t + 1)}
+                        />
+                      </ReactCrop>
+                    )}
                   </div>
                 ) : (
                   <div className="rounded border border-emerald-200 bg-emerald-50 p-6 text-center text-xs text-emerald-900">
