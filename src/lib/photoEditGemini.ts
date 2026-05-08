@@ -269,34 +269,60 @@ export async function geminiMimicCropBox(
 }
 
 // ─── 3) 학교명·시험명 한 줄 형식 추출 ──────────────────────────────────────
-const PROMPT_EXAM_NAME = `이미지의 제목/헤더를 읽어 시험지 한 줄 형식으로 만드세요.
-중요: 이전 답변·예시 복사 금지. 오직 현재 이미지에서 읽힌 텍스트만 사용.
+//
+// 환각 방지 핵심: Gemini 가 raw 헤더 텍스트를 먼저 quote 하게 한 뒤,
+// 우리가 직접 regex 로 deterministic 하게 변환한다. AI 의 formatted 결과는 폴백.
+//
+// 표준 헤더 패턴:
+//   중학교  : [YYYY] 학교명 (지역) N-M 중간|기말 수학 족보
+//   고1     : [YYYY] 학교명 (지역) N-M 중간|기말 수학 족보
+//   고2/고3 : [YYYY] 학교명 (지역) N-M 중간|기말 [과목] 족보
+//             (과목: 수학1·수학2·대수·미적분1·미적분·미적분2·확률과 통계·기하)
+//
+// 변환 결과:
+//   중2) 2020 부산 부산진구 동평여자중학교 2학년 1학기 기말고사
+//   고2) 2020 부산진구 부산진고등학교 수학1 2학년 1학기 중간고사
+const PROMPT_EXAM_NAME = `당신은 시험지 헤더에서 학교명·시험 정보를 정확히 읽는 일을 합니다.
+**이전 답변·예시 복사 금지. 다른 학교 이름으로 절대 바꾸지 말 것.**
 
-이미지가 두 장 주어지면:
- - 1번 이미지 = 시험지 전체. 연도·지역·학기 등 컨텍스트.
- - 2번 이미지 = 학교명/헤더 영역만 확대한 크롭 (사용자가 표시한 정확 위치).
- → **2번 이미지에서 정확한 학교명 텍스트를 읽고, 1번 이미지에서 부족한 정보(연도·지역·학년·학기)를 보강**해
-   아래 형식 한 줄로 합쳐 출력.
+이미지가 두 장이면:
+ - 1번 = 시험지 전체 (연도·지역·학년·학기 컨텍스트)
+ - 2번 = 학교명 영역만 확대 (정확한 학교명 OCR 용)
 
-출력 형식:
-[중|고]n) [YYYY(이미지에 시험 연도·학년도가 보일 때만, 4자리)] [지역(시/군/구)] [학교명] [과목(선택)] N학년 M학기 [중간고사|기말고사]
-예: 중1) 2025 도봉구 창동중학교 1학년 2학기 중간고사
-예: 고2) 2021 세종시 반곡고등학교 확률과 통계 2학년 1학기 중간고사
-예: 고2) 2022 부산진구 부산진고등학교 수학2 2학년 1학기 기말고사
-예: 중2) 2020 부산진구 광무여자중학교 2학년 1학기 기말고사
+표준 헤더 패턴(시험지 상단 한 줄):
+  [YYYY 기출?] 학교명 (지역) N-M 중간|기말 [과목(고2/3 만)] 족보
+  예: [2020년 기출] 동평여자중학교 (부산 부산진구) 2-1 기말 수학 족보
+  예: [2022 기출] 부산진고등학교 (부산진구) 2-1 중간 수학1 족보
+
+작업 절차:
+ Step 1 — 이미지의 헤더 한 줄을 그대로 quote (raw 필드).
+ Step 2 — raw 를 다음 형식으로 변환 (formatted 필드).
+
+출력 형식 (formatted):
+  [중|고]N) YYYY 지역 학교명 [과목, 고2/3 만] N학년 M학기 [중간고사|기말고사]
 
 규칙:
-1) "N-M"(예: 2-1, 1~2, 1/2)은 앞 숫자 N=학년, 뒤 숫자 M=학기. 절대 순서를 바꾸지 않는다(2-1 ⇒ 2학년 1학기).
-2) 앞머리 [중|고]n)의 n은 반드시 N학년 M학기의 N과 같다.
-3) 학교명은 이미지에 보이는 그대로. 학교 급은 학교명 끝의 "중학교" 또는 "고등학교"로만 판별.
-4) 지역은 이미지에 보이는 시/군/구만 사용. 연도는 헤더에 보이면 4자리(2025·2025학년도·'25학년도 모두 2025).
-5) 고등학교의 수학·선택 과목이면 학교명과 학년 사이에 과목명. 로마자 I·II는 아라비아 숫자(수학II ⇒ 수학2).
-   허용 과목: 수학1, 수학2, 확률과 통계, 미분과 적분, 미적분, 대수, 미적분1, 미적분2, 기하.
-6) 끝은 반드시 "중간고사" 또는 "기말고사".
-7) 이미지에서 읽히지 않는 값은 추측 금지 — 단, 헤더에 「2-1 기말 수학 족보」처럼 압축 표기가 있으면 그대로 풀어 적용.
-8) "기출", "족보", "수학" 같은 보조 단어는 출력에서 제거 (과목·학년·학기로 흡수).
+ 1) **학교명**: raw 에서 본 그대로. 절대 다른 학교로 교체 금지.
+ 2) **연도**: [YYYY] 4자리. 안 보이면 빈 문자열.
+ 3) **지역**: () 안 텍스트 그대로 (예: "부산 부산진구").
+ 4) **N-M**: 앞 N=학년, 뒤 M=학기 (2-1 → 2학년 1학기). 순서 절대 안 바꿈.
+ 5) **앞머리 [중|고]N**: 학교명이 "중학교" 끝나면 중, "고등학교" 끝나면 고. N=학년.
+ 6) **과목** — 고2·고3 만:
+    - 허용 목록: 수학1, 수학2, 대수, 미적분1, 미적분, 미적분2, 확률과 통계, 기하
+    - 로마자 II→2, I→1 (수학II→수학2)
+    - 학교명과 N학년 사이에 위치
+    - **중학교·고1 은 과목 출력에서 제외** (raw 에 "수학" 보여도 빼기)
+ 7) **끝**: 중간 → 중간고사, 기말 → 기말고사
+ 8) **보조 단어 제거**: "기출", "족보", "년도", "수학"(중·고1) 은 제외
 
-반드시 한 줄만 출력 (설명·따옴표·마크다운·.pdf 확장자·파일명 금지문자(\\ / : * ? " < > |) 금지).`;
+JSON 한 줄로 출력 (다른 텍스트·마크다운 금지):
+{"raw":"<step1 quote>","formatted":"<step2 result>"}
+
+예시:
+{"raw":"[2020년 기출] 동평여자중학교 (부산 부산진구) 2-1 기말 수학 족보","formatted":"중2) 2020 부산 부산진구 동평여자중학교 2학년 1학기 기말고사"}
+{"raw":"[2022 기출] 부산진고등학교 (부산진구) 2-1 중간 수학1 족보","formatted":"고2) 2022 부산진구 부산진고등학교 수학1 2학년 1학기 중간고사"}
+
+헤더를 못 읽으면: {"raw":"","formatted":""}`;
 
 function sanitizeNameLine(s: string): string {
   let t = String(s || "")
@@ -312,18 +338,111 @@ function sanitizeNameLine(s: string): string {
 }
 
 /**
- * 형식 검증 — 「[중|고]n) … N학년 M학기 [중간고사|기말고사]」 패턴.
- * 통과하지 못한 응답은 raw text 반환으로 간주하고 다음 모델로 폴백.
+ * 형식 검증 — 「[중|고]N) … N학년 M학기 [중간고사|기말고사]」 패턴.
  */
 function isValidExamNameFormat(s: string): boolean {
   if (!s || s.length < 10) return false;
-  // [중|고]N) 으로 시작
   if (!/^[중고]\s*\d\s*\)/.test(s)) return false;
-  // N학년 M학기 포함
   if (!/\d\s*학년\s*\d\s*학기/.test(s)) return false;
-  // 끝이 중간고사 또는 기말고사
   if (!/(중간고사|기말고사)\s*$/.test(s)) return false;
   return true;
+}
+
+/**
+ * Gemini 응답 JSON 파싱 — {raw, formatted} 추출.
+ * 코드 펜스나 마크다운에 둘러싸여 있어도 정규식으로 첫 번째 객체 추출.
+ */
+function parseExamNameJson(text: string): { raw: string; formatted: string } | null {
+  const cleaned = String(text || "")
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```$/i, "")
+    .trim();
+  let parsed: unknown = null;
+  try {
+    parsed = JSON.parse(cleaned);
+  } catch {
+    const m = cleaned.match(/\{[\s\S]*?\}/);
+    if (!m) return null;
+    try {
+      parsed = JSON.parse(m[0]);
+    } catch {
+      return null;
+    }
+  }
+  if (!parsed || typeof parsed !== "object") return null;
+  const obj = parsed as Record<string, unknown>;
+  return {
+    raw: String(obj.raw ?? "").trim(),
+    formatted: sanitizeNameLine(String(obj.formatted ?? "")),
+  };
+}
+
+const ALLOWED_SUBJECTS = new Set([
+  "수학1",
+  "수학2",
+  "대수",
+  "미적분1",
+  "미적분",
+  "미적분2",
+  "확률과 통계",
+  "기하",
+]);
+
+/**
+ * raw 헤더 → formatted 변환 (deterministic). AI 의 formatted 보다 신뢰.
+ * 표준 패턴 매칭 안 되면 null → 호출자가 AI formatted 사용.
+ */
+function regexFormatFromRaw(raw: string): string | null {
+  if (!raw) return null;
+  const cleaned = raw.replace(/\s+/g, " ").trim();
+  // 연도: [YYYY...] (대괄호 안 4자리)
+  const yearM = cleaned.match(/\[(\d{4})/);
+  // 학교명: 「...중학교」 또는 「...고등학교」
+  const schoolM = cleaned.match(/(\S+?(?:중학교|고등학교))/);
+  // 지역: ( ... )
+  const regionM = cleaned.match(/\(([^)]+)\)/);
+  // 학년-학기: N-M (또는 N~M, N/M)
+  const gradeSemM = cleaned.match(/(\d)\s*[-~/]\s*(\d)/);
+  // 시험 종류
+  const examTypeM = cleaned.match(/(중간|기말)/);
+  if (!yearM || !schoolM || !gradeSemM || !examTypeM) return null;
+
+  const year = yearM[1];
+  const school = schoolM[1];
+  const region = regionM ? regionM[1].trim().replace(/\s+/g, " ") : "";
+  const grade = gradeSemM[1];
+  const semester = gradeSemM[2];
+  const examType = examTypeM[1] === "중간" ? "중간고사" : "기말고사";
+
+  const isHigh = school.endsWith("고등학교");
+  const prefix = isHigh ? `고${grade}` : `중${grade}`;
+
+  // 과목 — 고2·고3 만
+  let subjectStr = "";
+  if (isHigh && Number(grade) >= 2) {
+    // 학교명 뒤·"족보" 앞에 있는 토큰을 찾아 정규화
+    const after = cleaned.slice(cleaned.indexOf(school) + school.length);
+    const subjMatch = after.match(
+      /(수학\s*[1-2I]{0,2}|확률\s*과\s*통계|미분\s*과\s*적분|미적분\s*[1-2I]{0,2}|대수|기하)/,
+    );
+    if (subjMatch) {
+      let subj = subjMatch[1]
+        .replace(/\s+/g, "")
+        .replace(/II/g, "2")
+        .replace(/I/g, "1");
+      // 정규화 후 허용 목록과 매칭
+      if (subj === "확률과통계") subj = "확률과 통계";
+      else if (subj === "미분과적분") subj = "미적분";
+      // 단순 "수학" → 고2·고3 에선 의미 모호하므로 출력 생략
+      if (subj !== "수학" && ALLOWED_SUBJECTS.has(subj)) {
+        subjectStr = ` ${subj}`;
+      }
+    }
+  }
+
+  const regionStr = region ? ` ${region}` : "";
+  const result = `${prefix}) ${year}${regionStr} ${school}${subjectStr} ${grade}학년 ${semester}학기 ${examType}`;
+  return isValidExamNameFormat(result) ? result : null;
 }
 
 export async function geminiSuggestExamName(
@@ -344,7 +463,6 @@ export async function geminiSuggestExamName(
   let lastQuota = false;
   for (const model of MODELS) {
     try {
-      // 두 번째 이미지가 있으면: [전체, 확대본, 프롬프트]. 없으면: [전체, 프롬프트].
       const parts = focused
         ? [
             { text: "1번 이미지 (시험지 전체):" },
@@ -360,19 +478,30 @@ export async function geminiSuggestExamName(
       const json = await callGemini({
         model,
         timeoutMs: 15000,
-        // 256 토큰 + thinking 0 — Gemini 2.5 가 thinking 으로 토큰 소모해 출력이 「중2)」 처럼 잘리는 현상 방지.
-        // 한 줄 시험명은 보통 30~50 토큰이라 256 은 충분히 여유.
-        generationConfig: noThinkingConfig(256),
+        // 512 토큰 — raw + formatted JSON 모두 담을 충분 공간 (headroom).
+        generationConfig: noThinkingConfig(512, { responseMimeType: "application/json" }),
         parts,
       });
-      const raw = extractGeminiText(json);
-      const text = sanitizeNameLine(raw);
-      // 형식 검증 — 「중2) ... N학년 M학기 ...고사」 패턴 통과해야 합격.
-      // 미달이면 raw 반환으로 간주하고 다음 모델로 폴백.
-      if (isValidExamNameFormat(text)) {
-        return { ok: true, name: text, model };
+      const text = extractGeminiText(json);
+      const result = parseExamNameJson(text);
+      if (!result) {
+        lastErr = `${model}: JSON 파싱 실패 (text="${text.slice(0, 100)}")`;
+        continue;
       }
-      lastErr = `${model}: 형식 미달 (raw="${raw.slice(0, 100)}")`;
+      if (!result.raw) {
+        lastErr = `${model}: 헤더 텍스트 못 읽음`;
+        continue;
+      }
+      // raw 가 있으면 deterministic regex 변환 우선 — AI 의 formatted 변동성 회피
+      const fromRegex = regexFormatFromRaw(result.raw);
+      if (fromRegex) {
+        return { ok: true, name: fromRegex, model };
+      }
+      // regex 매칭 실패 시 AI 의 formatted 사용 (검증 통과 전제)
+      if (isValidExamNameFormat(result.formatted)) {
+        return { ok: true, name: result.formatted, model };
+      }
+      lastErr = `${model}: 형식 미달 raw="${result.raw.slice(0, 60)}" formatted="${result.formatted.slice(0, 60)}"`;
     } catch (e) {
       const msg = (e as Error).message;
       if (/RESOURCE_EXHAUSTED|quota|429/i.test(msg)) lastQuota = true;

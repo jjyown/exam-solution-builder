@@ -1117,6 +1117,51 @@ export default function EditPage() {
     }
     // 박스 검출 끝나면 학교명도 자동 추출 (examName 이 비어있을 때만, 첫 슬롯 헤더로)
     void maybeAutoExtractExamName(processed);
+    // 백그라운드: 누락된 croppedDataUrl 미리 생성 → PDF/업로드 시점 대기 시간 ↓.
+    // 사용자에게 진행 표시 안 함(silent prefetch). 호출자 토글이 학교명 OCR 과
+    // 동시에 돌아 인터넷·CPU 자원이 분산되도록 setTimeout 으로 살짝 양보.
+    if (processed.length > 0) {
+      setTimeout(() => {
+        void backgroundPrefetchCropped(processed);
+      }, 500);
+    }
+  }
+
+  /**
+   * 자동 감지 직후 백그라운드에서 croppedDataUrl 을 미리 생성. 사용자 진행 표시 없음.
+   * PDF/업로드 시점에 generateMissingCroppedDataUrls 가 다시 호출되어도
+   * 이미 생성된 슬롯은 즉시 적중되어 추가 다운로드·캡처 0.
+   */
+  async function backgroundPrefetchCropped(targets: Slot[]): Promise<void> {
+    const CONCURRENCY = 3; // PDF 시점 대비 낮게 — 사용자 다른 동작 방해 최소화
+    let nextIdx = 0;
+    await Promise.all(
+      Array.from({ length: Math.min(CONCURRENCY, targets.length) }, async () => {
+        while (true) {
+          const idx = nextIdx;
+          nextIdx += 1;
+          if (idx >= targets.length) return;
+          const s = targets[idx];
+          if (s.croppedDataUrl || !s.cropNorm) continue;
+          try {
+            const src = s.sourceDataUrl?.startsWith("data:")
+              ? s.sourceDataUrl
+              : await ensureFullDataUrlSource(s.id);
+            if (!src) continue;
+            const img = await loadImage(src);
+            const naturalBox = normToNaturalBox(
+              s.cropNorm,
+              img.naturalWidth,
+              img.naturalHeight,
+            );
+            const croppedDataUrl = captureCrop(img, naturalBox);
+            setSlot(s.id, { croppedDataUrl });
+          } catch {
+            /* 한 슬롯 실패해도 다른 슬롯 prefetch 계속 */
+          }
+        }
+      }),
+    );
   }
 
   // ── AI 박스 모방 (현재 슬롯 박스를 기준으로 나머지에 같은 의도 적용) ────
@@ -1239,17 +1284,45 @@ export default function EditPage() {
     }
   }
 
+  /**
+   * 슬롯의 자른 페이퍼(`croppedDataUrl`) 보장 — 없으면 lazy 생성.
+   * AI 학교명 추출 등이 「태블릿 UI 제외한 인쇄 페이퍼」 만 보게 하기 위해 사용.
+   */
+  async function ensureCroppedForSlot(s: Slot): Promise<string | null> {
+    if (s.croppedDataUrl) return s.croppedDataUrl;
+    if (!s.cropNorm) return null;
+    const src = s.sourceDataUrl?.startsWith("data:")
+      ? s.sourceDataUrl
+      : await ensureFullDataUrlSource(s.id);
+    if (!src) return null;
+    try {
+      const img = await loadImage(src);
+      const naturalBox = normToNaturalBox(
+        s.cropNorm,
+        img.naturalWidth,
+        img.naturalHeight,
+      );
+      const croppedDataUrl = captureCrop(img, naturalBox);
+      setSlot(s.id, { croppedDataUrl });
+      return croppedDataUrl;
+    } catch {
+      return null;
+    }
+  }
+
   async function maybeAutoExtractExamName(targets: Slot[]): Promise<void> {
     if (examName.trim()) return; // 이미 사용자가 입력함
-    const first = targets.find((s) => s.croppedDataUrl || s.nameAreaBox);
+    const first = targets.find((s) => s.cropNorm || s.croppedDataUrl);
     if (!first) return;
-    // 컨텍스트(연도·지역·학기) 보존을 위해 항상 「전체 잘라낸 페이퍼」를 메인 이미지로,
-    // 사용자가 표시한 nameAreaBox 가 있으면 그 확대 크롭을 focusImage 로 함께 전송.
-    const mainImg =
-      first.croppedDataUrl ?? (await ensureFullDataUrlSource(first.id));
-    if (!mainImg) return;
-    const focusImg = first.nameAreaBox ? await extractNameAreaImage(first) : null;
     setSlot(first.id, { busy: "naming" });
+    // 메인 이미지: 자른 페이퍼만(태블릿 UI 제외) — 환각 방지 핵심.
+    // lazy 모드라 croppedDataUrl 이 없을 수 있어 ensureCroppedForSlot 으로 보장.
+    const mainImg = await ensureCroppedForSlot(first);
+    if (!mainImg) {
+      setSlot(first.id, { busy: null });
+      return;
+    }
+    const focusImg = first.nameAreaBox ? await extractNameAreaImage(first) : null;
     try {
       const res = await fetch("/api/photo-edit/suggest-name", {
         method: "POST",
@@ -1271,17 +1344,20 @@ export default function EditPage() {
   // ── AI 학교명 추출 ────────────────────────────────────────────────────
   async function suggestNameForActive() {
     if (!active) return;
-    // 컨텍스트 보존: 「전체 페이퍼」를 메인으로, nameAreaBox 가 있으면 확대본을 focusImage 로.
-    const mainImg =
-      active.croppedDataUrl ?? (await ensureFullDataUrlSource(active.id));
-    if (!mainImg) return;
-    const focusImg = active.nameAreaBox ? await extractNameAreaImage(active) : null;
     setSlot(active.id, { busy: "naming", error: undefined });
+    // 메인: 자른 페이퍼(태블릿 UI 제외) → 환각 방지. nameAreaBox 있으면 focus 추가.
+    const mainImg = await ensureCroppedForSlot(active);
+    const fallback = mainImg ?? (await ensureFullDataUrlSource(active.id));
+    if (!fallback) {
+      setSlot(active.id, { busy: null });
+      return;
+    }
+    const focusImg = active.nameAreaBox ? await extractNameAreaImage(active) : null;
     try {
       const res = await fetch("/api/photo-edit/suggest-name", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ image: mainImg, focusImage: focusImg ?? undefined }),
+        body: JSON.stringify({ image: fallback, focusImage: focusImg ?? undefined }),
       });
       const data = await res.json();
       if (!data.ok) throw new Error(data.error || "AI 시험명 추출 실패");
