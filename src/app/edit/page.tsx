@@ -769,35 +769,9 @@ export default function EditPage() {
       width: sel.width / imageEl.width,
       height: sel.height / imageEl.height,
     };
-    // 빨간 박스 즉시 표시 — cropNorm 먼저 저장. paperOffset 은 백그라운드로 비동기 갱신.
+    // cropNorm 직접 저장 — Drive 업로드 시 그대로 히스토리에 누적되어
+    // 다음 자동 감지의 「이미지 좌표 직접 median」 시드로 사용됨. 별도 변환 없음.
     setSlot(active.id, { cropNorm, error: undefined });
-    // 사용자 검수·드래그한 박스 → Stage 1 박스(AI 흰 종이 영역) 대비 4-corner 마진을 재계산.
-    // 이 값이 Drive 업로드 시 히스토리에 누적되어 다음 자동 검출의 평균 시드로 사용됨.
-    // - 슬롯에 whiteAreaBox 가 이미 캐시돼 있으면 그걸 사용 (자동 감지 후 드래그 = 비용 0)
-    // - 없으면 AI(폴백 픽셀) 호출 — 사용자가 자동 감지 안 하고 바로 드래그한 경우
-    if (active.sourceDataUrl) {
-      const cachedWhite = active.whiteAreaBox;
-      void (async () => {
-        const white = cachedWhite ?? (await detectWhitePaperBoxByAI(active.sourceDataUrl!));
-        if (!white || white.width < 0.05 || white.height < 0.05) return;
-        const left = (cropNorm.x - white.x) / white.width;
-        const right = (white.x + white.width - cropNorm.x - cropNorm.width) / white.width;
-        const top = (cropNorm.y - white.y) / white.height;
-        const bottom = (white.y + white.height - cropNorm.y - cropNorm.height) / white.height;
-        // Stage 1 박스 안쪽에 있어야 의미 있음 — 음수 일부는 허용(1~2% 오차), 너무 벗어나면 무시
-        const ok = (v: number) => v >= -0.05 && v <= 1.05;
-        if (!ok(left) || !ok(right) || !ok(top) || !ok(bottom)) return;
-        const paperOffset: PaperOffset = {
-          left: Math.max(0, left),
-          right: Math.max(0, right),
-          top: Math.max(0, top),
-          bottom: Math.max(0, bottom),
-        };
-        setSlot(active.id, { paperOffset, whiteAreaBox: white });
-      })().catch(() => {
-        /* 검출 실패 — paperOffset 갱신 skip, cropNorm 만 유지 */
-      });
-    }
 
     // captureCrop 시도 — imgRef 가 dataURL 이면 즉시 OK, CDN URL 이면 SecurityError.
     const naturalBox = normToNaturalBox(
@@ -892,15 +866,19 @@ export default function EditPage() {
     const m = Math.floor(s.length / 2);
     return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
   }
-  /** 히스토리에서 paperOffset 의 중앙값 — 5개 이상 누적되면 사용 */
-  function medianPaperOffset(): PaperOffset | null {
-    const h = loadHistory().filter((s) => s.paperOffset);
+  /**
+   * **주 학습 함수** — 히스토리 cropNorm 의 4개 좌표(x,y,w,h) 각각 median.
+   * 5개 이상 누적되면 적용. 좌표 변환 단계가 없어 (= AI 박스 대비 마진이 아닌
+   * 이미지 좌표 직접 평균) 노이즈 누적 0, 카메라 안정 셋업에서 가장 정확.
+   */
+  function medianCropNormFromHistory(): CropNorm | null {
+    const h = loadHistory();
     if (h.length < 5) return null;
     return {
-      top: median(h.map((s) => s.paperOffset!.top)),
-      bottom: median(h.map((s) => s.paperOffset!.bottom)),
-      left: median(h.map((s) => s.paperOffset!.left)),
-      right: median(h.map((s) => s.paperOffset!.right)),
+      x: median(h.map((s) => s.cropNorm.x)),
+      y: median(h.map((s) => s.cropNorm.y)),
+      width: median(h.map((s) => s.cropNorm.width)),
+      height: median(h.map((s) => s.cropNorm.height)),
     };
   }
 
@@ -936,14 +914,16 @@ export default function EditPage() {
   }
 
   /**
-   * 「🔍 전체 자동 감지」 — 체크된 슬롯들에 2단계 자동 감지 적용.
-   *  Stage 1 : AI(Gemini)로 「태블릿 화면 속 흰 종이」 박스 검출 (per-slot)
-   *  Stage 2 : 누적 히스토리(검수 끝난 박스) 가 5개 이상이면 4-corner median 마진 적용
-   *           → 일관된 최종 크롭. 누적이 부족하면 Stage 1 박스 그대로.
+   * 「🔍 전체 자동 감지」 — 체크된 슬롯들에 박스 자동 적용.
    *
-   * - Gemini 호출은 슬롯당 1회, 동시에 최대 4개씩 병렬 (Hobby tier 안전 마진).
-   * - 같은 source URL 재처리 시 세션 캐시 적중 → 비용 0.
-   * - 기존 cropNorm 이 있어도 덮어씀 (사용자가 일괄 재감지 의도).
+   *  ◇ 학습 누적 ≥ 5: **이미지 좌표 직접 median** 적용. AI 호출 0회, 즉시, 비용 0.
+   *    - cropNorm 자체를 평균 → 좌표 변환 단계 없어 노이즈 누적 0.
+   *    - 카메라·태블릿 위치가 안정적이면 5~10 샘플로 수렴 (가장 정확).
+   *  ◇ 학습 누적 < 5: AI(Gemini)로 「태블릿 속 흰 종이」 박스 검출.
+   *    - 사용자 드래그가 cropNorm 으로 직접 누적 → 5개 채워지면 위 경로로 전환.
+   *    - 슬롯당 1회, 최대 4개 병렬.
+   *
+   * 카메라 셋업이 바뀌면 「학습 ↺」 누르고 재학습.
    */
   const [bulkProgress, setBulkProgress] = useState<{ done: number; total: number } | null>(null);
 
@@ -965,10 +945,10 @@ export default function EditPage() {
     setBulkBusy(true);
     setBulkProgress({ done: 0, total: targets.length });
     const processed: Slot[] = [];
-    const learnedOffset: PaperOffset | null = medianPaperOffset();
+    // 학습 충분(≥5) 하면 이미지 좌표 직접 median 적용 — AI 0회, 즉시.
+    const learnedCrop = medianCropNormFromHistory();
     let doneCount = 0;
 
-    // 한 슬롯 처리 — AI 호출 + crop 캡처
     async function processOne(s: Slot): Promise<Slot | null> {
       const src = await ensureFullDataUrlSource(s.id);
       if (!src) {
@@ -976,13 +956,20 @@ export default function EditPage() {
         setBulkProgress({ done: doneCount, total: targets.length });
         return null;
       }
-      const detection = await detectPaperBoxByAI(src, learnedOffset);
-      // AI/픽셀 폴백 모두 실패 시 빠른 박스 기본값
-      const cropNorm = detection?.cropNorm ?? FAST_BOX_DEFAULT;
-      const paperOffset =
-        detection?.paperOffset ??
-        (learnedOffset ?? { top: 0, right: 0, bottom: 0, left: 0 });
-      const whiteAreaBox = detection?.whiteAreaBox;
+
+      let cropNorm: CropNorm;
+      let whiteAreaBox: CropNorm | undefined;
+
+      if (learnedCrop) {
+        // ✓ 학습 충분 — 이미지 좌표 median 직접 적용 (AI 호출 없음)
+        cropNorm = learnedCrop;
+      } else {
+        // 학습 부족 — AI Stage 1 으로 초기 박스 (사용자 드래그가 학습 시드 생성)
+        const detection = await detectPaperBoxByAI(src, null);
+        cropNorm = detection?.cropNorm ?? FAST_BOX_DEFAULT;
+        whiteAreaBox = detection?.whiteAreaBox;
+      }
+
       try {
         const img = await loadImage(src);
         const naturalBox = normToNaturalBox(
@@ -991,19 +978,20 @@ export default function EditPage() {
           img.naturalHeight,
         );
         const croppedDataUrl = captureCrop(img, naturalBox);
-        setSlot(s.id, { cropNorm, croppedDataUrl, paperOffset, whiteAreaBox });
-        return { ...s, cropNorm, croppedDataUrl, paperOffset, whiteAreaBox };
+        setSlot(s.id, { cropNorm, croppedDataUrl, whiteAreaBox });
+        return { ...s, cropNorm, croppedDataUrl, whiteAreaBox };
       } catch {
-        setSlot(s.id, { cropNorm, paperOffset, whiteAreaBox });
-        return { ...s, cropNorm, paperOffset, whiteAreaBox };
+        setSlot(s.id, { cropNorm, whiteAreaBox });
+        return { ...s, cropNorm, whiteAreaBox };
       } finally {
         doneCount += 1;
         setBulkProgress({ done: doneCount, total: targets.length });
       }
     }
 
-    // 동시에 최대 CONCURRENCY 개씩 — Gemini 호출 부하 관리
-    const CONCURRENCY = 4;
+    // 학습 적용 시 동시 처리 제한 없음(=목록 길이) — AI 없으니 빠름.
+    // AI 시 4개 병렬 — Hobby tier 호출 부하 안전 마진.
+    const CONCURRENCY = learnedCrop ? targets.length : 4;
     try {
       let nextIdx = 0;
       const workers = Array.from({ length: Math.min(CONCURRENCY, targets.length) }, async () => {
@@ -1317,10 +1305,10 @@ export default function EditPage() {
       const data = await res.json();
       if (!data.ok) throw new Error(data.error || "업로드 실패");
       setSaveResult({ ok: true, link: data.webViewLink, name: data.name });
-      // 사용자 검토를 거쳐 업로드된 박스들을 히스토리에 누적 → 다음 자동 검출 시드로 사용.
-      // paperOffset 이 있는 샘플만 평균 학습에 의미가 있으므로 그것만 저장.
+      // 사용자 검토 거친 박스 → cropNorm 직접 누적. 다음 자동 검출의 median 시드.
+      // paperOffset 은 옛 코드와의 호환을 위해 남기지만 더 이상 학습에 안 쓰임.
       const checkedConfirmed = slots
-        .filter((s) => s.cropNorm && s.includeInPdf && s.croppedDataUrl && s.paperOffset)
+        .filter((s) => s.cropNorm && s.includeInPdf && s.croppedDataUrl)
         .map<HistorySample>((s) => ({
           cropNorm: s.cropNorm!,
           whiteAreaBox: s.whiteAreaBox,
@@ -1802,15 +1790,17 @@ export default function EditPage() {
                   className="rounded-md border border-indigo-300 bg-white px-3 py-1.5 text-xs font-semibold text-indigo-800 hover:bg-indigo-50 disabled:opacity-50"
                   title={
                     historyCount >= 5
-                      ? `1차: AI 가 태블릿 화면 속 흰 종이 영역만 잡음 (툴바·상태바·베젤 제외) → 2차: 누적 학습 ${historyCount}개의 4-corner 평균 적용. 끝나면 학교명도 자동 추출`
-                      : `1차: AI 가 태블릿 화면 속 흰 종이 영역만 잡음 (툴바·상태바·베젤 제외) → 2차: 사용자 드래그로 미세조정 → Drive 업로드 시 ${5 - historyCount}개 더 쌓이면 평균 자동 적용`
+                      ? `학습 ${historyCount}개의 박스 위치를 직접 평균(median) — AI 호출 0회, 즉시 적용. 카메라가 같은 위치면 가장 정확. 끝나면 학교명도 자동 추출`
+                      : `학습 부족(${historyCount}/5) — AI 가 태블릿 속 흰 종이 영역 검출 → 사용자 드래그로 보정 → Drive 업로드 시 ${5 - historyCount}개 더 쌓이면 자동 평균 모드로 전환`
                   }
                 >
                   {bulkBusy
                     ? bulkProgress
-                      ? `AI 검출 중… ${bulkProgress.done}/${bulkProgress.total}`
+                      ? historyCount >= 5
+                        ? `평균 적용 중… ${bulkProgress.done}/${bulkProgress.total}`
+                        : `AI 검출 중… ${bulkProgress.done}/${bulkProgress.total}`
                       : "처리 중…"
-                    : `🔍 전체 자동 감지 + 학교명${historyCount >= 5 ? ` (학습 ${historyCount})` : historyCount > 0 ? ` (학습 ${historyCount}/5)` : ""}`}
+                    : `🔍 전체 자동 감지 + 학교명${historyCount >= 5 ? ` (평균 ${historyCount})` : historyCount > 0 ? ` (학습 ${historyCount}/5)` : ""}`}
                 </button>
                 {historyCount > 0 && (
                   <button
