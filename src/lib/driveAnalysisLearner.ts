@@ -52,6 +52,40 @@ const ANALYSIS_FILE_MAX_BYTES = (() => {
   return mb * 1024 * 1024;
 })();
 
+/**
+ * 너무 작은 파일은 의미 있는 텍스트가 없을 가능성 높음 — Mathpix 호출 절약.
+ * 환경변수 ANALYSIS_FILE_MIN_KB 로 오버라이드 가능 (기본 30KB).
+ */
+const ANALYSIS_FILE_MIN_BYTES = (() => {
+  const raw = Number(process.env.ANALYSIS_FILE_MIN_KB);
+  const kb = Number.isFinite(raw) && raw >= 0 ? raw : 30;
+  return kb * 1024;
+})();
+
+/**
+ * 분석 대상 서브폴더 화이트리스트 — 「분석용 자료」 루트 직속 폴더 이름.
+ * 다른 서브폴더(시험지 편집·휴지통 등) 의 파일은 분석 안 함 → Mathpix 호출 낭비 차단.
+ *
+ * **우선순위 순서**: 앞에 적힌 폴더 먼저 처리. 시중교재는 해설 제작 메인 참고자료이므로
+ * 매쓰픽스 잔여가 떨어져도 먼저 끝나야 함.
+ *
+ * 환경변수: DRIVE_ANALYSIS_ALLOWED_ROOT_FOLDERS=시중교재,시험지 원안 (콤마 구분)
+ */
+const ALLOWED_ROOT_FOLDERS_PRIORITY: string[] = (() => {
+  const env = process.env.DRIVE_ANALYSIS_ALLOWED_ROOT_FOLDERS?.trim();
+  if (env) {
+    return env.split(",").map((s) => s.trim()).filter(Boolean);
+  }
+  return ["시중교재", "시험지 원안"]; // 디폴트: 시중교재 우선
+})();
+const ALLOWED_ROOT_FOLDERS = new Set(ALLOWED_ROOT_FOLDERS_PRIORITY);
+
+/** Mathpix·Gemini 호출 동시 처리 수 — Hobby tier 안전 마진. */
+const ANALYSIS_CONCURRENCY = (() => {
+  const raw = Number(process.env.ANALYSIS_CONCURRENCY);
+  return Number.isFinite(raw) && raw > 0 && raw <= 16 ? raw : 4;
+})();
+
 export type AnalysisLearnSummary = {
   configured: boolean;
   folderResolved: boolean;
@@ -109,44 +143,71 @@ export async function loadDriveAnalysisRecords(): Promise<{
   }
   summary.folderResolved = true;
 
-  let files;
+  let allFiles;
   try {
-    files = await listDriveFolderFilesRecursive(folderId, ALLOWED_EXTS);
+    allFiles = await listDriveFolderFilesRecursive(folderId, ALLOWED_EXTS);
   } catch (e) {
     summary.errors.push(`분석용 자료 폴더 목록 조회 실패: ${(e as Error).message}`);
     return { records: [], summary };
   }
+
+  // 폴더 화이트리스트 적용 — 시중교재·시험지 원안 외 폴더 제외 (Mathpix 호출 절약)
+  const allowedFiles = allFiles.filter((f) => {
+    const root = f.pathSegments[0];
+    return root && ALLOWED_ROOT_FOLDERS.has(root);
+  });
+
+  // 우선순위 정렬 — ALLOWED_ROOT_FOLDERS_PRIORITY 앞쪽 폴더 먼저 처리
+  // (시중교재 우선 — 해설 제작 메인 참고자료)
+  const priorityIndex = new Map<string, number>(
+    ALLOWED_ROOT_FOLDERS_PRIORITY.map((name, i) => [name, i]),
+  );
+  allowedFiles.sort((a, b) => {
+    const ra = priorityIndex.get(a.pathSegments[0] ?? "") ?? 999;
+    const rb = priorityIndex.get(b.pathSegments[0] ?? "") ?? 999;
+    if (ra !== rb) return ra - rb;
+    // 같은 폴더 안에선 modifiedTime 최신 먼저 (변경분 우선 흡수)
+    return (b.modifiedTime ?? "").localeCompare(a.modifiedTime ?? "");
+  });
+
+  // 너무 작은 파일 스킵 — 의미 있는 본문이 거의 없을 확률 높음
+  const files = allowedFiles.filter((f) => {
+    if (typeof f.size === "number" && f.size < ANALYSIS_FILE_MIN_BYTES) {
+      return false;
+    }
+    return true;
+  });
+
   summary.totalFiles = files.length;
-  // 서브폴더별 파일 수 집계
+  // 서브폴더별 파일 수 집계 (필터 후 기준)
   for (const f of files) {
     const key = f.pathSegments.length === 0 ? "(루트)" : f.pathSegments.join(" / ");
     summary.bySubfolder[key] = (summary.bySubfolder[key] ?? 0) + 1;
   }
 
-  const all: ReferenceRecord[] = [];
-  for (const f of files) {
+  /** 단일 파일 처리 — 캐시 → 다운로드 → OCR → Supabase 저장. */
+  type DriveFileMeta = (typeof files)[number];
+  async function processOneFile(f: DriveFileMeta): Promise<ReferenceRecord[]> {
     // 1) in-memory 캐시 적중
     const cached = fileCache.get(f.id);
     if (cached && cached.modifiedTime === f.modifiedTime) {
-      all.push(...cached.records);
-      continue;
+      return cached.records;
     }
     // 2) Supabase 영구 캐시 적중 — 재배포·재시작 후에도 OCR 안 함
     const persisted = await fetchCachedRecords(f.id, f.modifiedTime);
     if (persisted && persisted.length > 0) {
       fileCache.set(f.id, { modifiedTime: f.modifiedTime, records: persisted });
-      all.push(...persisted);
-      continue;
+      return persisted;
     }
-    // 3) 캐시 둘 다 miss → Gemini OCR + Supabase 저장
-    // OOM 방지: 너무 큰 파일은 download 자체를 skip (buffer + base64 동시 점유 시 위험)
+    // 3) OOM 방지: 너무 큰 파일은 download 자체를 skip
     if (typeof f.size === "number" && f.size > ANALYSIS_FILE_MAX_BYTES) {
       const mb = (f.size / (1024 * 1024)).toFixed(1);
       summary.errors.push(
-        `${f.name}: ${mb}MB — ANALYSIS_FILE_MAX_MB(${(ANALYSIS_FILE_MAX_BYTES / 1024 / 1024) | 0}MB) 초과로 OCR skip. 파일을 분할하거나 환경변수를 올려주세요.`,
+        `${f.name}: ${mb}MB — ANALYSIS_FILE_MAX_MB(${(ANALYSIS_FILE_MAX_BYTES / 1024 / 1024) | 0}MB) 초과로 OCR skip.`,
       );
-      continue;
+      return [];
     }
+    // 4) 캐시 둘 다 miss → Mathpix 우선 → Gemini 폴백 OCR
     try {
       let buffer: Buffer | null = null;
       let base64: string | null = null;
@@ -163,46 +224,62 @@ export async function loadDriveAnalysisRecords(): Promise<{
               ? "image/png"
               : "image/jpeg");
         base64 = buffer.toString("base64");
-        // 같은 데이터를 두 번 들고 있을 필요 없음 → 즉시 GC 후보로
-        buffer = null;
+        buffer = null; // GC 후보
       }
-      // 이미지 OCR 은 Mathpix 우선 → 소진/실패 시 자동으로 Gemini 폴백 (fileExtraction).
-      // PDF 는 pdfjs 우선 → 손상 감지 시 Gemini 멀티모달 (Mathpix /v3/pdf 미사용).
-      // 둘 다 단일 진입점으로 통일해 라우팅 정책 일관성 유지.
       const ext = path.extname(f.name).toLowerCase();
       const v = await extractTextFromUploadedFile({
         fileData: base64,
         fileName: f.name,
         fileType: effectiveMime || (ext === ".pdf" ? "application/pdf" : "image/jpeg"),
       });
-      base64 = null; // OCR 응답 받은 직후 즉시 해제
+      base64 = null;
       if (!v.ok) {
         summary.errors.push(`${f.name}: ${v.error}`);
-        continue;
+        return [];
       }
       const records = splitTextIntoRecords(f.id, f.name, f.pathSegments, v.text);
       fileCache.set(f.id, { modifiedTime: f.modifiedTime, records });
-      // Supabase 영구 저장 — best-effort, 실패해도 in-memory 는 동작
       try {
         await persistRecordsForFile(f.id, f.modifiedTime, records);
       } catch {
         // silent
       }
-      all.push(...records);
       summary.newOrChanged += 1;
+      return records;
     } catch (e) {
       summary.errors.push(`${f.name}: ${(e as Error).message}`);
+      return [];
     }
   }
+
+  // ── 동시 처리 pool ────────────────────────────────────────────────
+  // - 정렬된 순서(시중교재 우선)대로 worker 가 dequeue
+  // - 작업자 N 개가 병렬로 다음 파일을 가져와 처리
+  // - 결과는 입력 순서대로 누적 (시중교재 records 가 앞쪽)
+  const all: ReferenceRecord[] = [];
+  let nextIdx = 0;
+  await Promise.all(
+    Array.from({ length: Math.min(ANALYSIS_CONCURRENCY, files.length) }, async () => {
+      while (true) {
+        const idx = nextIdx;
+        nextIdx += 1;
+        if (idx >= files.length) return;
+        const records = await processOneFile(files[idx]);
+        for (const r of records) all.push(r);
+      }
+    }),
+  );
 
   // 별도 PDF 페어 매칭 (예: "쎈_대수_문제.pdf" + "쎈_대수_해설.pdf")
   // 같은 series 의 문제 record · 풀이 record 를 problem_no 로 join 해서
   // 문제 record 에 solution_text 를 채워 넣는다.
   const merged = mergePairedSeparatePdfs(all);
 
-  // Drive 에서 삭제된 파일의 Supabase row 정리 (best-effort)
+  // Drive 에서 삭제된 파일의 Supabase row 정리 (best-effort).
+  // 화이트리스트 외 폴더 파일도 「존재」 한다고 보고 prune 대상에서 제외 (= allFiles 전체 ID).
+  // → 사용자가 화이트리스트 바꿔도 옛 OCR 결과 보존, Drive 에서 진짜 삭제된 것만 정리.
   try {
-    await pruneOrphanRecords(files.map((f) => f.id));
+    await pruneOrphanRecords(allFiles.map((f) => f.id));
   } catch {
     // silent
   }
