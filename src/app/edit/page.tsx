@@ -729,18 +729,54 @@ export default function EditPage() {
     }
   }
 
+  /**
+   * 「전체 빠른 박스」 — 체크된 슬롯들에 픽셀 분석으로 자동 감지된 종이 영역 적용.
+   * - 태블릿 베젤·앱 헤더·하단 툴바 자동 제외 (밝기·색상 분석)
+   * - API 호출 0회, 보통 슬롯당 ~10~30ms
+   * - 감지 실패 시 기본 비율(빠른 박스) 폴백
+   * - 기존 cropNorm 이 있어도 덮어씀 (사용자가 일괄 재감지 의도)
+   */
   async function detectAllBoxes() {
+    const targets = slots.filter((s) => s.includeInPdf);
+    if (targets.length === 0) {
+      alert("체크된 페이지가 없습니다.");
+      return;
+    }
+    const overwriteCount = targets.filter((t) => t.cropNorm).length;
+    if (overwriteCount > 0) {
+      if (
+        !confirm(
+          `체크된 ${targets.length}개 페이지에 자동 감지를 적용합니다 (이미 박스가 있는 ${overwriteCount}개는 덮어쓰기). 진행할까요?`,
+        )
+      )
+        return;
+    }
     setBulkBusy(true);
     try {
-      // 체크된 슬롯만 처리 (115장 자동로드 환경에서 「전체 AI 박스」가 모든 파일 처리하면 곤란)
-      const targets = slots.filter((s) => s.includeInPdf && !s.cropNorm);
-      if (targets.length === 0) {
-        alert("AI 박스를 적용할 체크된 페이지가 없습니다.");
-        return;
-      }
       for (const s of targets) {
+        // 풀 dataURL 보장 (썸네일 URL 은 canvas tainted 위험)
         // eslint-disable-next-line no-await-in-loop
-        await detectBoxForSlot(s);
+        const src = await ensureFullDataUrlSource(s.id);
+        if (!src) continue;
+        // 1차: 픽셀 분석으로 자동 감지
+        // eslint-disable-next-line no-await-in-loop
+        let cropNorm = await detectPaperBoxByPixels(src);
+        // 2차: 감지 실패 시 기본 비율 폴백
+        if (!cropNorm) cropNorm = FAST_BOX_DEFAULT;
+        try {
+          // eslint-disable-next-line no-await-in-loop
+          const img = await loadImage(src);
+          const naturalBox = normToNaturalBox(
+            cropNorm,
+            img.naturalWidth,
+            img.naturalHeight,
+          );
+          const croppedDataUrl = captureCrop(img, naturalBox);
+          setSlot(s.id, { cropNorm, croppedDataUrl });
+        } catch {
+          // 캔버스 자르기 실패 — 박스만이라도 저장
+          setSlot(s.id, { cropNorm });
+        }
       }
     } finally {
       setBulkBusy(false);
@@ -766,14 +802,24 @@ export default function EditPage() {
       nw: active.cropNorm.width,
       nh: active.cropNorm.height,
     };
-    setBulkBusy(true);
-    try {
-      // 체크된 슬롯만 모방 대상 — Drive 자동 로드 시 미체크가 기본이므로 명시적 묶음만 처리
-      const targets = slots.filter((s) => s.id !== active.id && s.includeInPdf && !s.cropNorm);
-      if (targets.length === 0) {
-        alert("모방 대상이 없습니다. 사이드바에서 같은 묶음 페이지들을 체크하세요.");
+    // 체크된 슬롯 전체 대상 (active 제외) — 기존 cropNorm 이 있어도 모방 결과로 덮어씀
+    const targets = slots.filter((s) => s.id !== active.id && s.includeInPdf);
+    if (targets.length === 0) {
+      alert("모방 대상이 없습니다. 사이드바에서 같은 묶음 페이지들을 체크하세요.");
+      return;
+    }
+    const overwriteCount = targets.filter((t) => t.cropNorm).length;
+    if (overwriteCount > 0) {
+      if (
+        !confirm(
+          `체크된 ${targets.length}개 페이지에 모방을 적용합니다 (이미 박스가 있는 ${overwriteCount}개는 덮어쓰기). 진행할까요?`,
+        )
+      ) {
         return;
       }
+    }
+    setBulkBusy(true);
+    try {
       for (const s of targets) {
         // Gemini 는 base64 dataURL 필요 (CDN URL 직접 못 받음)
         // eslint-disable-next-line no-await-in-loop
@@ -1465,9 +1511,9 @@ export default function EditPage() {
                   onClick={detectAllBoxes}
                   disabled={bulkBusy || slots.every((s) => s.cropNorm)}
                   className="rounded-md border border-indigo-300 bg-white px-3 py-1.5 text-xs font-semibold text-indigo-800 hover:bg-indigo-50 disabled:opacity-50"
-                  title="체크된 모든 페이지에 빠른 박스 일괄 적용 (즉시)"
+                  title="체크된 모든 페이지의 시험지 종이 영역을 픽셀 분석으로 자동 검출 — 베젤·앱 UI 자동 제외 (감지 실패 시 기본 비율 폴백)"
                 >
-                  {bulkBusy ? "처리 중…" : "⚡ 전체 빠른 박스"}
+                  {bulkBusy ? "처리 중…" : "🔍 전체 자동 감지"}
                 </button>
                 <button
                   onClick={mimicBoxFromActive}
@@ -1742,6 +1788,126 @@ async function imageDimensions(dataUrl: string): Promise<{ w: number; h: number 
     img.onerror = () => reject(new Error("이미지 로드 실패"));
     img.src = dataUrl;
   });
+}
+
+/**
+ * 태블릿 스크린샷 안의 「흰 종이(시험지)」 영역을 픽셀 밝기 분석으로 자동 검출.
+ * - 다운샘플 256px 캔버스에서 R≈G≈B + 밝기≥170 픽셀을 「종이」로 판정
+ * - 행 점수(가로줄 종이 픽셀 비율) 가 0.4 이상인 가장 긴 연속 구간 = 종이 세로 범위
+ * - 그 안에서 열 점수가 0.4 이상인 좌·우 끝 = 종이 가로 범위
+ * - 헤더·하단 앱 UI(어두운 베젤·툴바·도구박스)는 자연스럽게 제외됨
+ * - 실패 시 null → 호출자가 기본 비율 폴백
+ *
+ * 처리 시간: 1장당 ~10~30ms (API 호출 0).
+ */
+async function detectPaperBoxByPixels(imageDataUrl: string): Promise<CropNorm | null> {
+  let img: HTMLImageElement;
+  try {
+    img = await loadImage(imageDataUrl);
+  } catch {
+    return null;
+  }
+  const SAMPLE_W = 256;
+  const sampleH = Math.max(64, Math.round((img.naturalHeight * SAMPLE_W) / img.naturalWidth));
+  const canvas = document.createElement("canvas");
+  canvas.width = SAMPLE_W;
+  canvas.height = sampleH;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return null;
+  ctx.drawImage(img, 0, 0, SAMPLE_W, sampleH);
+  let imgData: ImageData;
+  try {
+    imgData = ctx.getImageData(0, 0, SAMPLE_W, sampleH);
+  } catch {
+    return null; // canvas tainted (cross-origin)
+  }
+  const data = imgData.data;
+
+  const PAPER_BRIGHTNESS_MIN = 170;
+  const PAPER_COLOR_VAR_MAX = 32;
+
+  function isPaperPixel(x: number, y: number): boolean {
+    const i = (y * SAMPLE_W + x) * 4;
+    const r = data[i];
+    const g = data[i + 1];
+    const b = data[i + 2];
+    const minRGB = Math.min(r, g, b);
+    const maxRGB = Math.max(r, g, b);
+    return minRGB >= PAPER_BRIGHTNESS_MIN && maxRGB - minRGB <= PAPER_COLOR_VAR_MAX;
+  }
+
+  // 행별 종이 픽셀 비율
+  const rowScores = new Array<number>(sampleH);
+  for (let y = 0; y < sampleH; y += 1) {
+    let cnt = 0;
+    for (let x = 0; x < SAMPLE_W; x += 1) {
+      if (isPaperPixel(x, y)) cnt += 1;
+    }
+    rowScores[y] = cnt / SAMPLE_W;
+  }
+
+  // 행 점수 0.4 이상 연속구간 중 가장 긴 것 = 종이 세로 범위
+  const ROW_THRESHOLD = 0.4;
+  let bestStart = -1;
+  let bestEnd = -1;
+  let bestLen = 0;
+  let curStart = -1;
+  for (let y = 0; y < sampleH; y += 1) {
+    if (rowScores[y] >= ROW_THRESHOLD) {
+      if (curStart < 0) curStart = y;
+    } else if (curStart >= 0) {
+      const len = y - curStart;
+      if (len > bestLen) {
+        bestLen = len;
+        bestStart = curStart;
+        bestEnd = y - 1;
+      }
+      curStart = -1;
+    }
+  }
+  if (curStart >= 0) {
+    const len = sampleH - curStart;
+    if (len > bestLen) {
+      bestLen = len;
+      bestStart = curStart;
+      bestEnd = sampleH - 1;
+    }
+  }
+  // 종이 너무 작으면 신뢰 불가 — 폴백
+  if (bestStart < 0 || bestLen < sampleH * 0.2) return null;
+
+  // 그 안에서 열별 종이 픽셀 비율 → 좌·우 끝
+  const colScores = new Array<number>(SAMPLE_W);
+  const sliceH = bestEnd - bestStart + 1;
+  for (let x = 0; x < SAMPLE_W; x += 1) {
+    let cnt = 0;
+    for (let y = bestStart; y <= bestEnd; y += 1) {
+      if (isPaperPixel(x, y)) cnt += 1;
+    }
+    colScores[x] = cnt / sliceH;
+  }
+  let leftX = 0;
+  for (let x = 0; x < SAMPLE_W; x += 1) {
+    if (colScores[x] >= ROW_THRESHOLD) {
+      leftX = x;
+      break;
+    }
+  }
+  let rightX = SAMPLE_W - 1;
+  for (let x = SAMPLE_W - 1; x >= 0; x -= 1) {
+    if (colScores[x] >= ROW_THRESHOLD) {
+      rightX = x;
+      break;
+    }
+  }
+
+  // 정규화 좌표 — 1px 안전 마진
+  const x = Math.max(0, leftX / SAMPLE_W);
+  const y = Math.max(0, bestStart / sampleH);
+  const width = Math.min(1 - x, (rightX - leftX + 1) / SAMPLE_W);
+  const height = Math.min(1 - y, (bestEnd - bestStart + 1) / sampleH);
+  if (width < 0.2 || height < 0.2) return null;
+  return { x, y, width, height };
 }
 
 async function loadImage(dataUrl: string): Promise<HTMLImageElement> {
