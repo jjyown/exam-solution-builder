@@ -761,8 +761,35 @@ export default function EditPage() {
       width: sel.width / imageEl.width,
       height: sel.height / imageEl.height,
     };
-    // 빨간 박스 즉시 표시 — cropNorm 만 먼저 저장.
+    // 빨간 박스 즉시 표시 — cropNorm 먼저 저장. paperOffset 은 백그라운드로 비동기 갱신.
     setSlot(active.id, { cropNorm, error: undefined });
+    // 사용자 검수·드래그한 박스 → 화면 박스 대비 4-corner 마진(paperOffset) 재계산.
+    // 이 값이 Drive 업로드 시 히스토리에 누적되어 다음 자동 검출의 평균 시드로 사용됨.
+    if (active.sourceDataUrl) {
+      void detectScreenBoxByPixels(active.sourceDataUrl)
+        .then((screen) => {
+          if (!screen || screen.width < 0.05 || screen.height < 0.05) return;
+          const left = (cropNorm.x - screen.x) / screen.width;
+          const right =
+            (screen.x + screen.width - cropNorm.x - cropNorm.width) / screen.width;
+          const top = (cropNorm.y - screen.y) / screen.height;
+          const bottom =
+            (screen.y + screen.height - cropNorm.y - cropNorm.height) / screen.height;
+          // 화면 안쪽에 있어야 의미 있음 — 음수 일부는 허용(1~2% 오차), 너무 벗어나면 무시
+          const ok = (v: number) => v >= -0.05 && v <= 1.05;
+          if (!ok(left) || !ok(right) || !ok(top) || !ok(bottom)) return;
+          const paperOffset: PaperOffset = {
+            left: Math.max(0, left),
+            right: Math.max(0, right),
+            top: Math.max(0, top),
+            bottom: Math.max(0, bottom),
+          };
+          setSlot(active.id, { paperOffset });
+        })
+        .catch(() => {
+          /* 화면 검출 실패 — paperOffset 갱신 skip, cropNorm 만 유지 */
+        });
+    }
 
     // captureCrop 시도 — imgRef 가 dataURL 이면 즉시 OK, CDN URL 이면 SecurityError.
     const naturalBox = normToNaturalBox(
@@ -1735,22 +1762,22 @@ export default function EditPage() {
                   className="rounded-md border border-indigo-300 bg-white px-3 py-1.5 text-xs font-semibold text-indigo-800 hover:bg-indigo-50 disabled:opacity-50"
                   title={
                     historyCount >= 5
-                      ? `히스토리 ${historyCount}개로 학습된 평균 위치 사용 + 베젤·앱 UI 자동 제외. 끝나면 첫 페이지 헤더에서 학교명도 자동 추출`
-                      : `체크된 모든 페이지의 시험지 종이 영역을 픽셀 분석으로 자동 검출 — 끝나면 학교명도 자동 추출. Drive 업로드 시 박스 위치가 누적돼 점점 정확해짐`
+                      ? `1차: 태블릿 화면만 잘라냄 (베젤·바깥 제거) → 2차: 누적 학습 ${historyCount}개의 4-corner 평균 적용. 끝나면 학교명도 자동 추출`
+                      : `1차: 태블릿 화면만 잘라냄 (베젤·바깥 제거) → 2차: 사용자 드래그로 종이 영역 미세조정 → Drive 업로드 시 그 위치가 누적돼 ${5 - historyCount}개 더 쌓이면 평균 자동 적용`
                   }
                 >
                   {bulkBusy
                     ? "처리 중…"
-                    : `🔍 전체 자동 감지 + 학교명${historyCount >= 5 ? ` (학습 ${historyCount})` : ""}`}
+                    : `🔍 전체 자동 감지 + 학교명${historyCount >= 5 ? ` (학습 ${historyCount})` : historyCount > 0 ? ` (학습 ${historyCount}/5)` : ""}`}
                 </button>
-                {historyCount >= 5 && (
+                {historyCount > 0 && (
                   <button
                     onClick={() => {
-                      if (confirm(`학습된 박스 히스토리 ${historyCount}개를 모두 삭제합니다. 진행할까요?\n\n(태블릿·카메라 셋업이 바뀌었을 때 사용)`))
+                      if (confirm(`학습된 박스 히스토리 ${historyCount}개를 모두 삭제합니다. 진행할까요?\n\n(검출이 일정하게 빗나가거나 태블릿·카메라 셋업이 바뀌었을 때 사용)`))
                         clearHistory();
                     }}
                     className="rounded border border-slate-300 bg-white px-1.5 py-1.5 text-[10px] font-semibold text-slate-500 hover:bg-slate-50"
-                    title="학습 히스토리 초기화 — 태블릿/카메라 셋업이 바뀌었을 때 사용"
+                    title="학습 히스토리 초기화 — 검출이 일정하게 빗나가거나 태블릿/카메라 셋업이 바뀌었을 때 사용"
                   >
                     학습 ↺
                   </button>
@@ -2132,29 +2159,14 @@ async function imageDimensions(dataUrl: string): Promise<{ w: number; h: number 
 }
 
 /**
- * 시험지 종이 영역 자동 검출 — 2단계 + 보강 휴리스틱.
+ * 태블릿 스크린(베젤 제외) 검출 — 픽셀 분석 1단계.
+ *  - 적응적 임계값(베젤 밝기 히스토그램 피크 + 30) 으로 검은 베젤·손·바깥을 분리.
+ *  - 행/열별 「밝은 픽셀 비율 ≥ 0.55」 인 가장 긴 구간 = 스크린 직사각형.
+ *  - 검출 실패 시 null. 처리 시간 ~20-30ms (API 0).
  *
- * Stage 1: **태블릿 스크린 검출** — 검은 베젤 제외하고 화면(밝기 > bezel 임계)이
- *           차지하는 가장 큰 직사각형을 찾는다.
- * Stage 2: **종이 검출** — Stage 1 영역 안에서 「흰 종이」(밝기 매우 높고 무채색)
- *           가 차지하는 가장 큰 세로 구간을 찾는다 → 앱 UI(회색 헤더·툴바) 제외.
- *
- * 추가 보강:
- *  (a) 적응적 임계값 — 히스토그램 분석으로 베젤·UI·종이 밝기 피크를 자동 산출.
- *      조명 어두운 사진에도 견고.
- *  (b) 비율 상식 체크 — 종이 영역의 가로/세로 비율이 0.5~2.5 범위 밖이면 거부.
- *  (c) 경계 엣지 리파인 — 검출된 상·하단 경계 ±5% 범위를 다시 스캔해 가장 가파른
- *      밝기 변화점에 스냅 → 종이 가장자리에 정확히 맞춤.
- *  (d) 안전 폴백 — Stage 2 실패 시 Stage 1(태블릿 스크린) 영역으로 폴백,
- *      Stage 1도 실패하면 null → 호출자 기본 비율 사용.
- *
- * 처리 시간: 1장당 ~20~50ms (API 호출 0).
+ * 반환은 0~1 정규화 좌표 (`CropNorm`). 호출자는 그대로 슬롯 cropNorm 으로 사용 가능.
  */
-async function detectPaperBoxByPixels(
-  imageDataUrl: string,
-  /** 묶음 학습 — 첫 슬롯의 paperOffset 을 다른 슬롯에 재사용. 일관성 ↑, 검출 실패율 ↓. */
-  learnedOffset?: PaperOffset | null,
-): Promise<PaperDetection | null> {
+async function detectScreenBoxByPixels(imageDataUrl: string): Promise<CropNorm | null> {
   let img: HTMLImageElement;
   try {
     img = await loadImage(imageDataUrl);
@@ -2177,53 +2189,38 @@ async function detectPaperBoxByPixels(
   }
   const data = imgData.data;
 
-  // 픽셀 헬퍼
   function brightAt(x: number, y: number): number {
     const i = (y * SAMPLE_W + x) * 4;
     return (data[i] + data[i + 1] + data[i + 2]) / 3;
   }
-  function colorVarAt(x: number, y: number): number {
-    const i = (y * SAMPLE_W + x) * 4;
-    const r = data[i];
-    const g = data[i + 1];
-    const b = data[i + 2];
-    return Math.max(r, g, b) - Math.min(r, g, b);
-  }
 
-  // (a) 적응적 임계값 — 밝기 히스토그램에서 피크 찾기
+  // 적응적 임계값 — 베젤 피크 + 30
   const hist = new Array<number>(256).fill(0);
   for (let i = 0; i < SAMPLE_W * sampleH; i += 1) {
     const idx = i * 4;
     const b = Math.floor((data[idx] + data[idx + 1] + data[idx + 2]) / 3);
     hist[Math.min(255, Math.max(0, b))] += 1;
   }
-  // 3-bin smoothing
   const smooth = new Array<number>(256).fill(0);
   for (let i = 1; i < 255; i += 1) smooth[i] = (hist[i - 1] + hist[i] + hist[i + 1]) / 3;
   smooth[0] = hist[0];
   smooth[255] = hist[255];
-  // 베젤 임계 — 0~80 범위에서 가장 큰 봉우리 + 30
   let bezelPeak = 0;
   for (let b = 0; b <= 80; b += 1) {
     if (smooth[b] > smooth[bezelPeak]) bezelPeak = b;
   }
-  const SCREEN_THRESHOLD = Math.min(120, bezelPeak + 30); // 베젤 위로 안전 마진
-  // 종이 임계 — 200~255 범위 봉우리 - 25 (피크보다 약간 낮춰서 종이 가장자리 포함)
-  let paperPeak = 255;
-  for (let b = 255; b >= 200; b -= 1) {
-    if (smooth[b] > smooth[paperPeak]) paperPeak = b;
-  }
-  const PAPER_BRIGHT_MIN = Math.max(180, paperPeak - 25);
+  const SCREEN_THRESHOLD = Math.min(120, bezelPeak + 30);
 
   function isScreenPixel(x: number, y: number): boolean {
     return brightAt(x, y) > SCREEN_THRESHOLD;
   }
-  function isPaperPixel(x: number, y: number): boolean {
-    return brightAt(x, y) >= PAPER_BRIGHT_MIN && colorVarAt(x, y) <= 28;
-  }
 
-  // 가장 긴 연속 행 구간을 찾는 헬퍼
-  function findLongestRowRun(scores: number[], threshold: number, yMin = 0, yMax = scores.length - 1) {
+  function findLongestRowRun(
+    scores: number[],
+    threshold: number,
+    yMin = 0,
+    yMax = scores.length - 1,
+  ): { start: number; end: number; len: number } {
     let start = -1;
     let end = -1;
     let bestLen = 0;
@@ -2252,7 +2249,7 @@ async function detectPaperBoxByPixels(
     return { start, end, len: bestLen };
   }
 
-  // ── Stage 1: 태블릿 스크린 검출 (베젤 제외) ─────────────────────
+  // 행별 스크린 비율 → 가장 긴 구간
   const rowScreenScore = new Array<number>(sampleH);
   for (let y = 0; y < sampleH; y += 1) {
     let cnt = 0;
@@ -2262,6 +2259,7 @@ async function detectPaperBoxByPixels(
   const screenY = findLongestRowRun(rowScreenScore, 0.55);
   if (screenY.start < 0 || screenY.len < sampleH * 0.3) return null;
 
+  // 열별 스크린 비율 → 좌/우 경계
   const colScreenScore = new Array<number>(SAMPLE_W);
   for (let x = 0; x < SAMPLE_W; x += 1) {
     let cnt = 0;
@@ -2284,122 +2282,61 @@ async function detectPaperBoxByPixels(
   }
   if (screenRight - screenLeft < SAMPLE_W * 0.3) return null;
 
-  // ── Stage 2: 태블릿 안에서 종이 검출 (UI 제외) ────────────────
-  let paperTop: number;
-  let paperBottom: number;
-  let paperLeft: number;
-  let paperRight: number;
-  let usedLearnedOffset = false;
-
-  if (learnedOffset) {
-    // 묶음 학습 — 첫 슬롯에서 학습한 paperOffset 을 현재 태블릿 스크린에 그대로 투영
-    const sw = screenRight - screenLeft;
-    const sh = screenY.end - screenY.start;
-    paperLeft = Math.round(screenLeft + learnedOffset.left * sw);
-    paperRight = Math.round(screenRight - learnedOffset.right * sw);
-    paperTop = Math.round(screenY.start + learnedOffset.top * sh);
-    paperBottom = Math.round(screenY.end - learnedOffset.bottom * sh);
-    usedLearnedOffset = true;
-  } else {
-    const screenW = screenRight - screenLeft + 1;
-    const rowPaperScore = new Array<number>(sampleH).fill(0);
-    for (let y = screenY.start; y <= screenY.end; y += 1) {
-      let cnt = 0;
-      for (let x = screenLeft; x <= screenRight; x += 1) if (isPaperPixel(x, y)) cnt += 1;
-      rowPaperScore[y] = cnt / screenW;
-    }
-    const paperY = findLongestRowRun(rowPaperScore, 0.45, screenY.start, screenY.end);
-
-    // 종이 검출 실패 — 태블릿 스크린 영역으로 폴백
-    if (paperY.start < 0 || paperY.len < sampleH * 0.2) {
-      paperTop = screenY.start;
-      paperBottom = screenY.end;
-      paperLeft = screenLeft;
-      paperRight = screenRight;
-    } else {
-      paperTop = paperY.start;
-      paperBottom = paperY.end;
-      // 열별 종이 비율로 좌·우 경계
-      const colPaperScore = new Array<number>(SAMPLE_W).fill(0);
-      const paperH = paperBottom - paperTop + 1;
-      for (let x = screenLeft; x <= screenRight; x += 1) {
-        let cnt = 0;
-        for (let y = paperTop; y <= paperBottom; y += 1) if (isPaperPixel(x, y)) cnt += 1;
-        colPaperScore[x] = cnt / paperH;
-      }
-      paperLeft = screenLeft;
-      paperRight = screenRight;
-      for (let x = screenLeft; x <= screenRight; x += 1) {
-        if (colPaperScore[x] >= 0.45) {
-          paperLeft = x;
-          break;
-        }
-      }
-      for (let x = screenRight; x >= screenLeft; x -= 1) {
-        if (colPaperScore[x] >= 0.45) {
-          paperRight = x;
-          break;
-        }
-      }
-    }
-  }
-
-  // (c) 경계 엣지 리파인 — 상·하 경계 ±5% 범위에서 가장 가파른 밝기 변화점에 스냅
-  function refineHorizontalEdge(yCenter: number, dir: "down" | "up"): number {
-    const range = Math.max(2, Math.floor(sampleH * 0.05));
-    const yMin = Math.max(0, yCenter - range);
-    const yMax = Math.min(sampleH - 1, yCenter + range);
-    let bestY = yCenter;
-    let bestGrad = 0;
-    for (let y = yMin + 1; y <= yMax; y += 1) {
-      let grad = 0;
-      for (let x = paperLeft; x <= paperRight; x += 1) {
-        grad += brightAt(x, y) - brightAt(x, y - 1);
-      }
-      grad /= paperRight - paperLeft + 1;
-      const eff = dir === "down" ? grad : -grad; // down: 어두→밝(상단 엣지), up: 밝→어두(하단 엣지)
-      if (eff > bestGrad) {
-        bestGrad = eff;
-        bestY = y;
-      }
-    }
-    return bestY;
-  }
-  // 학습된 offset 일 땐 엣지 리파인 생략 (이미 정확한 마진 적용됨)
-  if (!usedLearnedOffset) {
-    paperTop = refineHorizontalEdge(paperTop, "down");
-    paperBottom = refineHorizontalEdge(paperBottom, "up");
-  }
-
-  // (b) 가로세로 비율 상식 체크 — 0.4 ~ 2.8 (가로 시험지·세로 시험지 모두 허용)
-  const widthN = (paperRight - paperLeft + 1) / SAMPLE_W;
-  const heightN = (paperBottom - paperTop + 1) / sampleH;
-  const aspect = widthN / heightN;
-  if (aspect < 0.4 || aspect > 2.8) {
-    // 비율 비정상 — 태블릿 스크린으로 폴백
-    paperTop = screenY.start;
-    paperBottom = screenY.end;
-    paperLeft = screenLeft;
-    paperRight = screenRight;
-  }
-
-  const x = Math.max(0, paperLeft / SAMPLE_W);
-  const y = Math.max(0, paperTop / sampleH);
-  const width = Math.min(1 - x, (paperRight - paperLeft + 1) / SAMPLE_W);
-  const height = Math.min(1 - y, (paperBottom - paperTop + 1) / sampleH);
-  if (width < 0.2 || height < 0.2) return null;
-
-  // 묶음 학습용 paperOffset — 다른 슬롯에서 재사용
-  const sw = screenRight - screenLeft;
-  const sh = screenY.end - screenY.start;
-  const paperOffset: PaperOffset = {
-    top: sh > 0 ? Math.max(0, (paperTop - screenY.start) / sh) : 0,
-    bottom: sh > 0 ? Math.max(0, (screenY.end - paperBottom) / sh) : 0,
-    left: sw > 0 ? Math.max(0, (paperLeft - screenLeft) / sw) : 0,
-    right: sw > 0 ? Math.max(0, (screenRight - paperRight) / sw) : 0,
+  return {
+    x: screenLeft / SAMPLE_W,
+    y: screenY.start / sampleH,
+    width: (screenRight - screenLeft + 1) / SAMPLE_W,
+    height: (screenY.end - screenY.start + 1) / sampleH,
   };
+}
 
-  return { cropNorm: { x, y, width, height }, paperOffset };
+/**
+ * 시험지 종이 영역 자동 검출 — 사용자 설계 그대로:
+ *  1) Stage 1 : 태블릿 화면 검출 → 화면 바깥(베젤·손·책상) 잘라냄
+ *  2) Stage 2 : 화면 안에서 누적 학습 4-corner 평균(`learnedOffset`) 으로 종이 박스 산출.
+ *               학습 데이터 없으면 → **화면 전체** 가 종이 박스 (사용자 수동 드래그로 검수).
+ *
+ * ❗ 픽셀 기반 종이 검출은 **사용하지 않는다** — 과거에는 「밝기 ≥ paperPeak-25 && 무채색」
+ *    휴리스틱으로 종이를 추정했는데, UI 회색 헤더·반사 영역에서 일관되게 빗나가
+ *    학습 히스토리에 편향이 누적됐다. Stage 1(견고) + 사용자 검수 학습(정직) 만 신뢰한다.
+ *
+ * 처리 시간: 1장당 ~20-30ms (API 0).
+ */
+async function detectPaperBoxByPixels(
+  imageDataUrl: string,
+  /** 누적 히스토리에서 산출한 4-corner 평균 (없으면 종이 박스 = 화면 전체) */
+  learnedOffset?: PaperOffset | null,
+): Promise<PaperDetection | null> {
+  const screen = await detectScreenBoxByPixels(imageDataUrl);
+  if (!screen) return null;
+
+  if (!learnedOffset) {
+    // 학습 데이터 없음 → 화면 전체 표시. 사용자가 모서리 드래그로 종이 영역만 좁히면
+    // handleCropComplete 가 화면 대비 마진을 계산해 paperOffset 으로 저장하고,
+    // Drive 업로드 시 그 값이 히스토리에 누적된다.
+    return {
+      cropNorm: screen,
+      paperOffset: { top: 0, right: 0, bottom: 0, left: 0 },
+    };
+  }
+
+  // 학습된 4-corner 평균 적용 — 화면 박스에 마진 비율 그대로 투영
+  const x = screen.x + learnedOffset.left * screen.width;
+  const y = screen.y + learnedOffset.top * screen.height;
+  const width = Math.max(0.01, screen.width * (1 - learnedOffset.left - learnedOffset.right));
+  const height = Math.max(0.01, screen.height * (1 - learnedOffset.top - learnedOffset.bottom));
+  // 안전 클램프 — 음수·1 초과 방지
+  const cx = Math.max(0, Math.min(0.99, x));
+  const cy = Math.max(0, Math.min(0.99, y));
+  return {
+    cropNorm: {
+      x: cx,
+      y: cy,
+      width: Math.min(1 - cx, width),
+      height: Math.min(1 - cy, height),
+    },
+    paperOffset: learnedOffset,
+  };
 }
 
 // ── 4점 perspective correction ───────────────────────────────────────────
