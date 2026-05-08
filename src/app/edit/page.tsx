@@ -664,6 +664,9 @@ export default function EditPage() {
    */
   async function handlePointClick(e: React.MouseEvent<HTMLDivElement>) {
     if (!pointMode || !active || !imgRef.current) return;
+    // 이미 4점이 찍혀 있으면 추가 클릭 무시 (5번째 점 안 찍히도록)
+    // 새로 찍으려면 「초기화」 버튼으로 명시적으로 비워야 함
+    if (cornerPoints.length >= 4) return;
     const img = imgRef.current;
     const rect = img.getBoundingClientRect();
     const px = e.clientX - rect.left;
@@ -683,6 +686,7 @@ export default function EditPage() {
     if (maxX - minX < 10 || maxY - minY < 10 || !img.width || !img.height) {
       // 너무 작거나 이미지 크기 모름 — 점만 초기화하고 종료
       setCornerPoints([]);
+      setSlot(active.id, { error: "점 4개가 너무 가까이 모여 영역이 작습니다. 초기화 후 다시" });
       return;
     }
     const cropNorm: CropNorm = {
@@ -732,7 +736,8 @@ export default function EditPage() {
         });
       }
     }
-    setCornerPoints([]);
+    // 4점·연결선·결과 박스를 화면에 그대로 남겨 사용자가 검수할 수 있게 한다.
+    // 다시 찍으려면 「초기화」 버튼으로 명시적으로 비우게 함.
   }
 
   function clearPointMarkers(): void {
@@ -1870,7 +1875,16 @@ export default function EditPage() {
                             width={imgRef.current.width}
                             height={imgRef.current.height}
                           >
-                            {cornerPoints.length > 1 && (
+                            {/* 4점이 모두 찍히면 채운 사각형(사다리꼴)으로 영역 명확히 표시 */}
+                            {cornerPoints.length === 4 && (
+                              <polygon
+                                points={cornerPoints.map((p) => `${p.x},${p.y}`).join(" ")}
+                                fill="rgba(245, 158, 11, 0.18)"
+                                stroke="rgba(245, 158, 11, 0.95)"
+                                strokeWidth={2}
+                              />
+                            )}
+                            {cornerPoints.length > 1 && cornerPoints.length < 4 && (
                               <polyline
                                 points={cornerPoints.map((p) => `${p.x},${p.y}`).join(" ")}
                                 fill="none"
@@ -1879,16 +1893,17 @@ export default function EditPage() {
                                 strokeDasharray="4 3"
                               />
                             )}
-                            {cornerPoints.length === 4 && (
-                              // 4번째 점 → 1번째로 닫힘선
-                              <line
-                                x1={cornerPoints[3].x}
-                                y1={cornerPoints[3].y}
-                                x2={cornerPoints[0].x}
-                                y2={cornerPoints[0].y}
-                                stroke="rgba(245, 158, 11, 0.9)"
+                            {/* 4점 묶음의 axis-aligned bounding box (실제 cropNorm 과 동일) */}
+                            {active.cropNorm && imgRef.current && (
+                              <rect
+                                x={active.cropNorm.x * imgRef.current.width}
+                                y={active.cropNorm.y * imgRef.current.height}
+                                width={active.cropNorm.width * imgRef.current.width}
+                                height={active.cropNorm.height * imgRef.current.height}
+                                fill="none"
+                                stroke="rgba(220, 38, 38, 0.85)"
                                 strokeWidth={2}
-                                strokeDasharray="4 3"
+                                strokeDasharray="6 3"
                               />
                             )}
                             {cornerPoints.map((p, i) => (
