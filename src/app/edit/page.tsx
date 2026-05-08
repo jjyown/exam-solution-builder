@@ -843,6 +843,7 @@ export default function EditPage() {
         return;
     }
     setBulkBusy(true);
+    const processed: Slot[] = [];
     try {
       for (const s of targets) {
         // 풀 dataURL 보장 (썸네일 URL 은 canvas tainted 위험)
@@ -864,6 +865,7 @@ export default function EditPage() {
           );
           const croppedDataUrl = captureCrop(img, naturalBox);
           setSlot(s.id, { cropNorm, croppedDataUrl });
+          processed.push({ ...s, cropNorm, croppedDataUrl });
         } catch {
           // 캔버스 자르기 실패 — 박스만이라도 저장
           setSlot(s.id, { cropNorm });
@@ -872,6 +874,8 @@ export default function EditPage() {
     } finally {
       setBulkBusy(false);
     }
+    // 박스 검출 끝나면 학교명도 자동 추출 (examName 이 비어있을 때만, 첫 슬롯 헤더로)
+    void maybeAutoExtractExamName(processed);
   }
 
   // ── AI 박스 모방 (현재 슬롯 박스를 기준으로 나머지에 같은 의도 적용) ────
@@ -957,6 +961,43 @@ export default function EditPage() {
       }
     } finally {
       setBulkBusy(false);
+    }
+    // 모방 끝나면 학교명도 자동 추출 (examName 비었을 때, active 슬롯 헤더로 — 사용자가 기준 잡은 페이지)
+    if (active?.croppedDataUrl) {
+      void maybeAutoExtractExamName([active]);
+    }
+  }
+
+  /**
+   * 일괄 작업 끝난 뒤 「묶음(시험) 이름」이 비어 있으면 자동 추출.
+   * - 체크된 첫 슬롯의 croppedDataUrl (잘라낸 종이) 의 상단 30% = 헤더 영역
+   * - 헤더만 Gemini 에 전송 → 작은 페이로드로 빠른 응답 (보통 1~2초)
+   * - 결과 있으면 setExamName, 없으면 silent (사용자 수동 채움 OK)
+   */
+  async function maybeAutoExtractExamName(targets: Slot[]): Promise<void> {
+    if (examName.trim()) return; // 이미 사용자가 입력함
+    const first = targets.find((s) => s.croppedDataUrl);
+    if (!first?.croppedDataUrl) return;
+    const headerImg = await extractHeaderRegion(first.croppedDataUrl, 0.3);
+    if (!headerImg) return;
+    setSlot(first.id, { busy: "naming" });
+    try {
+      const res = await fetch("/api/photo-edit/suggest-name", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ image: headerImg }),
+      });
+      const data = await res.json();
+      if (data.ok && data.name && String(data.name).length >= 5) {
+        // 그 사이 사용자가 직접 입력했을 수 있어 다시 한 번 확인
+        setExamName((cur) => (cur.trim() ? cur : String(data.name)));
+        setSlot(first.id, { suggestedName: String(data.name), busy: null });
+      } else {
+        setSlot(first.id, { busy: null });
+      }
+    } catch {
+      setSlot(first.id, { busy: null });
+      /* silent — 자동 추출 실패는 사용자 수동으로 보완 */
     }
   }
 
@@ -1602,15 +1643,15 @@ export default function EditPage() {
                   onClick={detectAllBoxes}
                   disabled={bulkBusy || slots.every((s) => s.cropNorm)}
                   className="rounded-md border border-indigo-300 bg-white px-3 py-1.5 text-xs font-semibold text-indigo-800 hover:bg-indigo-50 disabled:opacity-50"
-                  title="체크된 모든 페이지의 시험지 종이 영역을 픽셀 분석으로 자동 검출 — 베젤·앱 UI 자동 제외 (감지 실패 시 기본 비율 폴백)"
+                  title="체크된 모든 페이지의 시험지 종이 영역을 자동 검출 — 베젤·앱 UI 자동 제외. 끝나면 첫 페이지 헤더에서 학교명도 자동 추출 (묶음 이름 비어있을 때만)"
                 >
-                  {bulkBusy ? "처리 중…" : "🔍 전체 자동 감지"}
+                  {bulkBusy ? "처리 중…" : "🔍 전체 자동 감지 + 학교명"}
                 </button>
                 <button
                   onClick={mimicBoxFromActive}
                   disabled={!active?.cropNorm || bulkBusy}
                   className="rounded-md border border-purple-700 bg-purple-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-purple-700 disabled:opacity-50"
-                  title="현재 박스를 기준으로 나머지 페이지에 같은 의도의 박스 복제"
+                  title="현재 박스를 기준으로 나머지 체크 페이지에 같은 의도의 박스 복제 (Gemini). 끝나면 학교명도 자동 추출"
                 >
                   🪄 기준 박스로 모방
                 </button>
@@ -2394,6 +2435,30 @@ async function warpPerspective(
   }
   outCtx.putImageData(outImgData, 0, 0);
   return outCanvas.toDataURL("image/jpeg", 0.92);
+}
+
+/**
+ * dataURL 이미지의 「상단 N% (0~1)」를 잘라 dataURL 로 반환.
+ * 자동 종이 검출 → 그 결과의 헤더 영역만 Gemini 학교명 추출에 사용 (빠른 호출).
+ */
+async function extractHeaderRegion(
+  dataUrl: string,
+  topFraction: number,
+): Promise<string | null> {
+  try {
+    const img = await loadImage(dataUrl);
+    const w = img.naturalWidth;
+    const h = Math.max(20, Math.round(img.naturalHeight * Math.max(0.05, Math.min(1, topFraction))));
+    const canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return null;
+    ctx.drawImage(img, 0, 0, w, img.naturalHeight, 0, 0, w, img.naturalHeight);
+    return canvas.toDataURL("image/jpeg", 0.92);
+  } catch {
+    return null;
+  }
 }
 
 async function loadImage(dataUrl: string): Promise<HTMLImageElement> {
