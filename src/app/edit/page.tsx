@@ -110,6 +110,8 @@ export default function EditPage() {
   const [presets, setPresets] = useState<RangePreset[]>([]);
   const [presetName, setPresetName] = useState("");
   const [draggingId, setDraggingId] = useState<string | null>(null);
+  /** 체크 순서 입력 편집 상태 — 한 슬롯에서만 편집 중. 빈문자/숫자 허용. */
+  const [orderEdit, setOrderEdit] = useState<{ id: string; value: string } | null>(null);
 
   const active = slots.find((s) => s.id === activeId) ?? null;
 
@@ -266,6 +268,49 @@ export default function EditPage() {
       return next.map((s, i) => ({ ...s, pageNo: i + 1 }));
     });
     setDraggingId(null);
+  }
+
+  /**
+   * 체크된 슬롯의 「체크 순서」를 사용자 입력대로 재배치.
+   * - 체크된 N 개를 사용자 입력 순서로 1..N
+   * - 체크 안 된 슬롯은 그 뒤(N+1..M)에 기존 상대 순서 유지하며 배치
+   * - 사이드바 array 순서·pageNo 모두 일치시킴 (드래그 동작과 같은 규칙)
+   */
+  function setCheckedSlotOrder(slotId: string, newOneBasedPos: number): void {
+    setSlots((prev) => {
+      const checkedSorted = prev
+        .filter((s) => s.includeInPdf)
+        .slice()
+        .sort((a, b) => a.pageNo - b.pageNo);
+      const fromIdx = checkedSorted.findIndex((c) => c.id === slotId);
+      if (fromIdx < 0) return prev;
+      const toIdx = Math.max(
+        0,
+        Math.min(newOneBasedPos - 1, checkedSorted.length - 1),
+      );
+      if (fromIdx === toIdx) return prev;
+
+      const [moved] = checkedSorted.splice(fromIdx, 1);
+      checkedSorted.splice(toIdx, 0, moved);
+
+      // 체크 안 된 슬롯은 기존 array 순서 유지 (드래그로 잡아놓은 순서 보존)
+      const checkedIdSet = new Set(checkedSorted.map((c) => c.id));
+      const uncheckedKeepOrder = prev.filter((s) => !checkedIdSet.has(s.id));
+
+      const merged = [...checkedSorted, ...uncheckedKeepOrder];
+      return merged.map((s, i) => ({ ...s, pageNo: i + 1 }));
+    });
+  }
+
+  /** 슬롯 → 체크 순서 (1-based, 체크 안 됐으면 0) */
+  function checkedOrderOf(s: Slot): number {
+    if (!s.includeInPdf) return 0;
+    const idx = slots
+      .filter((x) => x.includeInPdf)
+      .slice()
+      .sort((a, b) => a.pageNo - b.pageNo)
+      .findIndex((c) => c.id === s.id);
+    return idx + 1;
   }
   function onDragEndSlot() {
     setDraggingId(null);
@@ -1285,9 +1330,60 @@ export default function EditPage() {
                     />
                     <div className="min-w-0 flex-1 text-[11px]">
                       <div className="flex items-center gap-1">
-                        <span className="rounded bg-slate-200 px-1 text-[10px] font-bold text-slate-800">
-                          순서 {orderIdx}
-                        </span>
+                        {s.includeInPdf ? (
+                          // 체크된 슬롯: 「체크 N」 + 입력 필드 (타이핑으로 묶음 안에서 순서 지정)
+                          (() => {
+                            const co = checkedOrderOf(s);
+                            const isEditing = orderEdit?.id === s.id;
+                            const display = isEditing ? orderEdit!.value : String(co);
+                            return (
+                              <span
+                                className="inline-flex items-center gap-0.5 rounded bg-emerald-200 px-1 text-[10px] font-bold text-emerald-900"
+                                title="체크 묶음 안에서의 순서 — 타이핑으로 위치 변경"
+                              >
+                                체크
+                                <input
+                                  type="number"
+                                  min={1}
+                                  value={display}
+                                  onClick={(e) => e.stopPropagation()}
+                                  onFocus={(e) => {
+                                    e.stopPropagation();
+                                    setOrderEdit({ id: s.id, value: String(co) });
+                                  }}
+                                  onChange={(e) => {
+                                    e.stopPropagation();
+                                    setOrderEdit({ id: s.id, value: e.target.value });
+                                  }}
+                                  onBlur={(e) => {
+                                    e.stopPropagation();
+                                    if (orderEdit?.id === s.id) {
+                                      const n = Number.parseInt(orderEdit.value, 10);
+                                      if (Number.isFinite(n) && n >= 1) {
+                                        setCheckedSlotOrder(s.id, n);
+                                      }
+                                      setOrderEdit(null);
+                                    }
+                                  }}
+                                  onKeyDown={(e) => {
+                                    if (e.key === "Enter") {
+                                      e.preventDefault();
+                                      (e.currentTarget as HTMLInputElement).blur();
+                                    } else if (e.key === "Escape") {
+                                      setOrderEdit(null);
+                                      (e.currentTarget as HTMLInputElement).blur();
+                                    }
+                                  }}
+                                  className="w-9 rounded border border-emerald-300 bg-white px-0.5 text-center text-[10px] font-bold text-emerald-900"
+                                />
+                              </span>
+                            );
+                          })()
+                        ) : (
+                          <span className="rounded bg-slate-200 px-1 text-[10px] font-bold text-slate-800">
+                            순서 {orderIdx}
+                          </span>
+                        )}
                         {s.driveFileId && (
                           <span
                             className="rounded bg-emerald-100 px-1 text-[9px] font-medium text-emerald-800"
