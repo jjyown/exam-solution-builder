@@ -272,11 +272,18 @@ export async function geminiMimicCropBox(
 const PROMPT_EXAM_NAME = `이미지의 제목/헤더를 읽어 시험지 한 줄 형식으로 만드세요.
 중요: 이전 답변·예시 복사 금지. 오직 현재 이미지에서 읽힌 텍스트만 사용.
 
+이미지가 두 장 주어지면:
+ - 1번 이미지 = 시험지 전체. 연도·지역·학기 등 컨텍스트.
+ - 2번 이미지 = 학교명/헤더 영역만 확대한 크롭 (사용자가 표시한 정확 위치).
+ → **2번 이미지에서 정확한 학교명 텍스트를 읽고, 1번 이미지에서 부족한 정보(연도·지역·학년·학기)를 보강**해
+   아래 형식 한 줄로 합쳐 출력.
+
 출력 형식:
 [중|고]n) [YYYY(이미지에 시험 연도·학년도가 보일 때만, 4자리)] [지역(시/군/구)] [학교명] [과목(선택)] N학년 M학기 [중간고사|기말고사]
 예: 중1) 2025 도봉구 창동중학교 1학년 2학기 중간고사
 예: 고2) 2021 세종시 반곡고등학교 확률과 통계 2학년 1학기 중간고사
 예: 고2) 2022 부산진구 부산진고등학교 수학2 2학년 1학기 기말고사
+예: 중2) 2020 부산진구 광무여자중학교 2학년 1학기 기말고사
 
 규칙:
 1) "N-M"(예: 2-1, 1~2, 1/2)은 앞 숫자 N=학년, 뒤 숫자 M=학기. 절대 순서를 바꾸지 않는다(2-1 ⇒ 2학년 1학기).
@@ -286,7 +293,8 @@ const PROMPT_EXAM_NAME = `이미지의 제목/헤더를 읽어 시험지 한 줄
 5) 고등학교의 수학·선택 과목이면 학교명과 학년 사이에 과목명. 로마자 I·II는 아라비아 숫자(수학II ⇒ 수학2).
    허용 과목: 수학1, 수학2, 확률과 통계, 미분과 적분, 미적분, 대수, 미적분1, 미적분2, 기하.
 6) 끝은 반드시 "중간고사" 또는 "기말고사".
-7) 이미지에서 읽히지 않는 값은 추측 금지.
+7) 이미지에서 읽히지 않는 값은 추측 금지 — 단, 헤더에 「2-1 기말 수학 족보」처럼 압축 표기가 있으면 그대로 풀어 적용.
+8) "기출", "족보", "수학" 같은 보조 단어는 출력에서 제거 (과목·학년·학기로 흡수).
 
 반드시 한 줄만 출력 (설명·따옴표·마크다운·.pdf 확장자·파일명 금지문자(\\ / : * ? " < > |) 금지).`;
 
@@ -303,8 +311,24 @@ function sanitizeNameLine(s: string): string {
   return t;
 }
 
+/**
+ * 형식 검증 — 「[중|고]n) … N학년 M학기 [중간고사|기말고사]」 패턴.
+ * 통과하지 못한 응답은 raw text 반환으로 간주하고 다음 모델로 폴백.
+ */
+function isValidExamNameFormat(s: string): boolean {
+  if (!s || s.length < 10) return false;
+  // [중|고]N) 으로 시작
+  if (!/^[중고]\s*\d\s*\)/.test(s)) return false;
+  // N학년 M학기 포함
+  if (!/\d\s*학년\s*\d\s*학기/.test(s)) return false;
+  // 끝이 중간고사 또는 기말고사
+  if (!/(중간고사|기말고사)\s*$/.test(s)) return false;
+  return true;
+}
+
 export async function geminiSuggestExamName(
   imageDataUrl: string,
+  focusImageDataUrl?: string,
 ): Promise<
   | { ok: true; name: string; model: string }
   | { ok: false; error: string; quotaExceeded?: boolean }
@@ -314,29 +338,41 @@ export async function geminiSuggestExamName(
   }
   const parsed = parseDataUrl(imageDataUrl);
   if (!parsed) return { ok: false, error: "이미지 형식 오류" };
+  const focused = focusImageDataUrl ? parseDataUrl(focusImageDataUrl) : null;
 
   let lastErr = "";
   let lastQuota = false;
   for (const model of MODELS) {
     try {
+      // 두 번째 이미지가 있으면: [전체, 확대본, 프롬프트]. 없으면: [전체, 프롬프트].
+      const parts = focused
+        ? [
+            { text: "1번 이미지 (시험지 전체):" },
+            { inline_data: { mime_type: parsed.mimeType, data: parsed.data } },
+            { text: "2번 이미지 (학교명/헤더 영역 확대):" },
+            { inline_data: { mime_type: focused.mimeType, data: focused.data } },
+            { text: PROMPT_EXAM_NAME },
+          ]
+        : [
+            { inline_data: { mime_type: parsed.mimeType, data: parsed.data } },
+            { text: PROMPT_EXAM_NAME },
+          ];
       const json = await callGemini({
         model,
         timeoutMs: 15000,
         // 256 토큰 + thinking 0 — Gemini 2.5 가 thinking 으로 토큰 소모해 출력이 「중2)」 처럼 잘리는 현상 방지.
         // 한 줄 시험명은 보통 30~50 토큰이라 256 은 충분히 여유.
         generationConfig: noThinkingConfig(256),
-        parts: [
-          { inline_data: { mime_type: parsed.mimeType, data: parsed.data } },
-          { text: PROMPT_EXAM_NAME },
-        ],
+        parts,
       });
       const raw = extractGeminiText(json);
       const text = sanitizeNameLine(raw);
-      // 「중2)」 같은 prefix-only 응답은 추출 실패로 간주 — 다음 모델로 폴백.
-      if (text && text.length > 5 && !/^[중고]\s*\d\s*\)\s*$/.test(text)) {
+      // 형식 검증 — 「중2) ... N학년 M학기 ...고사」 패턴 통과해야 합격.
+      // 미달이면 raw 반환으로 간주하고 다음 모델로 폴백.
+      if (isValidExamNameFormat(text)) {
         return { ok: true, name: text, model };
       }
-      lastErr = `${model}: 응답 너무 짧음/형식 미달 (raw="${raw.slice(0, 80)}")`;
+      lastErr = `${model}: 형식 미달 (raw="${raw.slice(0, 100)}")`;
     } catch (e) {
       const msg = (e as Error).message;
       if (/RESOURCE_EXHAUSTED|quota|429/i.test(msg)) lastQuota = true;

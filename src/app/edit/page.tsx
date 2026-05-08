@@ -1255,22 +1255,21 @@ export default function EditPage() {
     if (examName.trim()) return; // 이미 사용자가 입력함
     const first = targets.find((s) => s.croppedDataUrl || s.nameAreaBox);
     if (!first) return;
-    // 우선순위: 사용자가 표시한 nameAreaBox > 잘라낸 페이퍼 헤더 30%
-    let headerImg: string | null = await extractNameAreaImage(first);
-    if (!headerImg && first.croppedDataUrl) {
-      headerImg = await extractHeaderRegion(first.croppedDataUrl, 0.3);
-    }
-    if (!headerImg) return;
+    // 컨텍스트(연도·지역·학기) 보존을 위해 항상 「전체 잘라낸 페이퍼」를 메인 이미지로,
+    // 사용자가 표시한 nameAreaBox 가 있으면 그 확대 크롭을 focusImage 로 함께 전송.
+    const mainImg =
+      first.croppedDataUrl ?? (await ensureFullDataUrlSource(first.id));
+    if (!mainImg) return;
+    const focusImg = first.nameAreaBox ? await extractNameAreaImage(first) : null;
     setSlot(first.id, { busy: "naming" });
     try {
       const res = await fetch("/api/photo-edit/suggest-name", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ image: headerImg }),
+        body: JSON.stringify({ image: mainImg, focusImage: focusImg ?? undefined }),
       });
       const data = await res.json();
       if (data.ok && data.name && String(data.name).length >= 5) {
-        // 그 사이 사용자가 직접 입력했을 수 있어 다시 한 번 확인
         setExamName((cur) => (cur.trim() ? cur : String(data.name)));
         setSlot(first.id, { suggestedName: String(data.name), busy: null });
       } else {
@@ -1278,24 +1277,23 @@ export default function EditPage() {
       }
     } catch {
       setSlot(first.id, { busy: null });
-      /* silent — 자동 추출 실패는 사용자 수동으로 보완 */
     }
   }
 
   // ── AI 학교명 추출 ────────────────────────────────────────────────────
   async function suggestNameForActive() {
     if (!active) return;
-    // 우선순위: nameAreaBox 잘라낸 좁은 영역 > 잘라낸 페이퍼 > 풀 원본
-    let sourceForName: string | null = await extractNameAreaImage(active);
-    if (!sourceForName) sourceForName = active.croppedDataUrl;
-    if (!sourceForName) sourceForName = await ensureFullDataUrlSource(active.id);
-    if (!sourceForName) return;
+    // 컨텍스트 보존: 「전체 페이퍼」를 메인으로, nameAreaBox 가 있으면 확대본을 focusImage 로.
+    const mainImg =
+      active.croppedDataUrl ?? (await ensureFullDataUrlSource(active.id));
+    if (!mainImg) return;
+    const focusImg = active.nameAreaBox ? await extractNameAreaImage(active) : null;
     setSlot(active.id, { busy: "naming", error: undefined });
     try {
       const res = await fetch("/api/photo-edit/suggest-name", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ image: sourceForName }),
+        body: JSON.stringify({ image: mainImg, focusImage: focusImg ?? undefined }),
       });
       const data = await res.json();
       if (!data.ok) throw new Error(data.error || "AI 시험명 추출 실패");
