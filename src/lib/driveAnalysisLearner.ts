@@ -22,7 +22,9 @@ import {
   listDriveFolderFilesRecursive,
   downloadDriveFileById,
 } from "./googleDrive";
-import { extractTextWithGeminiVision, isGeminiVisionAvailable } from "./geminiVisionExtract";
+import { isGeminiVisionAvailable } from "./geminiVisionExtract";
+import { extractTextFromUploadedFile } from "./fileExtraction";
+import { resolveMathpixCredentials } from "./mathpixV3Text";
 import type { ReferenceRecord } from "./referenceRetriever";
 import {
   fetchCachedRecords,
@@ -84,8 +86,11 @@ export async function loadDriveAnalysisRecords(): Promise<{
   }
   summary.configured = true;
 
-  if (!isGeminiVisionAvailable()) {
-    summary.errors.push("GEMINI_API_KEY 미설정 — 분석용 자료를 텍스트로 변환할 수 없습니다.");
+  // OCR 백엔드: Mathpix 또는 Gemini 중 하나는 있어야 함 (Mathpix 우선, 소진 시 Gemini 자동 폴백)
+  if (!isGeminiVisionAvailable() && !resolveMathpixCredentials()) {
+    summary.errors.push(
+      "OCR 백엔드 미설정 — GEMINI_API_KEY 또는 MATHPIX_APP_ID/KEY 가 필요합니다.",
+    );
     return { records: [], summary };
   }
 
@@ -161,7 +166,15 @@ export async function loadDriveAnalysisRecords(): Promise<{
         // 같은 데이터를 두 번 들고 있을 필요 없음 → 즉시 GC 후보로
         buffer = null;
       }
-      const v = await extractTextWithGeminiVision(base64, effectiveMime);
+      // 이미지 OCR 은 Mathpix 우선 → 소진/실패 시 자동으로 Gemini 폴백 (fileExtraction).
+      // PDF 는 pdfjs 우선 → 손상 감지 시 Gemini 멀티모달 (Mathpix /v3/pdf 미사용).
+      // 둘 다 단일 진입점으로 통일해 라우팅 정책 일관성 유지.
+      const ext = path.extname(f.name).toLowerCase();
+      const v = await extractTextFromUploadedFile({
+        fileData: base64,
+        fileName: f.name,
+        fileType: effectiveMime || (ext === ".pdf" ? "application/pdf" : "image/jpeg"),
+      });
       base64 = null; // OCR 응답 받은 직후 즉시 해제
       if (!v.ok) {
         summary.errors.push(`${f.name}: ${v.error}`);

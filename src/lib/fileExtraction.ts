@@ -47,6 +47,11 @@ const PDF_TEXT_MIN_CHARS = 40;
 function extractionPrimary(): "gemini" | "mathpix" {
   const v = (process.env.EXTRACTION_PRIMARY || "").trim().toLowerCase();
   if (v === "mathpix") return "mathpix";
+  if (v === "gemini") return "gemini";
+  // 기본값: 매쓰픽스 자격증명이 있으면 매쓰픽스 우선 (사용자가 충전한 크레딧 소진 우선).
+  // 매쓰픽스 잔여 부족·credit error 시 isMathpixUsableForOcr() / isMathpixQuotaError() 가
+  // 자동 감지하여 1시간 백오프 + Gemini 로 자동 전환 (mathpixV3Text.ts 참고).
+  if (resolveMathpixCredentials()) return "mathpix";
   return "gemini";
 }
 
