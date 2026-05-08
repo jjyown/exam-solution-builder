@@ -1973,14 +1973,23 @@ async function imageDimensions(dataUrl: string): Promise<{ w: number; h: number 
 }
 
 /**
- * 태블릿 스크린샷 안의 「흰 종이(시험지)」 영역을 픽셀 밝기 분석으로 자동 검출.
- * - 다운샘플 256px 캔버스에서 R≈G≈B + 밝기≥170 픽셀을 「종이」로 판정
- * - 행 점수(가로줄 종이 픽셀 비율) 가 0.4 이상인 가장 긴 연속 구간 = 종이 세로 범위
- * - 그 안에서 열 점수가 0.4 이상인 좌·우 끝 = 종이 가로 범위
- * - 헤더·하단 앱 UI(어두운 베젤·툴바·도구박스)는 자연스럽게 제외됨
- * - 실패 시 null → 호출자가 기본 비율 폴백
+ * 시험지 종이 영역 자동 검출 — 2단계 + 보강 휴리스틱.
  *
- * 처리 시간: 1장당 ~10~30ms (API 호출 0).
+ * Stage 1: **태블릿 스크린 검출** — 검은 베젤 제외하고 화면(밝기 > bezel 임계)이
+ *           차지하는 가장 큰 직사각형을 찾는다.
+ * Stage 2: **종이 검출** — Stage 1 영역 안에서 「흰 종이」(밝기 매우 높고 무채색)
+ *           가 차지하는 가장 큰 세로 구간을 찾는다 → 앱 UI(회색 헤더·툴바) 제외.
+ *
+ * 추가 보강:
+ *  (a) 적응적 임계값 — 히스토그램 분석으로 베젤·UI·종이 밝기 피크를 자동 산출.
+ *      조명 어두운 사진에도 견고.
+ *  (b) 비율 상식 체크 — 종이 영역의 가로/세로 비율이 0.5~2.5 범위 밖이면 거부.
+ *  (c) 경계 엣지 리파인 — 검출된 상·하단 경계 ±5% 범위를 다시 스캔해 가장 가파른
+ *      밝기 변화점에 스냅 → 종이 가장자리에 정확히 맞춤.
+ *  (d) 안전 폴백 — Stage 2 실패 시 Stage 1(태블릿 스크린) 영역으로 폴백,
+ *      Stage 1도 실패하면 null → 호출자 기본 비율 사용.
+ *
+ * 처리 시간: 1장당 ~20~50ms (API 호출 0).
  */
 async function detectPaperBoxByPixels(imageDataUrl: string): Promise<CropNorm | null> {
   let img: HTMLImageElement;
@@ -2001,93 +2010,207 @@ async function detectPaperBoxByPixels(imageDataUrl: string): Promise<CropNorm | 
   try {
     imgData = ctx.getImageData(0, 0, SAMPLE_W, sampleH);
   } catch {
-    return null; // canvas tainted (cross-origin)
+    return null;
   }
   const data = imgData.data;
 
-  const PAPER_BRIGHTNESS_MIN = 170;
-  const PAPER_COLOR_VAR_MAX = 32;
-
-  function isPaperPixel(x: number, y: number): boolean {
+  // 픽셀 헬퍼
+  function brightAt(x: number, y: number): number {
+    const i = (y * SAMPLE_W + x) * 4;
+    return (data[i] + data[i + 1] + data[i + 2]) / 3;
+  }
+  function colorVarAt(x: number, y: number): number {
     const i = (y * SAMPLE_W + x) * 4;
     const r = data[i];
     const g = data[i + 1];
     const b = data[i + 2];
-    const minRGB = Math.min(r, g, b);
-    const maxRGB = Math.max(r, g, b);
-    return minRGB >= PAPER_BRIGHTNESS_MIN && maxRGB - minRGB <= PAPER_COLOR_VAR_MAX;
+    return Math.max(r, g, b) - Math.min(r, g, b);
   }
 
-  // 행별 종이 픽셀 비율
-  const rowScores = new Array<number>(sampleH);
-  for (let y = 0; y < sampleH; y += 1) {
-    let cnt = 0;
-    for (let x = 0; x < SAMPLE_W; x += 1) {
-      if (isPaperPixel(x, y)) cnt += 1;
+  // (a) 적응적 임계값 — 밝기 히스토그램에서 피크 찾기
+  const hist = new Array<number>(256).fill(0);
+  for (let i = 0; i < SAMPLE_W * sampleH; i += 1) {
+    const idx = i * 4;
+    const b = Math.floor((data[idx] + data[idx + 1] + data[idx + 2]) / 3);
+    hist[Math.min(255, Math.max(0, b))] += 1;
+  }
+  // 3-bin smoothing
+  const smooth = new Array<number>(256).fill(0);
+  for (let i = 1; i < 255; i += 1) smooth[i] = (hist[i - 1] + hist[i] + hist[i + 1]) / 3;
+  smooth[0] = hist[0];
+  smooth[255] = hist[255];
+  // 베젤 임계 — 0~80 범위에서 가장 큰 봉우리 + 30
+  let bezelPeak = 0;
+  for (let b = 0; b <= 80; b += 1) {
+    if (smooth[b] > smooth[bezelPeak]) bezelPeak = b;
+  }
+  const SCREEN_THRESHOLD = Math.min(120, bezelPeak + 30); // 베젤 위로 안전 마진
+  // 종이 임계 — 200~255 범위 봉우리 - 25 (피크보다 약간 낮춰서 종이 가장자리 포함)
+  let paperPeak = 255;
+  for (let b = 255; b >= 200; b -= 1) {
+    if (smooth[b] > smooth[paperPeak]) paperPeak = b;
+  }
+  const PAPER_BRIGHT_MIN = Math.max(180, paperPeak - 25);
+
+  function isScreenPixel(x: number, y: number): boolean {
+    return brightAt(x, y) > SCREEN_THRESHOLD;
+  }
+  function isPaperPixel(x: number, y: number): boolean {
+    return brightAt(x, y) >= PAPER_BRIGHT_MIN && colorVarAt(x, y) <= 28;
+  }
+
+  // 가장 긴 연속 행 구간을 찾는 헬퍼
+  function findLongestRowRun(scores: number[], threshold: number, yMin = 0, yMax = scores.length - 1) {
+    let start = -1;
+    let end = -1;
+    let bestLen = 0;
+    let cur = -1;
+    for (let y = yMin; y <= yMax; y += 1) {
+      if (scores[y] >= threshold) {
+        if (cur < 0) cur = y;
+      } else if (cur >= 0) {
+        const len = y - cur;
+        if (len > bestLen) {
+          bestLen = len;
+          start = cur;
+          end = y - 1;
+        }
+        cur = -1;
+      }
     }
-    rowScores[y] = cnt / SAMPLE_W;
-  }
-
-  // 행 점수 0.4 이상 연속구간 중 가장 긴 것 = 종이 세로 범위
-  const ROW_THRESHOLD = 0.4;
-  let bestStart = -1;
-  let bestEnd = -1;
-  let bestLen = 0;
-  let curStart = -1;
-  for (let y = 0; y < sampleH; y += 1) {
-    if (rowScores[y] >= ROW_THRESHOLD) {
-      if (curStart < 0) curStart = y;
-    } else if (curStart >= 0) {
-      const len = y - curStart;
+    if (cur >= 0) {
+      const len = yMax + 1 - cur;
       if (len > bestLen) {
         bestLen = len;
-        bestStart = curStart;
-        bestEnd = y - 1;
+        start = cur;
+        end = yMax;
       }
-      curStart = -1;
     }
+    return { start, end, len: bestLen };
   }
-  if (curStart >= 0) {
-    const len = sampleH - curStart;
-    if (len > bestLen) {
-      bestLen = len;
-      bestStart = curStart;
-      bestEnd = sampleH - 1;
-    }
-  }
-  // 종이 너무 작으면 신뢰 불가 — 폴백
-  if (bestStart < 0 || bestLen < sampleH * 0.2) return null;
 
-  // 그 안에서 열별 종이 픽셀 비율 → 좌·우 끝
-  const colScores = new Array<number>(SAMPLE_W);
-  const sliceH = bestEnd - bestStart + 1;
+  // ── Stage 1: 태블릿 스크린 검출 (베젤 제외) ─────────────────────
+  const rowScreenScore = new Array<number>(sampleH);
+  for (let y = 0; y < sampleH; y += 1) {
+    let cnt = 0;
+    for (let x = 0; x < SAMPLE_W; x += 1) if (isScreenPixel(x, y)) cnt += 1;
+    rowScreenScore[y] = cnt / SAMPLE_W;
+  }
+  const screenY = findLongestRowRun(rowScreenScore, 0.55);
+  if (screenY.start < 0 || screenY.len < sampleH * 0.3) return null;
+
+  const colScreenScore = new Array<number>(SAMPLE_W);
   for (let x = 0; x < SAMPLE_W; x += 1) {
     let cnt = 0;
-    for (let y = bestStart; y <= bestEnd; y += 1) {
-      if (isPaperPixel(x, y)) cnt += 1;
-    }
-    colScores[x] = cnt / sliceH;
+    for (let y = screenY.start; y <= screenY.end; y += 1) if (isScreenPixel(x, y)) cnt += 1;
+    colScreenScore[x] = cnt / (screenY.end - screenY.start + 1);
   }
-  let leftX = 0;
+  let screenLeft = 0;
+  let screenRight = SAMPLE_W - 1;
   for (let x = 0; x < SAMPLE_W; x += 1) {
-    if (colScores[x] >= ROW_THRESHOLD) {
-      leftX = x;
+    if (colScreenScore[x] >= 0.55) {
+      screenLeft = x;
       break;
     }
   }
-  let rightX = SAMPLE_W - 1;
   for (let x = SAMPLE_W - 1; x >= 0; x -= 1) {
-    if (colScores[x] >= ROW_THRESHOLD) {
-      rightX = x;
+    if (colScreenScore[x] >= 0.55) {
+      screenRight = x;
       break;
+    }
+  }
+  if (screenRight - screenLeft < SAMPLE_W * 0.3) return null;
+
+  // ── Stage 2: 태블릿 안에서 종이 검출 (UI 제외) ────────────────
+  const screenW = screenRight - screenLeft + 1;
+  const rowPaperScore = new Array<number>(sampleH).fill(0);
+  for (let y = screenY.start; y <= screenY.end; y += 1) {
+    let cnt = 0;
+    for (let x = screenLeft; x <= screenRight; x += 1) if (isPaperPixel(x, y)) cnt += 1;
+    rowPaperScore[y] = cnt / screenW;
+  }
+  let paperY = findLongestRowRun(rowPaperScore, 0.45, screenY.start, screenY.end);
+
+  // 종이 검출 실패 — 태블릿 스크린 영역으로 폴백
+  let paperTop: number;
+  let paperBottom: number;
+  let paperLeft: number;
+  let paperRight: number;
+  if (paperY.start < 0 || paperY.len < sampleH * 0.2) {
+    paperTop = screenY.start;
+    paperBottom = screenY.end;
+    paperLeft = screenLeft;
+    paperRight = screenRight;
+  } else {
+    paperTop = paperY.start;
+    paperBottom = paperY.end;
+
+    // 열별 종이 비율로 좌·우 경계
+    const colPaperScore = new Array<number>(SAMPLE_W).fill(0);
+    const paperH = paperBottom - paperTop + 1;
+    for (let x = screenLeft; x <= screenRight; x += 1) {
+      let cnt = 0;
+      for (let y = paperTop; y <= paperBottom; y += 1) if (isPaperPixel(x, y)) cnt += 1;
+      colPaperScore[x] = cnt / paperH;
+    }
+    paperLeft = screenLeft;
+    paperRight = screenRight;
+    for (let x = screenLeft; x <= screenRight; x += 1) {
+      if (colPaperScore[x] >= 0.45) {
+        paperLeft = x;
+        break;
+      }
+    }
+    for (let x = screenRight; x >= screenLeft; x -= 1) {
+      if (colPaperScore[x] >= 0.45) {
+        paperRight = x;
+        break;
+      }
     }
   }
 
-  // 정규화 좌표 — 1px 안전 마진
-  const x = Math.max(0, leftX / SAMPLE_W);
-  const y = Math.max(0, bestStart / sampleH);
-  const width = Math.min(1 - x, (rightX - leftX + 1) / SAMPLE_W);
-  const height = Math.min(1 - y, (bestEnd - bestStart + 1) / sampleH);
+  // (c) 경계 엣지 리파인 — 상·하 경계 ±5% 범위에서 가장 가파른 밝기 변화점에 스냅
+  function refineHorizontalEdge(yCenter: number, dir: "down" | "up"): number {
+    const range = Math.max(2, Math.floor(sampleH * 0.05));
+    const yMin = Math.max(0, yCenter - range);
+    const yMax = Math.min(sampleH - 1, yCenter + range);
+    let bestY = yCenter;
+    let bestGrad = 0;
+    for (let y = yMin + 1; y <= yMax; y += 1) {
+      let grad = 0;
+      for (let x = paperLeft; x <= paperRight; x += 1) {
+        grad += brightAt(x, y) - brightAt(x, y - 1);
+      }
+      grad /= paperRight - paperLeft + 1;
+      const eff = dir === "down" ? grad : -grad; // down: 어두→밝(상단 엣지), up: 밝→어두(하단 엣지)
+      if (eff > bestGrad) {
+        bestGrad = eff;
+        bestY = y;
+      }
+    }
+    return bestY;
+  }
+  if (paperY.start >= 0) {
+    paperTop = refineHorizontalEdge(paperTop, "down");
+    paperBottom = refineHorizontalEdge(paperBottom, "up");
+  }
+
+  // (b) 가로세로 비율 상식 체크 — 0.4 ~ 2.8 (가로 시험지·세로 시험지 모두 허용)
+  const widthN = (paperRight - paperLeft + 1) / SAMPLE_W;
+  const heightN = (paperBottom - paperTop + 1) / sampleH;
+  const aspect = widthN / heightN;
+  if (aspect < 0.4 || aspect > 2.8) {
+    // 비율 비정상 — 태블릿 스크린으로 폴백
+    paperTop = screenY.start;
+    paperBottom = screenY.end;
+    paperLeft = screenLeft;
+    paperRight = screenRight;
+  }
+
+  const x = Math.max(0, paperLeft / SAMPLE_W);
+  const y = Math.max(0, paperTop / sampleH);
+  const width = Math.min(1 - x, (paperRight - paperLeft + 1) / SAMPLE_W);
+  const height = Math.min(1 - y, (paperBottom - paperTop + 1) / sampleH);
   if (width < 0.2 || height < 0.2) return null;
   return { x, y, width, height };
 }
