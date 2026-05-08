@@ -36,6 +36,10 @@ type NaturalBox = { x: number; y: number; width: number; height: number };
  * 캔버스 그리기·자르기 시 현재 imageEl 의 naturalWidth/Height 와 곱해 픽셀 좌표로 환산.
  */
 type CropNorm = { x: number; y: number; width: number; height: number };
+/** 태블릿 스크린 대비 종이 영역 마진 비율 (각각 0~1). 묶음 학습 — 첫 검출에서 산출 후 다른 슬롯에 재사용. */
+type PaperOffset = { top: number; right: number; bottom: number; left: number };
+/** 검출 결과 — cropNorm + 묶음 학습용 paperOffset */
+type PaperDetection = { cropNorm: CropNorm; paperOffset: PaperOffset };
 
 function normToNaturalBox(
   n: CropNorm,
@@ -844,17 +848,22 @@ export default function EditPage() {
     }
     setBulkBusy(true);
     const processed: Slot[] = [];
+    // 묶음 학습 — 첫 성공 검출의 paperOffset 을 다른 슬롯에 재사용
+    // → 같은 묶음에서 일관된 종이 위치 확보 + 검출 실패율 ↓
+    let learnedOffset: PaperOffset | null = null;
     try {
       for (const s of targets) {
-        // 풀 dataURL 보장 (썸네일 URL 은 canvas tainted 위험)
         // eslint-disable-next-line no-await-in-loop
         const src = await ensureFullDataUrlSource(s.id);
         if (!src) continue;
-        // 1차: 픽셀 분석으로 자동 감지
+        // 1차: 픽셀 분석 (첫 슬롯은 학습, 이후는 학습된 offset 적용)
         // eslint-disable-next-line no-await-in-loop
-        let cropNorm = await detectPaperBoxByPixels(src);
+        const detection = await detectPaperBoxByPixels(src, learnedOffset);
         // 2차: 감지 실패 시 기본 비율 폴백
-        if (!cropNorm) cropNorm = FAST_BOX_DEFAULT;
+        const cropNorm = detection?.cropNorm ?? FAST_BOX_DEFAULT;
+        if (detection && !learnedOffset) {
+          learnedOffset = detection.paperOffset;
+        }
         try {
           // eslint-disable-next-line no-await-in-loop
           const img = await loadImage(src);
@@ -867,7 +876,6 @@ export default function EditPage() {
           setSlot(s.id, { cropNorm, croppedDataUrl });
           processed.push({ ...s, cropNorm, croppedDataUrl });
         } catch {
-          // 캔버스 자르기 실패 — 박스만이라도 저장
           setSlot(s.id, { cropNorm });
         }
       }
@@ -2032,7 +2040,11 @@ async function imageDimensions(dataUrl: string): Promise<{ w: number; h: number 
  *
  * 처리 시간: 1장당 ~20~50ms (API 호출 0).
  */
-async function detectPaperBoxByPixels(imageDataUrl: string): Promise<CropNorm | null> {
+async function detectPaperBoxByPixels(
+  imageDataUrl: string,
+  /** 묶음 학습 — 첫 슬롯의 paperOffset 을 다른 슬롯에 재사용. 일관성 ↑, 검출 실패율 ↓. */
+  learnedOffset?: PaperOffset | null,
+): Promise<PaperDetection | null> {
   let img: HTMLImageElement;
   try {
     img = await loadImage(imageDataUrl);
@@ -2163,49 +2175,61 @@ async function detectPaperBoxByPixels(imageDataUrl: string): Promise<CropNorm | 
   if (screenRight - screenLeft < SAMPLE_W * 0.3) return null;
 
   // ── Stage 2: 태블릿 안에서 종이 검출 (UI 제외) ────────────────
-  const screenW = screenRight - screenLeft + 1;
-  const rowPaperScore = new Array<number>(sampleH).fill(0);
-  for (let y = screenY.start; y <= screenY.end; y += 1) {
-    let cnt = 0;
-    for (let x = screenLeft; x <= screenRight; x += 1) if (isPaperPixel(x, y)) cnt += 1;
-    rowPaperScore[y] = cnt / screenW;
-  }
-  let paperY = findLongestRowRun(rowPaperScore, 0.45, screenY.start, screenY.end);
-
-  // 종이 검출 실패 — 태블릿 스크린 영역으로 폴백
   let paperTop: number;
   let paperBottom: number;
   let paperLeft: number;
   let paperRight: number;
-  if (paperY.start < 0 || paperY.len < sampleH * 0.2) {
-    paperTop = screenY.start;
-    paperBottom = screenY.end;
-    paperLeft = screenLeft;
-    paperRight = screenRight;
-  } else {
-    paperTop = paperY.start;
-    paperBottom = paperY.end;
+  let usedLearnedOffset = false;
 
-    // 열별 종이 비율로 좌·우 경계
-    const colPaperScore = new Array<number>(SAMPLE_W).fill(0);
-    const paperH = paperBottom - paperTop + 1;
-    for (let x = screenLeft; x <= screenRight; x += 1) {
+  if (learnedOffset) {
+    // 묶음 학습 — 첫 슬롯에서 학습한 paperOffset 을 현재 태블릿 스크린에 그대로 투영
+    const sw = screenRight - screenLeft;
+    const sh = screenY.end - screenY.start;
+    paperLeft = Math.round(screenLeft + learnedOffset.left * sw);
+    paperRight = Math.round(screenRight - learnedOffset.right * sw);
+    paperTop = Math.round(screenY.start + learnedOffset.top * sh);
+    paperBottom = Math.round(screenY.end - learnedOffset.bottom * sh);
+    usedLearnedOffset = true;
+  } else {
+    const screenW = screenRight - screenLeft + 1;
+    const rowPaperScore = new Array<number>(sampleH).fill(0);
+    for (let y = screenY.start; y <= screenY.end; y += 1) {
       let cnt = 0;
-      for (let y = paperTop; y <= paperBottom; y += 1) if (isPaperPixel(x, y)) cnt += 1;
-      colPaperScore[x] = cnt / paperH;
+      for (let x = screenLeft; x <= screenRight; x += 1) if (isPaperPixel(x, y)) cnt += 1;
+      rowPaperScore[y] = cnt / screenW;
     }
-    paperLeft = screenLeft;
-    paperRight = screenRight;
-    for (let x = screenLeft; x <= screenRight; x += 1) {
-      if (colPaperScore[x] >= 0.45) {
-        paperLeft = x;
-        break;
+    const paperY = findLongestRowRun(rowPaperScore, 0.45, screenY.start, screenY.end);
+
+    // 종이 검출 실패 — 태블릿 스크린 영역으로 폴백
+    if (paperY.start < 0 || paperY.len < sampleH * 0.2) {
+      paperTop = screenY.start;
+      paperBottom = screenY.end;
+      paperLeft = screenLeft;
+      paperRight = screenRight;
+    } else {
+      paperTop = paperY.start;
+      paperBottom = paperY.end;
+      // 열별 종이 비율로 좌·우 경계
+      const colPaperScore = new Array<number>(SAMPLE_W).fill(0);
+      const paperH = paperBottom - paperTop + 1;
+      for (let x = screenLeft; x <= screenRight; x += 1) {
+        let cnt = 0;
+        for (let y = paperTop; y <= paperBottom; y += 1) if (isPaperPixel(x, y)) cnt += 1;
+        colPaperScore[x] = cnt / paperH;
       }
-    }
-    for (let x = screenRight; x >= screenLeft; x -= 1) {
-      if (colPaperScore[x] >= 0.45) {
-        paperRight = x;
-        break;
+      paperLeft = screenLeft;
+      paperRight = screenRight;
+      for (let x = screenLeft; x <= screenRight; x += 1) {
+        if (colPaperScore[x] >= 0.45) {
+          paperLeft = x;
+          break;
+        }
+      }
+      for (let x = screenRight; x >= screenLeft; x -= 1) {
+        if (colPaperScore[x] >= 0.45) {
+          paperRight = x;
+          break;
+        }
       }
     }
   }
@@ -2231,7 +2255,8 @@ async function detectPaperBoxByPixels(imageDataUrl: string): Promise<CropNorm | 
     }
     return bestY;
   }
-  if (paperY.start >= 0) {
+  // 학습된 offset 일 땐 엣지 리파인 생략 (이미 정확한 마진 적용됨)
+  if (!usedLearnedOffset) {
     paperTop = refineHorizontalEdge(paperTop, "down");
     paperBottom = refineHorizontalEdge(paperBottom, "up");
   }
@@ -2253,7 +2278,18 @@ async function detectPaperBoxByPixels(imageDataUrl: string): Promise<CropNorm | 
   const width = Math.min(1 - x, (paperRight - paperLeft + 1) / SAMPLE_W);
   const height = Math.min(1 - y, (paperBottom - paperTop + 1) / sampleH);
   if (width < 0.2 || height < 0.2) return null;
-  return { x, y, width, height };
+
+  // 묶음 학습용 paperOffset — 다른 슬롯에서 재사용
+  const sw = screenRight - screenLeft;
+  const sh = screenY.end - screenY.start;
+  const paperOffset: PaperOffset = {
+    top: sh > 0 ? Math.max(0, (paperTop - screenY.start) / sh) : 0,
+    bottom: sh > 0 ? Math.max(0, (screenY.end - paperBottom) / sh) : 0,
+    left: sw > 0 ? Math.max(0, (paperLeft - screenLeft) / sw) : 0,
+    right: sw > 0 ? Math.max(0, (screenRight - paperRight) / sw) : 0,
+  };
+
+  return { cropNorm: { x, y, width, height }, paperOffset };
 }
 
 // ── 4점 perspective correction ───────────────────────────────────────────
@@ -2438,8 +2474,10 @@ async function warpPerspective(
 }
 
 /**
- * dataURL 이미지의 「상단 N% (0~1)」를 잘라 dataURL 로 반환.
- * 자동 종이 검출 → 그 결과의 헤더 영역만 Gemini 학교명 추출에 사용 (빠른 호출).
+ * dataURL 이미지의 「상단 N% (0~1)」를 잘라 OCR 친화적으로 전처리한 dataURL 반환.
+ * - 그레이스케일 + 대비 증강 (글자 가장자리 선명) → Gemini OCR 정확도 ↑
+ * - 컬러 정보 제거로 페이로드 약간 감소 → 호출 속도 ↑
+ * - JPEG quality 0.85 (텍스트 인식엔 충분, 파일 크기 절감)
  */
 async function extractHeaderRegion(
   dataUrl: string,
@@ -2448,14 +2486,31 @@ async function extractHeaderRegion(
   try {
     const img = await loadImage(dataUrl);
     const w = img.naturalWidth;
-    const h = Math.max(20, Math.round(img.naturalHeight * Math.max(0.05, Math.min(1, topFraction))));
+    const h = Math.max(
+      20,
+      Math.round(img.naturalHeight * Math.max(0.05, Math.min(1, topFraction))),
+    );
     const canvas = document.createElement("canvas");
     canvas.width = w;
     canvas.height = h;
     const ctx = canvas.getContext("2d");
     if (!ctx) return null;
+    // 상단 영역만 그리기 (clipped)
     ctx.drawImage(img, 0, 0, w, img.naturalHeight, 0, 0, w, img.naturalHeight);
-    return canvas.toDataURL("image/jpeg", 0.92);
+    // 전처리: 그레이스케일 + 대비 증강 (1.5배 around 128)
+    try {
+      const imgData = ctx.getImageData(0, 0, w, h);
+      const d = imgData.data;
+      for (let i = 0; i < d.length; i += 4) {
+        const gray = (d[i] + d[i + 1] + d[i + 2]) / 3;
+        const enhanced = Math.max(0, Math.min(255, (gray - 128) * 1.5 + 128));
+        d[i] = d[i + 1] = d[i + 2] = enhanced;
+      }
+      ctx.putImageData(imgData, 0, 0);
+    } catch {
+      // canvas tainted 등 — 원본 그대로 사용
+    }
+    return canvas.toDataURL("image/jpeg", 0.85);
   } catch {
     return null;
   }
