@@ -1066,21 +1066,21 @@ export default function EditPage() {
     let doneCount = 0;
 
     async function processOne(s: Slot): Promise<Slot | null> {
-      const src = await ensureFullDataUrlSource(s.id);
-      if (!src) {
-        doneCount += 1;
-        setBulkProgress({ done: doneCount, total: targets.length });
-        return null;
-      }
-
       let cropNorm: CropNorm;
       let whiteAreaBox: CropNorm | undefined;
 
       if (learnedCrop) {
-        // ✓ 학습 충분 — 이미지 좌표 median 직접 적용 (AI 호출 없음)
+        // ✓ 학습 충분 — 즉시 cropNorm 만 적용. 다운로드·캡처 모두 skip.
+        // croppedDataUrl 은 PDF/업로드 시점에 일괄 lazy 생성 (속도 최적화).
         cropNorm = learnedCrop;
       } else {
-        // 학습 부족 — AI Stage 1 으로 초기 박스 (사용자 드래그가 학습 시드 생성)
+        // 학습 부족 — AI Stage 1 호출 위해 풀 원본 다운로드 필요
+        const src = await ensureFullDataUrlSource(s.id);
+        if (!src) {
+          doneCount += 1;
+          setBulkProgress({ done: doneCount, total: targets.length });
+          return null;
+        }
         const detection = await detectPaperBoxByAI(src, null);
         cropNorm = detection?.cropNorm ?? FAST_BOX_DEFAULT;
         whiteAreaBox = detection?.whiteAreaBox;
@@ -1089,23 +1089,11 @@ export default function EditPage() {
       // 학습된 시험명 영역 자동 적용 — 첫 슬롯에만, 사용자가 직접 표시한 게 있으면 그걸 우선
       const nameAreaBox =
         s.nameAreaBox ?? (s.id === firstTargetId ? learnedNameArea ?? undefined : undefined);
-      try {
-        const img = await loadImage(src);
-        const naturalBox = normToNaturalBox(
-          cropNorm,
-          img.naturalWidth,
-          img.naturalHeight,
-        );
-        const croppedDataUrl = captureCrop(img, naturalBox);
-        setSlot(s.id, { cropNorm, croppedDataUrl, whiteAreaBox, nameAreaBox });
-        return { ...s, cropNorm, croppedDataUrl, whiteAreaBox, nameAreaBox };
-      } catch {
-        setSlot(s.id, { cropNorm, whiteAreaBox, nameAreaBox });
-        return { ...s, cropNorm, whiteAreaBox, nameAreaBox };
-      } finally {
-        doneCount += 1;
-        setBulkProgress({ done: doneCount, total: targets.length });
-      }
+      // captureCrop 은 PDF 생성 시점으로 지연 (자동 감지 즉시 반환 → 체감 속도 ↑)
+      setSlot(s.id, { cropNorm, whiteAreaBox, nameAreaBox });
+      doneCount += 1;
+      setBulkProgress({ done: doneCount, total: targets.length });
+      return { ...s, cropNorm, whiteAreaBox, nameAreaBox };
     }
 
     // 학습 적용 시 동시 처리 제한 없음(=목록 길이) — AI 없으니 빠름.
@@ -1305,12 +1293,71 @@ export default function EditPage() {
   }
 
   // ── 출력: PDF 만들기 + Drive 「시험지」 폴더에 업로드 ─────────────────
+  /**
+   * cropNorm 만 있고 croppedDataUrl 이 비어 있는 슬롯들에 대해 일괄 캡처.
+   * 자동 감지가 cropNorm 만 빠르게 적용한 뒤, PDF/업로드 시점에 호출되어 캡처를 batch 처리.
+   * 동시 4개씩 다운로드+캡처 → 47장도 보통 5-10초 안에 완료.
+   * 결과는 `setSlot` 으로 반영 + 로컬 map 에도 저장 (호출자가 즉시 사용 가능).
+   */
+  async function generateMissingCroppedDataUrls(
+    targets: Slot[],
+  ): Promise<Map<string, string>> {
+    const localMap = new Map<string, string>();
+    for (const s of targets) {
+      if (s.croppedDataUrl) localMap.set(s.id, s.croppedDataUrl);
+    }
+    const needsCrop = targets.filter((s) => s.cropNorm && !localMap.has(s.id));
+    if (needsCrop.length === 0) return localMap;
+
+    setBulkBusy(true);
+    setBulkProgress({ done: 0, total: needsCrop.length });
+    let done = 0;
+    const CONCURRENCY = 4;
+    let nextIdx = 0;
+    await Promise.all(
+      Array.from({ length: Math.min(CONCURRENCY, needsCrop.length) }, async () => {
+        while (true) {
+          const idx = nextIdx;
+          nextIdx += 1;
+          if (idx >= needsCrop.length) return;
+          const s = needsCrop[idx];
+          try {
+            const src = await ensureFullDataUrlSource(s.id);
+            if (src && s.cropNorm) {
+              const img = await loadImage(src);
+              const naturalBox = normToNaturalBox(
+                s.cropNorm,
+                img.naturalWidth,
+                img.naturalHeight,
+              );
+              const croppedDataUrl = captureCrop(img, naturalBox);
+              setSlot(s.id, { croppedDataUrl });
+              localMap.set(s.id, croppedDataUrl);
+            }
+          } catch {
+            /* 한 슬롯 실패해도 다른 슬롯은 계속 */
+          }
+          done += 1;
+          setBulkProgress({ done, total: needsCrop.length });
+        }
+      }),
+    );
+    setBulkBusy(false);
+    setBulkProgress(null);
+    return localMap;
+  }
+
   async function buildPdfBlob(opts?: { onlyChecked?: boolean }): Promise<Blob | null> {
     const onlyChecked = !!opts?.onlyChecked;
-    const pages = slots
-      .filter((s) => s.croppedDataUrl)
-      .filter((s) => (onlyChecked ? s.includeInPdf : true))
-      .sort((a, b) => a.pageNo - b.pageNo);
+    // 자동 감지가 lazy 모드라 croppedDataUrl 이 없을 수 있음 — 누락분 일괄 생성
+    const candidates = slots
+      .filter((s) => s.cropNorm)
+      .filter((s) => (onlyChecked ? s.includeInPdf : true));
+    const croppedMap = await generateMissingCroppedDataUrls(candidates);
+    const pages = candidates
+      .filter((s) => croppedMap.has(s.id))
+      .sort((a, b) => a.pageNo - b.pageNo)
+      .map((s) => ({ ...s, croppedDataUrl: croppedMap.get(s.id)! }));
     if (pages.length === 0) {
       alert(
         onlyChecked
@@ -1448,10 +1495,9 @@ export default function EditPage() {
       if (!data.ok) throw new Error(data.error || "업로드 실패");
       setSaveResult({ ok: true, link: data.webViewLink, name: data.name });
       // 사용자 검토 거친 박스 → cropNorm 직접 누적. 다음 자동 검출의 median 시드.
-      // paperOffset 은 옛 코드와의 호환을 위해 남기지만 더 이상 학습에 안 쓰임.
-      const uploadedSlots = slots.filter(
-        (s) => s.cropNorm && s.includeInPdf && s.croppedDataUrl,
-      );
+      // croppedDataUrl 은 PDF 생성 lazy 모드라 closure 상에선 비어 있을 수 있음 →
+      // 업로드 진입 = 사용자 검수 완료이므로 cropNorm 만 검사.
+      const uploadedSlots = slots.filter((s) => s.cropNorm && s.includeInPdf);
       const checkedConfirmed = uploadedSlots.map<HistorySample>((s) => ({
         cropNorm: s.cropNorm!,
         whiteAreaBox: s.whiteAreaBox,
