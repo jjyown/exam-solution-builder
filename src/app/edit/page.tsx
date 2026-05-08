@@ -81,6 +81,13 @@ type Slot = {
   whiteAreaBox?: CropNorm;
   /** Stage 2 — whiteAreaBox 기준 4-corner 마진 비율(상하좌우, 0~1). 히스토리 평균 학습용. */
   paperOffset?: PaperOffset;
+  /**
+   * 사용자가 표시한 「시험명/학교명」 영역 박스 (이미지 좌표 0~1 정규화).
+   * - 자동 학교명 추출 시 이 영역만 잘라 Gemini 에 보냄 → 헤더 30% 보다 훨씬 정확.
+   * - 한 슬롯에서 표시하면 체크된 모든 슬롯에 같은 영역 자동 적용 (사용자 확인 후).
+   * - Drive 업로드 시 히스토리에 누적되어 다음 세션부터 median 으로 자동 적용.
+   */
+  nameAreaBox?: CropNorm;
   croppedDataUrl: string | null;
   /** Gemini 가 추출해 준 시험명 한 줄 — 「묶음 이름」으로 사용 가능 */
   suggestedName: string | null;
@@ -114,6 +121,10 @@ export default function EditPage() {
   const [pointMode, setPointMode] = useState(false);
   /** 클릭으로 찍은 모서리 점들 (display 좌표). 4개 채워지면 자동 적용. */
   const [cornerPoints, setCornerPoints] = useState<Array<{ x: number; y: number }>>([]);
+  /** 시험명 영역 표시 모드 — 좌상·우하 2점 클릭으로 학교명 박스 지정 */
+  const [nameMarkMode, setNameMarkMode] = useState(false);
+  /** 시험명 마킹 클릭 점들 (display 좌표). 2개 채워지면 자동 적용. */
+  const [nameMarkPoints, setNameMarkPoints] = useState<Array<{ x: number; y: number }>>([]);
   const imgRef = useRef<HTMLImageElement | null>(null);
 
   // Drive 「시험지 원안」 폴더
@@ -750,12 +761,60 @@ export default function EditPage() {
 
   function clearPointMarkers(): void {
     setCornerPoints([]);
+    setNameMarkPoints([]);
   }
 
   // 활성 슬롯 변경 또는 모드 토글 시 점 초기화
   useEffect(() => {
     setCornerPoints([]);
-  }, [activeId, pointMode]);
+    setNameMarkPoints([]);
+  }, [activeId, pointMode, nameMarkMode]);
+
+  // 모드 상호배제 — 두 모드는 동시에 활성화될 수 없음 (UI 충돌 방지)
+  useEffect(() => {
+    if (pointMode && nameMarkMode) setNameMarkMode(false);
+  }, [pointMode, nameMarkMode]);
+
+  /**
+   * 시험명 영역 2-point 클릭 핸들러 — 좌상·우하 두 번 클릭하면 그 사각형이
+   * 활성 슬롯의 `nameAreaBox` 로 저장됨. 시험명은 묶음당 한 번(첫 슬롯) 만
+   * 인식하므로 다른 슬롯에 복사하지 않음. 히스토리에도 누적되어 다음 세션
+   * 부터 median 으로 첫 슬롯 자동 채움.
+   */
+  function handleNameMarkClick(e: React.MouseEvent<HTMLDivElement>): void {
+    if (!nameMarkMode || !active || !imgRef.current) return;
+    if (nameMarkPoints.length >= 2) return;
+    const img = imgRef.current;
+    const rect = img.getBoundingClientRect();
+    const px = e.clientX - rect.left;
+    const py = e.clientY - rect.top;
+    if (px < 0 || px > img.width || py < 0 || py > img.height) return;
+    const next = [...nameMarkPoints, { x: px, y: py }];
+    setNameMarkPoints(next);
+    if (next.length < 2) return;
+    if (!img.width || !img.height) return;
+
+    // 2점 → 사각형 (min/max 정규화)
+    const x1 = Math.min(next[0].x, next[1].x);
+    const x2 = Math.max(next[0].x, next[1].x);
+    const y1 = Math.min(next[0].y, next[1].y);
+    const y2 = Math.max(next[0].y, next[1].y);
+    if (x2 - x1 < 10 || y2 - y1 < 10) {
+      setNameMarkPoints([]);
+      setSlot(active.id, { error: "시험명 영역이 너무 작습니다. 다시 표시해주세요." });
+      return;
+    }
+    const nameAreaBox: CropNorm = {
+      x: x1 / img.width,
+      y: y1 / img.height,
+      width: (x2 - x1) / img.width,
+      height: (y2 - y1) / img.height,
+    };
+    setSlot(active.id, { nameAreaBox, error: undefined });
+    // 모드 자동 종료 + 점 초기화
+    setNameMarkMode(false);
+    setNameMarkPoints([]);
+  }
 
   async function handleCropComplete(sel: PixelCrop) {
     if (!active || !imgRef.current) return;
@@ -882,6 +941,57 @@ export default function EditPage() {
     };
   }
 
+  // ── 시험명 영역(name area) 누적 학습 ──────────────────────────────────
+  // 사용자가 슬롯에서 「📌 시험명 영역」 으로 표시한 박스가 Drive 업로드 시 누적.
+  // 다음 세션부터 5+ 누적되면 median 으로 새 슬롯 자동 채움 (한 번도 표시 안 해도 됨).
+  const NAME_AREA_HISTORY_KEY = "edit_name_area_history_v1";
+  const NAME_AREA_HISTORY_MAX = 50;
+  const [nameAreaHistoryCount, setNameAreaHistoryCount] = useState(0);
+
+  function loadNameAreaHistory(): CropNorm[] {
+    try {
+      const raw = window.localStorage.getItem(NAME_AREA_HISTORY_KEY);
+      if (!raw) return [];
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed.slice(-NAME_AREA_HISTORY_MAX) : [];
+    } catch {
+      return [];
+    }
+  }
+  function saveNameAreaSamples(samples: CropNorm[]): void {
+    if (samples.length === 0) return;
+    const all = [...loadNameAreaHistory(), ...samples].slice(-NAME_AREA_HISTORY_MAX);
+    try {
+      window.localStorage.setItem(NAME_AREA_HISTORY_KEY, JSON.stringify(all));
+      setNameAreaHistoryCount(all.length);
+    } catch {
+      /* silent */
+    }
+  }
+  function clearNameAreaHistory(): void {
+    try {
+      window.localStorage.removeItem(NAME_AREA_HISTORY_KEY);
+      setNameAreaHistoryCount(0);
+    } catch {
+      /* silent */
+    }
+  }
+  function medianNameAreaBox(): CropNorm | null {
+    const h = loadNameAreaHistory();
+    if (h.length < 5) return null;
+    return {
+      x: median(h.map((s) => s.x)),
+      y: median(h.map((s) => s.y)),
+      width: median(h.map((s) => s.width)),
+      height: median(h.map((s) => s.height)),
+    };
+  }
+  // 마운트 시 카운트 동기화
+  useEffect(() => {
+    setNameAreaHistoryCount(loadNameAreaHistory().length);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // 마운트 시 히스토리 카운트 동기화
   useEffect(() => {
     setHistoryCount(loadHistory().length);
@@ -947,6 +1057,12 @@ export default function EditPage() {
     const processed: Slot[] = [];
     // 학습 충분(≥5) 하면 이미지 좌표 직접 median 적용 — AI 0회, 즉시.
     const learnedCrop = medianCropNormFromHistory();
+    // 시험명 영역도 5+ 누적되면 median 자동 적용 — 첫 슬롯에만 (시험명은 묶음당 1회 인식)
+    const learnedNameArea = medianNameAreaBox();
+    const firstTargetId = targets.reduce<Slot | null>(
+      (acc, s) => (acc == null || s.pageNo < acc.pageNo ? s : acc),
+      null,
+    )?.id;
     let doneCount = 0;
 
     async function processOne(s: Slot): Promise<Slot | null> {
@@ -970,6 +1086,9 @@ export default function EditPage() {
         whiteAreaBox = detection?.whiteAreaBox;
       }
 
+      // 학습된 시험명 영역 자동 적용 — 첫 슬롯에만, 사용자가 직접 표시한 게 있으면 그걸 우선
+      const nameAreaBox =
+        s.nameAreaBox ?? (s.id === firstTargetId ? learnedNameArea ?? undefined : undefined);
       try {
         const img = await loadImage(src);
         const naturalBox = normToNaturalBox(
@@ -978,11 +1097,11 @@ export default function EditPage() {
           img.naturalHeight,
         );
         const croppedDataUrl = captureCrop(img, naturalBox);
-        setSlot(s.id, { cropNorm, croppedDataUrl, whiteAreaBox });
-        return { ...s, cropNorm, croppedDataUrl, whiteAreaBox };
+        setSlot(s.id, { cropNorm, croppedDataUrl, whiteAreaBox, nameAreaBox });
+        return { ...s, cropNorm, croppedDataUrl, whiteAreaBox, nameAreaBox };
       } catch {
-        setSlot(s.id, { cropNorm, whiteAreaBox });
-        return { ...s, cropNorm, whiteAreaBox };
+        setSlot(s.id, { cropNorm, whiteAreaBox, nameAreaBox });
+        return { ...s, cropNorm, whiteAreaBox, nameAreaBox };
       } finally {
         doneCount += 1;
         setBulkProgress({ done: doneCount, total: targets.length });
@@ -1108,11 +1227,39 @@ export default function EditPage() {
    * - 헤더만 Gemini 에 전송 → 작은 페이로드로 빠른 응답 (보통 1~2초)
    * - 결과 있으면 setExamName, 없으면 silent (사용자 수동 채움 OK)
    */
+  /**
+   * 슬롯의 시험명 영역(`nameAreaBox`)만 잘라낸 dataURL 반환.
+   * - nameAreaBox 가 좁고 정확한 영역이라 Gemini 응답 품질이 헤더 30% 보다 훨씬 좋음.
+   * - nameAreaBox 없으면 null.
+   */
+  async function extractNameAreaImage(s: Slot): Promise<string | null> {
+    if (!s.nameAreaBox) return null;
+    const src = s.sourceDataUrl?.startsWith("data:")
+      ? s.sourceDataUrl
+      : await ensureFullDataUrlSource(s.id);
+    if (!src) return null;
+    try {
+      const img = await loadImage(src);
+      const naturalBox = normToNaturalBox(
+        s.nameAreaBox,
+        img.naturalWidth,
+        img.naturalHeight,
+      );
+      return captureCrop(img, naturalBox);
+    } catch {
+      return null;
+    }
+  }
+
   async function maybeAutoExtractExamName(targets: Slot[]): Promise<void> {
     if (examName.trim()) return; // 이미 사용자가 입력함
-    const first = targets.find((s) => s.croppedDataUrl);
-    if (!first?.croppedDataUrl) return;
-    const headerImg = await extractHeaderRegion(first.croppedDataUrl, 0.3);
+    const first = targets.find((s) => s.croppedDataUrl || s.nameAreaBox);
+    if (!first) return;
+    // 우선순위: 사용자가 표시한 nameAreaBox > 잘라낸 페이퍼 헤더 30%
+    let headerImg: string | null = await extractNameAreaImage(first);
+    if (!headerImg && first.croppedDataUrl) {
+      headerImg = await extractHeaderRegion(first.croppedDataUrl, 0.3);
+    }
     if (!headerImg) return;
     setSlot(first.id, { busy: "naming" });
     try {
@@ -1138,14 +1285,12 @@ export default function EditPage() {
   // ── AI 학교명 추출 ────────────────────────────────────────────────────
   async function suggestNameForActive() {
     if (!active) return;
-    // 속도 최적화: 잘라낸 작은 이미지(헤더 영역) 우선 사용. 4MB 다운로드 회피.
-    let sourceForName: string | null = active.croppedDataUrl;
-    if (!sourceForName) {
-      sourceForName = await ensureFullDataUrlSource(active.id);
-    }
+    // 우선순위: nameAreaBox 잘라낸 좁은 영역 > 잘라낸 페이퍼 > 풀 원본
+    let sourceForName: string | null = await extractNameAreaImage(active);
+    if (!sourceForName) sourceForName = active.croppedDataUrl;
+    if (!sourceForName) sourceForName = await ensureFullDataUrlSource(active.id);
     if (!sourceForName) return;
     setSlot(active.id, { busy: "naming", error: undefined });
-    // Gemini 직접 — 작은 이미지 + thinking 끔 + maxOutputTokens 256 으로 보통 1~2초.
     try {
       const res = await fetch("/api/photo-edit/suggest-name", {
         method: "POST",
@@ -1155,7 +1300,6 @@ export default function EditPage() {
       const data = await res.json();
       if (!data.ok) throw new Error(data.error || "AI 시험명 추출 실패");
       setSlot(active.id, { suggestedName: data.name, busy: null });
-      // 묶음 이름이 비어 있으면 자동으로 채움
       if (!examName.trim()) setExamName(data.name);
     } catch (e) {
       setSlot(active.id, { busy: null, error: (e as Error).message });
@@ -1307,15 +1451,21 @@ export default function EditPage() {
       setSaveResult({ ok: true, link: data.webViewLink, name: data.name });
       // 사용자 검토 거친 박스 → cropNorm 직접 누적. 다음 자동 검출의 median 시드.
       // paperOffset 은 옛 코드와의 호환을 위해 남기지만 더 이상 학습에 안 쓰임.
-      const checkedConfirmed = slots
-        .filter((s) => s.cropNorm && s.includeInPdf && s.croppedDataUrl)
-        .map<HistorySample>((s) => ({
-          cropNorm: s.cropNorm!,
-          whiteAreaBox: s.whiteAreaBox,
-          paperOffset: s.paperOffset,
-          t: Date.now(),
-        }));
+      const uploadedSlots = slots.filter(
+        (s) => s.cropNorm && s.includeInPdf && s.croppedDataUrl,
+      );
+      const checkedConfirmed = uploadedSlots.map<HistorySample>((s) => ({
+        cropNorm: s.cropNorm!,
+        whiteAreaBox: s.whiteAreaBox,
+        paperOffset: s.paperOffset,
+        t: Date.now(),
+      }));
       saveHistorySamples(checkedConfirmed);
+      // 시험명 영역도 누적 — 다음 세션부터 median 으로 자동 채움
+      const nameAreaSamples = uploadedSlots
+        .map((s) => s.nameAreaBox)
+        .filter((b): b is CropNorm => !!b);
+      saveNameAreaSamples(nameAreaSamples);
     } catch (e) {
       setSaveResult({ ok: false, error: (e as Error).message });
     } finally {
@@ -1845,10 +1995,37 @@ export default function EditPage() {
                 )}
                 <span className="mx-1 h-5 w-px bg-slate-200" />
                 <button
+                  onClick={() => {
+                    if (!active) return;
+                    setPointMode(false);
+                    setNameMarkMode((v) => !v);
+                  }}
+                  disabled={!active}
+                  className={`rounded-md border px-3 py-1.5 text-xs font-semibold disabled:opacity-50 ${
+                    nameMarkMode
+                      ? "border-emerald-700 bg-emerald-500 text-white hover:bg-emerald-600"
+                      : "border-emerald-300 bg-white text-emerald-800 hover:bg-emerald-50"
+                  }`}
+                  title={
+                    active?.nameAreaBox
+                      ? "시험명 영역 다시 표시 — 좌상·우하 2점 클릭"
+                      : nameAreaHistoryCount >= 5
+                      ? `학습 ${nameAreaHistoryCount}개의 median 자동 적용 중. 다시 표시하려면 클릭 → 좌상·우하 2점`
+                      : `시험명 영역 직접 표시 — 좌상·우하 2점 클릭. 한 번 표시 후 체크된 모든 슬롯에 일괄 적용 (학습 ${nameAreaHistoryCount}/5)`
+                  }
+                >
+                  📌 시험명 영역
+                  {nameMarkMode ? ` (${nameMarkPoints.length}/2)` : active?.nameAreaBox ? " ✓" : ""}
+                </button>
+                <button
                   onClick={suggestNameForActive}
                   disabled={!active || active.busy === "naming"}
                   className="rounded-md border border-emerald-700 bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-700 disabled:opacity-50"
-                  title="현재 페이지 헤더에서 시험명을 한 줄 형식으로 추출 → 묶음 이름 자동 채움"
+                  title={
+                    active?.nameAreaBox
+                      ? "표시된 시험명 영역만 잘라 Gemini 에 전송 → 정확도 ↑"
+                      : "현재 페이지 헤더에서 시험명을 한 줄 형식으로 추출 → 묶음 이름 자동 채움"
+                  }
                 >
                   🏫 AI 학교명
                 </button>
@@ -1912,11 +2089,11 @@ export default function EditPage() {
               {active ? (
                 active.sourceDataUrl ? (
                   <div className="overflow-auto rounded border border-slate-200 bg-slate-50 p-2">
-                    {pointMode ? (
-                      // 4점 클릭 모드 — ReactCrop 비활성, 클릭 캡처 + SVG 오버레이
+                    {pointMode || nameMarkMode ? (
+                      // 4점 / 시험명 마킹 모드 — ReactCrop 비활성, 클릭 캡처 + SVG 오버레이
                       <div
                         className="relative inline-block cursor-crosshair"
-                        onClick={handlePointClick}
+                        onClick={pointMode ? handlePointClick : handleNameMarkClick}
                       >
                         {/* eslint-disable-next-line @next/next/no-img-element */}
                         <img
@@ -1927,7 +2104,7 @@ export default function EditPage() {
                           draggable={false}
                           onLoad={() => setImgLoadTick((t) => t + 1)}
                         />
-                        {/* 점 + 연결선 SVG 오버레이 */}
+                        {/* 점 + 박스 SVG 오버레이 */}
                         {imgRef.current && (
                           <svg
                             className="pointer-events-none absolute left-0 top-0"
@@ -1935,7 +2112,7 @@ export default function EditPage() {
                             height={imgRef.current.height}
                           >
                             {/* 4점이 모두 찍히면 채운 사각형(사다리꼴)으로 영역 명확히 표시 */}
-                            {cornerPoints.length === 4 && (
+                            {pointMode && cornerPoints.length === 4 && (
                               <polygon
                                 points={cornerPoints.map((p) => `${p.x},${p.y}`).join(" ")}
                                 fill="rgba(245, 158, 11, 0.18)"
@@ -1943,7 +2120,7 @@ export default function EditPage() {
                                 strokeWidth={2}
                               />
                             )}
-                            {cornerPoints.length > 1 && cornerPoints.length < 4 && (
+                            {pointMode && cornerPoints.length > 1 && cornerPoints.length < 4 && (
                               <polyline
                                 points={cornerPoints.map((p) => `${p.x},${p.y}`).join(" ")}
                                 fill="none"
@@ -1953,7 +2130,7 @@ export default function EditPage() {
                               />
                             )}
                             {/* 4점 묶음의 axis-aligned bounding box (실제 cropNorm 과 동일) */}
-                            {active.cropNorm && imgRef.current && (
+                            {pointMode && active.cropNorm && imgRef.current && (
                               <rect
                                 x={active.cropNorm.x * imgRef.current.width}
                                 y={active.cropNorm.y * imgRef.current.height}
@@ -1965,28 +2142,76 @@ export default function EditPage() {
                                 strokeDasharray="6 3"
                               />
                             )}
-                            {cornerPoints.map((p, i) => (
-                              <g key={i}>
-                                <circle
-                                  cx={p.x}
-                                  cy={p.y}
-                                  r={8}
-                                  fill="rgba(245, 158, 11, 0.95)"
-                                  stroke="white"
-                                  strokeWidth={2}
-                                />
-                                <text
-                                  x={p.x}
-                                  y={p.y + 3}
-                                  textAnchor="middle"
-                                  fontSize={10}
-                                  fontWeight="bold"
-                                  fill="white"
-                                >
-                                  {i + 1}
-                                </text>
-                              </g>
-                            ))}
+                            {pointMode &&
+                              cornerPoints.map((p, i) => (
+                                <g key={`pt-${i}`}>
+                                  <circle
+                                    cx={p.x}
+                                    cy={p.y}
+                                    r={8}
+                                    fill="rgba(245, 158, 11, 0.95)"
+                                    stroke="white"
+                                    strokeWidth={2}
+                                  />
+                                  <text
+                                    x={p.x}
+                                    y={p.y + 3}
+                                    textAnchor="middle"
+                                    fontSize={10}
+                                    fontWeight="bold"
+                                    fill="white"
+                                  >
+                                    {i + 1}
+                                  </text>
+                                </g>
+                              ))}
+                            {/* 시험명 영역 — 마킹 중인 점 또는 저장된 박스 */}
+                            {nameMarkMode && nameMarkPoints.length === 2 && (
+                              <rect
+                                x={Math.min(nameMarkPoints[0].x, nameMarkPoints[1].x)}
+                                y={Math.min(nameMarkPoints[0].y, nameMarkPoints[1].y)}
+                                width={Math.abs(nameMarkPoints[1].x - nameMarkPoints[0].x)}
+                                height={Math.abs(nameMarkPoints[1].y - nameMarkPoints[0].y)}
+                                fill="rgba(16, 185, 129, 0.18)"
+                                stroke="rgba(16, 185, 129, 0.95)"
+                                strokeWidth={2}
+                              />
+                            )}
+                            {(nameMarkMode || true) && active.nameAreaBox && imgRef.current && (
+                              <rect
+                                x={active.nameAreaBox.x * imgRef.current.width}
+                                y={active.nameAreaBox.y * imgRef.current.height}
+                                width={active.nameAreaBox.width * imgRef.current.width}
+                                height={active.nameAreaBox.height * imgRef.current.height}
+                                fill="rgba(16, 185, 129, 0.10)"
+                                stroke="rgba(16, 185, 129, 0.85)"
+                                strokeWidth={2}
+                                strokeDasharray="5 3"
+                              />
+                            )}
+                            {nameMarkMode &&
+                              nameMarkPoints.map((p, i) => (
+                                <g key={`nm-${i}`}>
+                                  <circle
+                                    cx={p.x}
+                                    cy={p.y}
+                                    r={8}
+                                    fill="rgba(16, 185, 129, 0.95)"
+                                    stroke="white"
+                                    strokeWidth={2}
+                                  />
+                                  <text
+                                    x={p.x}
+                                    y={p.y + 3}
+                                    textAnchor="middle"
+                                    fontSize={10}
+                                    fontWeight="bold"
+                                    fill="white"
+                                  >
+                                    {i + 1}
+                                  </text>
+                                </g>
+                              ))}
                           </svg>
                         )}
                       </div>
