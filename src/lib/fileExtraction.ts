@@ -24,13 +24,20 @@ import {
   isMathpixQuotaError,
   markMathpixExhausted,
 } from "./mathpixV3Text";
+import { recognizeMathpixPdf } from "./mathpixV3Pdf";
 import { extractTextWithGeminiVision, isGeminiVisionAvailable } from "./geminiVisionExtract";
 
 export type ExtractionResult =
   | {
       ok: true;
       text: string;
-      source: "image-ocr" | "pdf-text" | "pdf-ocr" | "image-gemini" | "pdf-gemini";
+      source:
+        | "image-ocr" // Mathpix /v3/text (이미지)
+        | "pdf-text" // pdfjs (텍스트 PDF, 무료)
+        | "pdf-ocr" // 구 명칭 (호환 유지)
+        | "pdf-mathpix" // Mathpix /v3/pdf (스캔/손상 PDF)
+        | "image-gemini" // Gemini Vision (이미지)
+        | "pdf-gemini"; // Gemini Vision (PDF)
       pages?: number;
       model?: string;
     }
@@ -194,6 +201,29 @@ function pdfForceVision(): boolean {
   return /^(1|true|yes|on)$/i.test((process.env.PDF_FORCE_VISION || "").trim());
 }
 
+/**
+ * Mathpix /v3/pdf 호출 — 손상/스캔 PDF 인식. 매쓰픽스 잔여·자격증명·백오프
+ * 모두 통과해야 호출됨. quota error 자동 감지하여 1시간 백오프 마킹.
+ */
+async function tryMathpixPdf(
+  base64: string,
+  fileName = "document.pdf",
+): Promise<ExtractionResult | null> {
+  if (!(await isMathpixUsableForOcr())) return null;
+  const buffer = Buffer.from(base64, "base64");
+  const mp = await recognizeMathpixPdf(buffer, fileName);
+  if (mp.ok && mp.text.trim().length > 0) {
+    return { ok: true, text: mp.text, source: "pdf-mathpix", pages: mp.pages };
+  }
+  if (!mp.ok) {
+    if (isMathpixQuotaError(mp)) {
+      markMathpixExhausted(`/v3/pdf HTTP ${mp.status}: ${mp.message.slice(0, 100)}`);
+    }
+    // 호출자가 Gemini 폴백으로 넘어갈 수 있도록 null 반환 (에러는 상위에서 합쳐서 표시)
+  }
+  return null;
+}
+
 async function extractFromPdf(base64: string): Promise<ExtractionResult> {
   // 0) 환경변수 PDF_FORCE_VISION=true 면 pdfjs 건너뛰고 바로 Gemini multimodal
   if (pdfForceVision() && isGeminiVisionAvailable()) {
@@ -202,55 +232,57 @@ async function extractFromPdf(base64: string): Promise<ExtractionResult> {
     // 강제 비전 실패 시 pdfjs 폴백으로 진행
   }
 
-  // 1) pdfjs 로 텍스트 PDF 빠르게 처리
+  // 1) pdfjs 로 텍스트 PDF 빠르게 처리 (무료, 보통 ~50ms)
   const fast = await tryFastPdfText(base64);
+  const errors: string[] = [];
 
-  // 1-a) 충분한 텍스트면 손상 패턴 검사. 손상 의심이면 Gemini multimodal 로 재추출.
+  // 1-a) 충분한 텍스트 + 손상 없음 → 그대로 사용 (Mathpix 호출 0)
   if (fast.ok && fast.text.length >= PDF_TEXT_MIN_CHARS) {
     const diag = looksLikeBrokenKoreanExamText(fast.text);
     if (!diag.broken) {
       return { ok: true, text: fast.text, source: "pdf-text", pages: fast.pages };
     }
-    // 손상 감지 → Gemini multimodal 재추출 (한국 시험지 시각 인식)
+    // 손상 감지 → Mathpix /v3/pdf 우선, 실패 시 Gemini 폴백
+    errors.push(`pdfjs 손상 감지(${diag.reasons.join(", ")})`);
+
+    const mathpixResult = await tryMathpixPdf(base64);
+    if (mathpixResult?.ok) return mathpixResult;
+    if (mathpixResult === null) errors.push("mathpix-pdf: skip 또는 실패 → gemini 폴백");
+
     if (isGeminiVisionAvailable()) {
       const v = await extractTextWithGeminiVision(base64, "application/pdf");
-      if (v.ok) {
-        return { ok: true, text: v.text, source: "pdf-gemini", model: v.model };
-      }
-      // Gemini 실패해도 손상된 pdfjs 결과보단 명시 에러가 안전
-      return {
-        ok: false,
-        error: `PDF 텍스트 손상 감지(${diag.reasons.join(", ")}) — Gemini 재추출 실패: ${v.error}`,
-      };
+      if (v.ok) return { ok: true, text: v.text, source: "pdf-gemini", model: v.model };
+      errors.push(`gemini-vision: ${v.error}`);
     }
-    // Vision 키 없으면 어쩔 수 없이 손상된 pdfjs 결과 반환 + 경고
-    return {
-      ok: true,
-      text: fast.text,
-      source: "pdf-text",
-      pages: fast.pages,
-    };
+    // 모든 OCR 실패 — 손상된 pdfjs 결과라도 반환하면 RAG 가 부분적으로라도 동작
+    if (fast.text.length >= PDF_TEXT_MIN_CHARS * 2) {
+      return { ok: true, text: fast.text, source: "pdf-text", pages: fast.pages };
+    }
+    return { ok: false, error: errors.join(" | ") };
   }
-  const fastErr = fast.ok ? `텍스트 부족 (${fast.text.length}자)` : fast.error;
 
-  // 2) 스캔본/이미지 PDF — Gemini multimodal 로 PDF 통째로 OCR
+  const fastErr = fast.ok ? `텍스트 부족 (${fast.text.length}자)` : fast.error;
+  errors.push(`pdfjs: ${fastErr}`);
+
+  // 2) 스캔본/이미지 PDF — Mathpix /v3/pdf 우선
+  const mathpixResult = await tryMathpixPdf(base64);
+  if (mathpixResult?.ok) return mathpixResult;
+  if (mathpixResult === null) errors.push("mathpix-pdf: skip 또는 실패 → gemini 폴백");
+
+  // 3) Gemini multimodal — Mathpix 가 못 받거나 실패한 경우의 최종 폴백
   if (isGeminiVisionAvailable()) {
     const v = await extractTextWithGeminiVision(base64, "application/pdf");
-    if (v.ok) {
-      return { ok: true, text: v.text, source: "pdf-gemini", model: v.model };
-    }
-    return {
-      ok: false,
-      error: `PDF 텍스트 추출 실패 — pdfjs(${fastErr}) → gemini-vision(${v.error})`,
-    };
+    if (v.ok) return { ok: true, text: v.text, source: "pdf-gemini", model: v.model };
+    errors.push(`gemini-vision: ${v.error}`);
   }
 
-  // 3) 키도 없으면 안내
+  // 4) 키도 없거나 모두 실패
   return {
     ok: false,
     error:
-      `PDF에서 텍스트를 거의 추출하지 못했습니다 (${fastErr}). ` +
-      `스캔본 PDF 처리를 위해 GEMINI_API_KEY 를 설정하세요.`,
+      errors.length > 0
+        ? `PDF 텍스트 추출 실패 — ${errors.join(" | ")}`
+        : `PDF 텍스트 추출 실패. MATHPIX_APP_ID/KEY 또는 GEMINI_API_KEY 가 필요합니다.`,
   };
 }
 
