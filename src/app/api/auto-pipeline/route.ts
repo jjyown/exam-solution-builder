@@ -24,7 +24,7 @@ import { NextResponse } from 'next/server';
 import type { ReferenceRetriever } from '@/lib/referenceRetriever';
 import { runAutoPipeline, type PipelineResult } from '@/lib/autoPipeline';
 import { buildAutoChecklist } from '@/lib/autoPipelineChecklist';
-import { recordAutoPipelineRun } from '@/lib/autoPipelineLog';
+import { findRelevantCautions, recordAutoPipelineRun } from '@/lib/autoPipelineLog';
 import { extractTextFromUploadedFile } from '@/lib/fileExtraction';
 import { extractQuestionsFromText, type ExtractedQuestion } from '@/lib/questionSplit';
 import {
@@ -369,11 +369,22 @@ async function executeOne(params: {
     return r.text;
   };
 
+  // 과거 비슷한 문제에서 사용자가 ★1~2 + 피드백 남긴 케이스를 찾아
+  // 「검토 메모」 로 프롬프트에 주입 — 같은 실수 반복 방지.
+  // Supabase 미설정·매칭 0건이면 빈 배열 → 기존 동선과 동일.
+  let cautionNotes: string[] = [];
+  try {
+    cautionNotes = await findRelevantCautions(params.item.questionText, 3);
+  } catch {
+    // best-effort — 실패해도 풀이 진행
+  }
+
   const result = await runAutoPipeline(params.item.questionText, {
     retriever: params.retriever,
     llmCall,
     topK: params.topK,
     maxRetries: params.maxRetries,
+    cautionNotes,
   });
 
   const checklist = buildAutoChecklist(result);
@@ -568,10 +579,25 @@ export async function POST(req: Request) {
 }
 
 // 헬스체크용 (Railway 배포 후 GET으로 KB 크기 확인)
+//
+// 응답에 다음을 포함해 운영 가시성 확보:
+//  - kb_size : 현재 retriever 가 보유한 record 수 (kb.jsonl + Drive 분석자료 합산)
+//  - drive_sync : 분석용 자료 마지막 동기화 시각·status (UI 「N분 전 동기화」 표시용)
+//  - supervisor : 감독관(retrospective) 마지막 자동 실행 요약 (HIGH 제안 수 등)
 export async function GET() {
   try {
     const r = await getRetriever();
-    return NextResponse.json({ ok: true, kb_size: r.size() });
+    // 동시 import — 둘 다 module 전역 스냅샷이라 비용 거의 0
+    const [{ getDriveAnalysisSyncSnapshot }, { getSupervisorSnapshot }] = await Promise.all([
+      import('@/lib/driveAnalysisAutoSync'),
+      import('@/lib/supervisorScheduler'),
+    ]);
+    return NextResponse.json({
+      ok: true,
+      kb_size: r.size(),
+      drive_sync: getDriveAnalysisSyncSnapshot(),
+      supervisor: getSupervisorSnapshot(),
+    });
   } catch (e) {
     return NextResponse.json({ ok: false, error: (e as Error).message }, { status: 500 });
   }

@@ -24,6 +24,13 @@ export interface PipelineConfig {
   topK?: number;        // 참고 예시 수 (기본 3)
   maxRetries?: number;  // 자동 재시도 횟수 (기본 2)
   onTrace?: (e: TraceEvent) => void;
+  /**
+   * 과거 비슷한 문제에서 사용자가 낮은 평점과 함께 남긴 피드백.
+   * 모든 시도(최초 + 재시도) 의 프롬프트에 「검토 메모」 섹션으로 주입된다.
+   * 호출 측은 보통 `findRelevantCautions(questionText)` 의 결과를 그대로 넘김.
+   * 비어 있거나 미지정이면 기존 동선과 동일.
+   */
+  cautionNotes?: string[];
 }
 
 export type TraceEvent =
@@ -66,6 +73,7 @@ export async function runAutoPipeline(
       questionText,
       references: refs,
       retryHint: lastHint,
+      cautionNotes: cfg.cautionNotes,
     });
     emit({ stage: 'llm_call', attempt, promptChars: prompt.length });
 

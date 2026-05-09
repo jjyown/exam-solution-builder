@@ -13,12 +13,19 @@ export interface PromptInput {
   questionImageUrl?: string; // 이미지가 있으면 (Vision 모델용)
   references: ReferenceRecord[];
   retryHint?: string;       // 자동 재시도시 이전 실패 사유
+  /**
+   * 과거 비슷한 문제에서 사용자가 낮은 평점·부정 피드백을 남겼을 때, 그 피드백을
+   * 한 줄씩 모아 전달. LLM 이 같은 실수를 반복하지 않게 「검토 메모」 로 주입한다.
+   * 비어 있으면 해당 섹션 자체가 프롬프트에서 빠진다 — 기존 동선과 동일.
+   */
+  cautionNotes?: string[];
 }
 
 export function buildExplanationPrompt({
   questionText,
   references,
   retryHint,
+  cautionNotes,
 }: PromptInput): string {
   const fewShot = references
     .map((r, i) => {
@@ -40,6 +47,13 @@ ${solution}
   const retrySection = retryHint
     ? `\n[이전 시도 피드백]\n${retryHint}\n위 사유를 반드시 반영해서 다시 작성하세요.\n`
     : '';
+
+  const cautionSection =
+    cautionNotes && cautionNotes.length > 0
+      ? `\n[과거 비슷한 문제 검토 메모 — 같은 실수 반복 금지]\n${cautionNotes
+          .map((c, i) => `(${i + 1}) ${c}`)
+          .join('\n')}\n위 메모는 사용자가 과거 낮은 평점과 함께 남긴 피드백입니다. 같은 종류의 오류·누락을 반복하지 마세요.\n`
+      : '';
 
   return `당신은 한국 수능/모의고사 수학 해설 전문 작성자입니다.
 이 문제를 **깊게 생각해서(step-by-step reasoning)** 아래 "수학비서 스타일 예시"를 참고해 동일한 논리 흐름·깊이·단계 구분으로 새 문제의 해설을 작성하세요.
@@ -71,7 +85,7 @@ ${solution}
    - 각 step.text 는 1~3 문장 이내. 길면 다음 step 으로 분리.
 6. "예시"의 결론 어조("따라서", "이다", "이므로")와 변수 도입("~라 하자")을 그대로 따라할 것.
 7. 정답이 명백하지 않으면 정답 칸에 "확인 필요"라고 쓰고 explanation_steps 마지막에 그 이유를 명시.
-${retrySection}
+${retrySection}${cautionSection}
 [참고 예시 (수학비서 스타일)]
 ${fewShot}
 

@@ -157,6 +157,22 @@ export async function loadDriveAnalysisRecords(): Promise<{
     return root && ALLOWED_ROOT_FOLDERS.has(root);
   });
 
+  // ⚠️ 「분석용 자료」 폴더에 파일은 있는데 화이트리스트와 매칭이 0건인 경우 —
+  //    사용자가 폴더명을 바꿨거나 (예: "시중교재" → "교재") 환경변수를 잘못 넣었을 가능성.
+  //    조용히 빈 결과로 넘어가면 RAG 가 KB 53건만으로 동작해 디버깅이 어렵다.
+  //    => summary.errors 에 명시적 경고 + 발견된 root 폴더 이름들 노출.
+  if (allFiles.length > 0 && allowedFiles.length === 0) {
+    const foundRoots = Array.from(
+      new Set(allFiles.map((f) => f.pathSegments[0]).filter(Boolean)),
+    );
+    summary.errors.push(
+      `화이트리스트 매칭 0건 — 「분석용 자료」 폴더에 ${allFiles.length}개 파일이 있지만 ` +
+        `허용된 루트 폴더(${ALLOWED_ROOT_FOLDERS_PRIORITY.join(", ")})와 일치하지 않습니다. ` +
+        `발견된 루트 폴더: [${foundRoots.join(", ")}]. ` +
+        `폴더명을 맞추거나 DRIVE_ANALYSIS_ALLOWED_ROOT_FOLDERS 환경변수를 조정하세요.`,
+    );
+  }
+
   // 우선순위 정렬 — ALLOWED_ROOT_FOLDERS_PRIORITY 앞쪽 폴더 먼저 처리
   // (시중교재 우선 — 해설 제작 메인 참고자료)
   const priorityIndex = new Map<string, number>(

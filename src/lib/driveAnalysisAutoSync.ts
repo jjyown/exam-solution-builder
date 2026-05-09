@@ -23,6 +23,35 @@
 let started = false;
 let inProgress = false;
 
+// 마지막 자동 동기화 결과 — UI / 헬스체크 노출용.
+// 사용자가 "마지막 동기화 N분 전, 새로 흡수된 파일 X개" 같은 정보를 보고
+// 분석자료가 실제로 따라오고 있는지 확인할 수 있다.
+type AutoSyncSnapshot = {
+  lastRunAt: number | null;
+  lastOk: boolean;
+  /** 마지막 실행에서 새로 학습/변경된 파일 수 */
+  lastNewOrChanged: number;
+  /** 마지막 실행에서 화이트리스트 매칭된 파일 수 */
+  lastTotalFiles: number;
+  /** 마지막 실행 errors (있으면 운영 경고 단서) */
+  lastErrors: string[];
+  /** 다음 자동 실행 주기(ms) — 0 이면 비활성 */
+  intervalMs: number;
+};
+
+let snapshot: AutoSyncSnapshot = {
+  lastRunAt: null,
+  lastOk: false,
+  lastNewOrChanged: 0,
+  lastTotalFiles: 0,
+  lastErrors: [],
+  intervalMs: 0,
+};
+
+export function getDriveAnalysisSyncSnapshot(): AutoSyncSnapshot {
+  return snapshot;
+}
+
 export function startDriveAnalysisAutoSync(): void {
   if (started) return;
   started = true;
@@ -33,6 +62,7 @@ export function startDriveAnalysisAutoSync(): void {
     // 비활성
     return;
   }
+  snapshot = { ...snapshot, intervalMs };
 
   const runOnce = async () => {
     if (inProgress) return;
@@ -46,8 +76,28 @@ export function startDriveAnalysisAutoSync(): void {
       if (summary.newOrChanged > 0) {
         resetAutoPipelineRetriever();
       }
-    } catch {
-      // best-effort — 다음 주기에 재시도
+      snapshot = {
+        ...snapshot,
+        lastRunAt: Date.now(),
+        lastOk: true,
+        lastNewOrChanged: summary.newOrChanged,
+        lastTotalFiles: summary.totalFiles,
+        lastErrors: summary.errors,
+      };
+      // 화이트리스트 매칭 0건처럼 명시적 경고가 나오면 운영 로그에 흘려둔다
+      for (const err of summary.errors) {
+        if (/화이트리스트 매칭 0건/.test(err)) {
+          console.warn(`[driveAnalysisAutoSync] ${err}`);
+        }
+      }
+    } catch (e) {
+      // best-effort — 다음 주기에 재시도. 다만 마지막 실패는 기록.
+      snapshot = {
+        ...snapshot,
+        lastRunAt: Date.now(),
+        lastOk: false,
+        lastErrors: [(e as Error).message],
+      };
     } finally {
       inProgress = false;
     }

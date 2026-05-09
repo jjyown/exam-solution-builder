@@ -18,4 +18,9 @@ export async function register(): Promise<void> {
   // 2) Drive 분석자료 백그라운드 자동 동기화 스케줄러
   const { startDriveAnalysisAutoSync } = await import("./lib/driveAnalysisAutoSync");
   startDriveAnalysisAutoSync();
+
+  // 3) 감독관 (retrospective) 자동 루프 — 6시간 주기로 누적 데이터 분석,
+  //    HIGH priority 제안 발견 시 console.warn 으로 운영 로그에 노출.
+  const { startSupervisorScheduler } = await import("./lib/supervisorScheduler");
+  startSupervisorScheduler();
 }

@@ -156,6 +156,32 @@ export default function AutoPipelinePage() {
     | null
   >(null);
 
+  // 자동 파이프라인 헬스 + 감독관 스냅샷 (백그라운드 자동 동기화 / retrospective)
+  // GET /api/auto-pipeline 으로 30초마다 갱신. 마지막 동기화 시각·HIGH 제안 수를
+  // 노출해 사용자가 「분석자료 새로 학습」 버튼을 눌러야 할지 판단할 수 있게 한다.
+  type HealthSnapshot = {
+    kb_size: number;
+    drive_sync: {
+      lastRunAt: number | null;
+      lastOk: boolean;
+      lastNewOrChanged: number;
+      lastTotalFiles: number;
+      lastErrors: string[];
+      intervalMs: number;
+    } | null;
+    supervisor: {
+      ranAt: number | null;
+      ok: boolean;
+      totalRuns: number;
+      successRate: number;
+      avgUserRating: number | null;
+      highPrioritySuggestions: Array<{ priority: string; area: string; finding: string }>;
+      suggestionsCount: number;
+      error: string | null;
+    } | null;
+  };
+  const [health, setHealth] = useState<HealthSnapshot | null>(null);
+
   // 분석자료 검색
   const [analysisSearchOpen, setAnalysisSearchOpen] = useState(false);
   const [analysisSearchQ, setAnalysisSearchQ] = useState('');
@@ -187,6 +213,29 @@ export default function AutoPipelinePage() {
       setAnalysisSearchBusy(false);
     }
   }, [analysisSearchQ]);
+
+  const fetchHealth = useCallback(async () => {
+    try {
+      const res = await fetch('/api/auto-pipeline');
+      const data = await res.json();
+      if (data?.ok) {
+        setHealth({
+          kb_size: data.kb_size ?? 0,
+          drive_sync: data.drive_sync ?? null,
+          supervisor: data.supervisor ?? null,
+        });
+      }
+    } catch {
+      // best-effort — 헬스체크 실패해도 본 동선은 영향 없음
+    }
+  }, []);
+
+  // 마운트 시 1회 + 30초마다 자동 갱신
+  useEffect(() => {
+    void fetchHealth();
+    const t = setInterval(() => void fetchHealth(), 30_000);
+    return () => clearInterval(t);
+  }, [fetchHealth]);
 
   const syncDriveAnalysis = useCallback(async () => {
     setAnalysisSyncing(true);
@@ -224,6 +273,8 @@ export default function AutoPipelinePage() {
             errors: Array.isArray(s.errors) ? s.errors : [],
             bySubfolder: s.bySubfolder ?? {},
           });
+          // 헬스 스냅샷도 즉시 갱신 — 라벨이 「방금」 으로 바뀜
+          void fetchHealth();
           return;
         }
         if (job.status === 'failed') {
@@ -727,6 +778,7 @@ export default function AutoPipelinePage() {
             문제 입력 → 검색 · 생성 · 검증 · 자동 재시도 → 검수 체크리스트.
             결과는 Supabase에 기록되며 사용자 피드백이 다음 호출에 반영됩니다.
           </p>
+          <HealthBadges health={health} />
         </div>
         <div className="flex items-center gap-2">
           <button
@@ -2152,4 +2204,96 @@ function renderAsMarkdown(parsed: ParsedExplanation, exam: string, no: string): 
   return `${examLine}${head}[정답] ${parsed.answer}\n\n[해설]\n${steps}\n${
     parsed.summary ? `\n${parsed.summary}\n` : ''
   }`;
+}
+
+// ── 운영 가시성 배지 ────────────────────────────────────────────────────────
+// 자동 파이프라인 헬스체크 (`GET /api/auto-pipeline`) 결과를 압축해서 보여준다.
+// - KB N건 + 마지막 동기화 시각 → 분석자료가 따라오고 있는지 즉시 확인
+// - 화이트리스트 매칭 0건 등 lastErrors 가 있으면 빨간 배지로 강조
+// - 감독관 HIGH 제안이 있으면 호박색 배지 + /api/retrospective 링크
+type HealthBadgesProps = {
+  health: {
+    kb_size: number;
+    drive_sync: {
+      lastRunAt: number | null;
+      lastOk: boolean;
+      lastNewOrChanged: number;
+      lastTotalFiles: number;
+      lastErrors: string[];
+      intervalMs: number;
+    } | null;
+    supervisor: {
+      ranAt: number | null;
+      ok: boolean;
+      totalRuns: number;
+      successRate: number;
+      avgUserRating: number | null;
+      highPrioritySuggestions: Array<{ priority: string; area: string; finding: string }>;
+      suggestionsCount: number;
+      error: string | null;
+    } | null;
+  } | null;
+};
+
+function HealthBadges({ health }: HealthBadgesProps) {
+  if (!health) return null;
+  const sync = health.drive_sync;
+  const sup = health.supervisor;
+  const syncWarn = !!(sync?.lastErrors?.length);
+  const highCount = sup?.highPrioritySuggestions?.length ?? 0;
+
+  return (
+    <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[11px]">
+      <span
+        className="rounded border border-slate-300 bg-white px-1.5 py-0.5 text-slate-700"
+        title="자동 파이프라인이 검색에 사용하는 참고 예시 KB 크기 (kb.jsonl + Drive 분석자료)"
+      >
+        KB {health.kb_size}건
+      </span>
+      {sync && (
+        <span
+          className={`rounded border px-1.5 py-0.5 ${
+            syncWarn
+              ? 'border-rose-300 bg-rose-50 text-rose-800'
+              : 'border-emerald-300 bg-emerald-50 text-emerald-800'
+          }`}
+          title={
+            syncWarn
+              ? `경고: ${sync.lastErrors.slice(0, 2).join(' / ')}`
+              : `백그라운드 자동 동기화 — 주기 ${Math.round(sync.intervalMs / 60000)}분, 마지막에 ${sync.lastNewOrChanged}건 새/변경`
+          }
+        >
+          분석자료 {sync.lastRunAt ? `${formatRelative(sync.lastRunAt)} 동기화` : '미실행'}
+          {syncWarn && ' ⚠'}
+        </span>
+      )}
+      {sup && sup.ranAt && (
+        <a
+          href="/api/retrospective?format=md"
+          target="_blank"
+          rel="noopener noreferrer"
+          className={`rounded border px-1.5 py-0.5 underline-offset-2 hover:underline ${
+            highCount > 0
+              ? 'border-amber-400 bg-amber-50 text-amber-900'
+              : 'border-slate-300 bg-white text-slate-700'
+          }`}
+          title={
+            highCount > 0
+              ? `감독관: HIGH ${highCount}건 — ${sup.highPrioritySuggestions[0]?.area} 등`
+              : `감독관 자동 분석: ${sup.totalRuns}건 / 성공률 ${(sup.successRate * 100).toFixed(0)}%${sup.avgUserRating !== null ? ` / 평균 ★${sup.avgUserRating.toFixed(1)}` : ''}`
+          }
+        >
+          감독관 {highCount > 0 ? `🔴 HIGH ${highCount}` : '✓ 정상'}
+        </a>
+      )}
+    </div>
+  );
+}
+
+function formatRelative(ts: number): string {
+  const diff = Date.now() - ts;
+  if (diff < 60_000) return '방금';
+  if (diff < 3_600_000) return `${Math.round(diff / 60_000)}분 전`;
+  if (diff < 86_400_000) return `${Math.round(diff / 3_600_000)}시간 전`;
+  return `${Math.round(diff / 86_400_000)}일 전`;
 }
