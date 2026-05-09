@@ -177,6 +177,7 @@ export default function AutoPipelinePage() {
       avgUserRating: number | null;
       highPrioritySuggestions: Array<{ priority: string; area: string; finding: string }>;
       suggestionsCount: number;
+      pairingRate: number | null;
       error: string | null;
     } | null;
   };
@@ -2230,6 +2231,7 @@ type HealthBadgesProps = {
       avgUserRating: number | null;
       highPrioritySuggestions: Array<{ priority: string; area: string; finding: string }>;
       suggestionsCount: number;
+      pairingRate: number | null;
       error: string | null;
     } | null;
   } | null;
@@ -2285,6 +2287,20 @@ function HealthBadges({ health }: HealthBadgesProps) {
         >
           감독관 {highCount > 0 ? `🔴 HIGH ${highCount}` : '✓ 정상'}
         </a>
+      )}
+      {sup && sup.pairingRate !== null && (
+        <span
+          className={`rounded border px-1.5 py-0.5 ${
+            sup.pairingRate < 0.4
+              ? 'border-rose-300 bg-rose-50 text-rose-800'
+              : sup.pairingRate < 0.7
+                ? 'border-amber-300 bg-amber-50 text-amber-900'
+                : 'border-emerald-300 bg-emerald-50 text-emerald-800'
+          }`}
+          title="시중교재 OCR 결과 중 [문제 ↔ 풀이] 1:1 페어 매핑 성공 비율. 낮으면 analysisTextNormalizer 패턴 보강 또는 이미지 보정 필요."
+        >
+          페어매핑 {(sup.pairingRate * 100).toFixed(0)}%
+        </span>
       )}
     </div>
   );

@@ -33,6 +33,11 @@ export type SupervisorSnapshot = {
   highPrioritySuggestions: ImprovementSuggestion[];
   /** 전체 제안 수 (high/medium/low 합) */
   suggestionsCount: number;
+  /**
+   * 1:1 페어 매핑 적중률 — improvementSuggestions 의 「1:1 페어 매핑 적중률」
+   * 항목에서 추출한 paired/problem 비율 (0~1). 측정 불가시 null.
+   */
+  pairingRate: number | null;
   /** 실패했을 때만 채워짐 */
   error: string | null;
 };
@@ -45,6 +50,7 @@ let lastSnapshot: SupervisorSnapshot = {
   avgUserRating: null,
   highPrioritySuggestions: [],
   suggestionsCount: 0,
+  pairingRate: null,
   error: null,
 };
 
@@ -54,6 +60,13 @@ export function getSupervisorSnapshot(): SupervisorSnapshot {
 
 function reportToSnapshot(report: RetrospectiveReport): SupervisorSnapshot {
   const high = report.improvementSuggestions.filter((s) => s.priority === "high");
+  // 「1:1 페어 매핑 적중률」 finding 에서 비율 추출 — "(40.5%)" / "40.5%" 패턴 둘 다 잡음.
+  let pairingRate: number | null = null;
+  const pairingItem = report.improvementSuggestions.find((s) => s.area === "1:1 페어 매핑 적중률");
+  if (pairingItem) {
+    const m = pairingItem.finding.match(/(\d+(?:\.\d+)?)\s*%/);
+    if (m) pairingRate = Number(m[1]) / 100;
+  }
   return {
     ranAt: Date.now(),
     ok: true,
@@ -62,6 +75,7 @@ function reportToSnapshot(report: RetrospectiveReport): SupervisorSnapshot {
     avgUserRating: report.summary.avgUserRating,
     highPrioritySuggestions: high,
     suggestionsCount: report.improvementSuggestions.length,
+    pairingRate,
     error: null,
   };
 }

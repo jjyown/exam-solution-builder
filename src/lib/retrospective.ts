@@ -154,6 +154,19 @@ export async function generateRetrospective(
     empty.setup.tablesAvailable.analysis_records = true;
   }
 
+  // 2-1) 1:1 페어 매핑 적중률 — problem_no 가 있는 row 중 solution_text 까지 가진 비율.
+  //      낮으면 OCR 정규화/마커 패턴이 부족하다는 신호 → 감독관이 권고.
+  let pairingProblemRecs = 0;
+  let pairingPairedRecs = 0;
+  if (!analysisErr) {
+    const [pRes, sRes] = await Promise.all([
+      client.from("analysis_records").select("id", { count: "exact", head: true }).not("problem_no", "is", null),
+      client.from("analysis_records").select("id", { count: "exact", head: true }).not("problem_no", "is", null).not("solution_text", "is", null),
+    ]);
+    pairingProblemRecs = pRes.count ?? 0;
+    pairingPairedRecs = sRes.count ?? 0;
+  }
+
   // 3) 분석
   const summary = computeSummary(runs);
   const failureCategories = categorizeFailures(runs);
@@ -168,6 +181,8 @@ export async function generateRetrospective(
     promptFormatIssues,
     lowRatedRuns,
     analysisCount: analysisCount ?? 0,
+    pairingProblemRecs,
+    pairingPairedRecs,
   });
 
   return {
@@ -348,9 +363,13 @@ function deriveSuggestions(input: {
   promptFormatIssues: RetrospectiveReport["promptFormatIssues"];
   lowRatedRuns: RetrospectiveReport["lowRatedRuns"];
   analysisCount: number;
+  /** problem_no 가 있는 analysis_records 수 */
+  pairingProblemRecs: number;
+  /** problem_no + solution_text 둘 다 있는 analysis_records 수 */
+  pairingPairedRecs: number;
 }): ImprovementSuggestion[] {
   const out: ImprovementSuggestion[] = [];
-  const { summary, failureCategories, modelPerformance, promptFormatIssues, lowRatedRuns, analysisCount } = input;
+  const { summary, failureCategories, modelPerformance, promptFormatIssues, lowRatedRuns, analysisCount, pairingProblemRecs, pairingPairedRecs } = input;
 
   // 1) 전체 성공률
   if (summary.totalRuns >= 10) {
@@ -464,6 +483,35 @@ function deriveSuggestions(input: {
         "사용자가 결과 검수·평점 입력하는 UX 노출 강화. 별점 위젯 또는 「개선 의견」 텍스트박스 노출 빈도 증가.",
       affectedFiles: ["src/app/auto/page.tsx"],
     });
+  }
+
+  // 7-pre) 1:1 페어 매핑 적중률 — RAG 품질에 직결되는 핵심 지표
+  if (pairingProblemRecs >= 20) {
+    const rate = pairingPairedRecs / pairingProblemRecs;
+    if (rate < 0.4) {
+      out.push({
+        priority: "high",
+        area: "1:1 페어 매핑 적중률",
+        finding: `analysis_records 의 문항 record ${pairingProblemRecs}건 중 풀이 페어 ${pairingPairedRecs}건 (${pct(rate)})`,
+        suggestion:
+          "OCR 결과에서 [해설 N]/[정답 및 해설] 같은 표준 헤더가 안 살아남는 시중교재가 많다는 뜻. " +
+          "src/lib/analysisTextNormalizer.ts 의 패턴(예제/유형/굵게번호/풀이 단독줄)을 확장하거나, " +
+          "이미지 참고 보정 (tools/refineTextbookMdWithVision) 을 도입해 평문 → 표준 마커 재주입.",
+        affectedFiles: [
+          "src/lib/analysisTextNormalizer.ts",
+          "src/lib/driveAnalysisLearner.ts",
+        ],
+      });
+    } else if (rate < 0.7) {
+      out.push({
+        priority: "medium",
+        area: "1:1 페어 매핑 적중률",
+        finding: `페어 매핑률 ${pct(rate)} (${pairingPairedRecs}/${pairingProblemRecs}) — 개선 여지`,
+        suggestion:
+          "특정 시리즈(쎈/마플/EBS 등) 가 자주 미페어로 빠지는지 확인. analysisRecordsStore.ts 검색 결과의 matchedIn='problem' 비율을 집계해 어떤 시리즈가 부족한지 파악.",
+        affectedFiles: ["src/lib/analysisTextNormalizer.ts"],
+      });
+    }
   }
 
   // 7) 분석용 자료 누적도

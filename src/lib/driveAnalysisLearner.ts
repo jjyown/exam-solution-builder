@@ -31,6 +31,7 @@ import {
   persistRecordsForFile,
   pruneOrphanRecords,
 } from "./analysisRecordsStore";
+import { normalizeOcrTextForPairing } from "./analysisTextNormalizer";
 
 type CacheEntry = {
   modifiedTime: string | null;
@@ -95,6 +96,19 @@ export type AnalysisLearnSummary = {
   errors: string[];
   /** 서브폴더(시중교재 / 개인자료 등) 별 파일 수 */
   bySubfolder: Record<string, number>;
+  /** 1:1 매핑 (problem ↔ solution) 통계 — 운영 가시성 + 감독관 임계 검사용 */
+  pairing: {
+    /** 이번 동기화에서 새로 만들어진 record 중 problem_no 가 있는 것 */
+    problemRecords: number;
+    /** 그 중 solution_text 까지 가진(=페어 완성) record */
+    pairedRecords: number;
+    /** 페어 완성률 (paired / problem) — 0~1, 분모 0 이면 0 */
+    pairingRate: number;
+    /** 문제는 있지만 풀이가 없는 record (solution_text=null + problem_no 있음) */
+    unpairedProblems: number;
+    /** OCR 정규화 시 매칭된 룰 개수 (디버깅) */
+    normalizedFiles: number;
+  };
 };
 
 /**
@@ -113,6 +127,13 @@ export async function loadDriveAnalysisRecords(): Promise<{
     records: 0,
     errors: [],
     bySubfolder: {},
+    pairing: {
+      problemRecords: 0,
+      pairedRecords: 0,
+      pairingRate: 0,
+      unpairedProblems: 0,
+      normalizedFiles: 0,
+    },
   };
 
   if (!isGoogleDriveConfigured()) {
@@ -253,7 +274,13 @@ export async function loadDriveAnalysisRecords(): Promise<{
         summary.errors.push(`${f.name}: ${v.error}`);
         return [];
       }
-      const records = splitTextIntoRecords(f.id, f.name, f.pathSegments, v.text);
+      // OCR 결과를 표준 헤더로 사전 정규화 — 1:1 매핑 적중률 향상.
+      // 부작용: 본문은 그대로, 마커만 표준화. 변환이 0건이면 그대로 통과.
+      const normalized = normalizeOcrTextForPairing(v.text);
+      if (normalized.appliedRules.length > 0) {
+        summary.pairing.normalizedFiles += 1;
+      }
+      const records = splitTextIntoRecords(f.id, f.name, f.pathSegments, normalized.text);
       fileCache.set(f.id, { modifiedTime: f.modifiedTime, records });
       try {
         await persistRecordsForFile(f.id, f.modifiedTime, records);
@@ -301,6 +328,20 @@ export async function loadDriveAnalysisRecords(): Promise<{
   }
 
   summary.records = merged.length;
+
+  // 매핑 통계 — problem_no 가 있는 record 중 solution_text 까지 가진 비율
+  let problemRecs = 0;
+  let pairedRecs = 0;
+  for (const r of merged) {
+    if (typeof r.problem_no !== "number") continue;
+    problemRecs += 1;
+    if (r.solution_text && r.solution_text.trim()) pairedRecs += 1;
+  }
+  summary.pairing.problemRecords = problemRecs;
+  summary.pairing.pairedRecords = pairedRecs;
+  summary.pairing.unpairedProblems = problemRecs - pairedRecs;
+  summary.pairing.pairingRate = problemRecs > 0 ? pairedRecs / problemRecs : 0;
+
   return { records: merged, summary };
 }
 
