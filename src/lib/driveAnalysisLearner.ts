@@ -24,7 +24,8 @@ import {
 } from "./googleDrive";
 import { isGeminiVisionAvailable } from "./geminiVisionExtract";
 import { extractTextFromUploadedFile } from "./fileExtraction";
-import { resolveMathpixCredentials } from "./mathpixV3Text";
+import { resolveMathpixCredentials, isMathpixUsableForOcr, isMathpixQuotaError, markMathpixExhausted } from "./mathpixV3Text";
+import { recognizeMathpixPdf } from "./mathpixV3Pdf";
 import type { ReferenceRecord } from "./referenceRetriever";
 import {
   fetchCachedRecords,
@@ -44,13 +45,25 @@ const fileCache = new Map<string, CacheEntry>(); // key = drive fileId
 const ALLOWED_EXTS = new Set([".pdf", ".png", ".jpg", ".jpeg", ".webp"]);
 
 /**
- * 단일 파일 최대 크기 (바이트). 기본 35MB.
- * Gemini inlineData 한도(50MB) 안에서, base64 변환 시 추가 메모리(약 1.33배)를
- * 감안해 OOM 마진을 둔 값. 환경변수 ANALYSIS_FILE_MAX_MB 로 오버라이드 가능.
+ * 일반 파일(이미지) 최대 크기. 기본 35MB.
+ * Gemini inlineData 한도(50MB) + base64 1.33배 OOM 마진. ANALYSIS_FILE_MAX_MB 로 오버라이드.
  */
 const ANALYSIS_FILE_MAX_BYTES = (() => {
   const raw = Number(process.env.ANALYSIS_FILE_MAX_MB);
   const mb = Number.isFinite(raw) && raw > 0 ? raw : 35;
+  return mb * 1024 * 1024;
+})();
+
+/**
+ * PDF 전용 최대 크기. 기본 200MB.
+ * PDF 는 base64 변환 없이 Mathpix /v3/pdf 로 직접 multipart 업로드해 메모리 절약.
+ * 답지+문제 병합본은 보통 100~300MB 라서 35MB 게이트로는 다 빠지므로 별도 한도.
+ * 환경변수: ANALYSIS_PDF_MAX_MB (0 으로 두면 무제한, 기본 200).
+ */
+const ANALYSIS_PDF_MAX_BYTES = (() => {
+  const raw = Number(process.env.ANALYSIS_PDF_MAX_MB);
+  if (Number.isFinite(raw) && raw === 0) return Number.MAX_SAFE_INTEGER;
+  const mb = Number.isFinite(raw) && raw > 0 ? raw : 200;
   return mb * 1024 * 1024;
 })();
 
@@ -270,8 +283,54 @@ export async function loadDriveAnalysisRecords(): Promise<{
     summary.bySubfolder[key] = (summary.bySubfolder[key] ?? 0) + 1;
   }
 
-  /** 단일 파일 처리 — 캐시 → 다운로드 → OCR → Supabase 저장. */
   type DriveFileMeta = (typeof files)[number];
+
+  /**
+   * 큰 PDF (이미지 한도 초과) 전용 경로.
+   *  - base64 변환 우회 (메모리 1.33배 절약) → Buffer 직접 Mathpix /v3/pdf 업로드
+   *  - 답지+문제 병합본(보통 100~300MB) 처리에 적합
+   *  - Mathpix 사용 불가(키 없음·잔여 부족·백오프) 면 skip + errors 에 기록
+   *  - 결과는 일반 흐름과 동일하게 splitTextIntoRecords → records 변환
+   */
+  async function processLargePdfFile(
+    f: DriveFileMeta,
+    root: string,
+  ): Promise<ReferenceRecord[]> {
+    if (!(await isMathpixUsableForOcr())) {
+      bumpRoot(root, "ocrFailed");
+      summary.errors.push(
+        `${f.name}: 큰 PDF — Mathpix 사용 불가(키 없음/잔여 부족/백오프). 작게 분할 후 다시 업로드하거나 ANALYSIS_PDF_MAX_MB 조정 필요. (폴더: ${root})`,
+      );
+      return [];
+    }
+    const dl = await downloadDriveFileById(f.id);
+    const buffer = dl.buffer;
+    const mp = await recognizeMathpixPdf(buffer, f.name);
+    if (!mp.ok) {
+      if (isMathpixQuotaError(mp)) {
+        markMathpixExhausted(`large-pdf HTTP ${mp.status}: ${mp.message.slice(0, 100)}`);
+      }
+      bumpRoot(root, "ocrFailed");
+      summary.errors.push(`${f.name}: 큰 PDF Mathpix 실패 — ${mp.message} (폴더: ${root})`);
+      return [];
+    }
+    const normalized = normalizeOcrTextForPairing(mp.text);
+    if (normalized.appliedRules.length > 0) {
+      summary.pairing.normalizedFiles += 1;
+    }
+    const records = splitTextIntoRecords(f.id, f.name, f.pathSegments, normalized.text);
+    fileCache.set(f.id, { modifiedTime: f.modifiedTime, records });
+    try {
+      await persistRecordsForFile(f.id, f.modifiedTime, records);
+    } catch {
+      // silent
+    }
+    summary.newOrChanged += 1;
+    bumpRoot(root, "newOrChanged");
+    return records;
+  }
+
+  /** 단일 파일 처리 — 캐시 → 다운로드 → OCR → Supabase 저장. */
   async function processOneFile(f: DriveFileMeta): Promise<ReferenceRecord[]> {
     const root = f.pathSegments[0] ?? "(루트)";
     bumpRoot(root, "filesFound");
@@ -288,16 +347,37 @@ export async function loadDriveAnalysisRecords(): Promise<{
       fileCache.set(f.id, { modifiedTime: f.modifiedTime, records: persisted });
       return persisted;
     }
-    // 3) OOM 방지: 너무 큰 파일은 download 자체를 skip
-    if (typeof f.size === "number" && f.size > ANALYSIS_FILE_MAX_BYTES) {
-      bumpRoot(root, "sizeSkipped");
-      const mb = (f.size / (1024 * 1024)).toFixed(1);
-      const limit = (ANALYSIS_FILE_MAX_BYTES / 1024 / 1024) | 0;
-      const msg = `${f.name}: ${mb}MB — ANALYSIS_FILE_MAX_MB(${limit}MB) 초과로 OCR skip. (폴더: ${root})`;
-      summary.errors.push(msg);
-      // 답지 병합본 시중교재가 자주 35MB 초과 → 운영 로그에 명시적으로 떨군다
-      console.warn(`[driveAnalysisLearner] size-skip: ${msg}`);
-      return [];
+    // 3) 사이즈 게이트 — PDF 와 이미지 분리.
+    //    PDF 가 ANALYSIS_FILE_MAX_BYTES(이미지용 35MB) 초과 + ANALYSIS_PDF_MAX_BYTES(200MB) 이하면:
+    //      → base64 변환 우회 + Mathpix /v3/pdf 직접 라우팅 (큰 답지 병합본 처리)
+    //    이미지가 ANALYSIS_FILE_MAX_BYTES 초과면 그대로 skip (이미지 100MB 는 비현실적).
+    const ext = path.extname(f.name).toLowerCase();
+    const isPdf = ext === ".pdf";
+    if (typeof f.size === "number") {
+      const overImg = f.size > ANALYSIS_FILE_MAX_BYTES;
+      const overPdf = f.size > ANALYSIS_PDF_MAX_BYTES;
+      if (isPdf && overPdf) {
+        bumpRoot(root, "sizeSkipped");
+        const mb = (f.size / (1024 * 1024)).toFixed(1);
+        const limit = (ANALYSIS_PDF_MAX_BYTES / 1024 / 1024) | 0;
+        const msg = `${f.name}: ${mb}MB PDF — ANALYSIS_PDF_MAX_MB(${limit}MB) 초과로 OCR skip. (폴더: ${root})`;
+        summary.errors.push(msg);
+        console.warn(`[driveAnalysisLearner] pdf-size-skip: ${msg}`);
+        return [];
+      }
+      if (!isPdf && overImg) {
+        bumpRoot(root, "sizeSkipped");
+        const mb = (f.size / (1024 * 1024)).toFixed(1);
+        const limit = (ANALYSIS_FILE_MAX_BYTES / 1024 / 1024) | 0;
+        const msg = `${f.name}: ${mb}MB — ANALYSIS_FILE_MAX_MB(${limit}MB) 초과로 OCR skip. (폴더: ${root})`;
+        summary.errors.push(msg);
+        console.warn(`[driveAnalysisLearner] size-skip: ${msg}`);
+        return [];
+      }
+      // PDF 인데 이미지 한도(35MB) 초과 + PDF 한도(200MB) 이하 → 큰 PDF 우회 라우트로
+      if (isPdf && overImg && !overPdf) {
+        return await processLargePdfFile(f, root);
+      }
     }
     // 4) 캐시 둘 다 miss → Mathpix 우선 → Gemini 폴백 OCR
     try {

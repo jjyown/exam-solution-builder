@@ -38,6 +38,11 @@ export type SupervisorSnapshot = {
    * 항목에서 추출한 paired/problem 비율 (0~1). 측정 불가시 null.
    */
   pairingRate: number | null;
+  /**
+   * 시리즈 무결성 — improvementSuggestions 안 「시리즈 누락」 「중복 문항」 「페어 깨짐」
+   * finding 에서 추출. 사용자 UI 배지 hover 시 한 줄 요약에 사용.
+   */
+  integrityIssues: { missing: number; duplicate: number; unpaired: number };
   /** 실패했을 때만 채워짐 */
   error: string | null;
 };
@@ -51,6 +56,7 @@ let lastSnapshot: SupervisorSnapshot = {
   highPrioritySuggestions: [],
   suggestionsCount: 0,
   pairingRate: null,
+  integrityIssues: { missing: 0, duplicate: 0, unpaired: 0 },
   error: null,
 };
 
@@ -67,6 +73,18 @@ function reportToSnapshot(report: RetrospectiveReport): SupervisorSnapshot {
     const m = pairingItem.finding.match(/(\d+(?:\.\d+)?)\s*%/);
     if (m) pairingRate = Number(m[1]) / 100;
   }
+  // 무결성 카운트 — 각 area finding 의 첫 정수를 추출
+  const pickInt = (area: string): number => {
+    const item = report.improvementSuggestions.find((s) => s.area === area);
+    if (!item) return 0;
+    const m = item.finding.match(/(\d+)\s*건/);
+    return m ? Number(m[1]) : 0;
+  };
+  const integrityIssues = {
+    missing: pickInt("시리즈 누락"),
+    duplicate: pickInt("중복 문항"),
+    unpaired: pickInt("페어 깨짐 정제 권장"),
+  };
   return {
     ranAt: Date.now(),
     ok: true,
@@ -76,6 +94,7 @@ function reportToSnapshot(report: RetrospectiveReport): SupervisorSnapshot {
     highPrioritySuggestions: high,
     suggestionsCount: report.improvementSuggestions.length,
     pairingRate,
+    integrityIssues,
     error: null,
   };
 }

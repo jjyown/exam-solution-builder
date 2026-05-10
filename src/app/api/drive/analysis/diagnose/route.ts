@@ -141,15 +141,93 @@ export async function GET() {
       integritySummary = null;
     }
 
+    // ── 자동 추천 액션 ─────────────────────────────────────────────
+    // 진단 결과를 보고 사용자가 다음에 할 일을 한 줄씩 제시. 운영자 친화적.
+    const recommendations: Array<{
+      priority: "high" | "medium" | "low";
+      action: string;
+      detail: string;
+    }> = [];
+
+    // 화이트리스트 미매칭 폴더
+    for (const root of Object.keys(byRoot)) {
+      if (!byRoot[root].whitelisted && byRoot[root].totalFiles > 0) {
+        recommendations.push({
+          priority: "high",
+          action: `폴더 「${root}」 화이트리스트 추가`,
+          detail: `${byRoot[root].totalFiles}개 파일이 화이트리스트(${allowedRoots.join(", ")})에 없어 학습 안 됨. ` +
+            `Railway Variables 에 DRIVE_ANALYSIS_ALLOWED_ROOT_FOLDERS=${[...allowedRoots, root].join(",")} 추가.`,
+        });
+      }
+    }
+
+    // 사이즈 초과 PDF — 이미 PDF 라우트가 200MB 까지 흡수. 그래도 200MB 초과면 분할 권장.
+    let totalSizeSkipExpected = 0;
+    for (const stat of Object.values(byRoot)) totalSizeSkipExpected += stat.sizeSkipExpected;
+    if (totalSizeSkipExpected > 0) {
+      recommendations.push({
+        priority: "medium",
+        action: `사이즈 초과 PDF 처리 — ${totalSizeSkipExpected}건`,
+        detail: `이미지 한도(${sizeLimitMb}MB) 초과 PDF 는 자동으로 Mathpix /v3/pdf 라우트로 처리됩니다 (PDF 한도 ANALYSIS_PDF_MAX_MB 기본 200MB 안에서). ` +
+          `200MB 초과 PDF 가 있다면 Drive 에서 페이지 단위로 분할해 다시 업로드하거나 ANALYSIS_PDF_MAX_MB 환경변수를 상향.`,
+      });
+    }
+
+    // 시중교재 폴더가 있는데 처리됨이 0인 케이스
+    const sijungStat = byRoot["시중교재"];
+    if (sijungStat && sijungStat.totalFiles > 0 && integritySummary) {
+      const sijungInDb = (integritySummary.issues || []).filter(
+        (i) => i.series.includes("시중교재") || (i as { source?: string }).source?.includes?.("시중교재"),
+      ).length;
+      if (sijungInDb === 0 && sijungStat.totalFiles > 0) {
+        recommendations.push({
+          priority: "high",
+          action: "시중교재 처리 미진행 — 다음 자동 동기화 또는 즉시 「분석자료 새로 학습」 클릭",
+          detail: `Drive 「시중교재」 폴더에 ${sijungStat.totalFiles}개 PDF 가 있지만 analysis_records 에 데이터가 없습니다. ` +
+            `백그라운드 동기화(4시간 주기)가 아직 안 돌았거나 큰 PDF 라 처리 시간이 걸리는 중일 수 있음. 즉시 트리거하려면 /auto 헤더 「분석자료 새로 학습」 버튼.`,
+        });
+      }
+    }
+
+    // 무결성 이슈 자동 추천
+    if (integritySummary) {
+      if (integritySummary.counts.missing > 0) {
+        recommendations.push({
+          priority: "medium",
+          action: `누락된 문항 ${integritySummary.counts.missing}건 검출`,
+          detail: "같은 series 안 problem_no 시퀀스에 빈 번호가 있습니다 — Drive 에서 답지·문제집 PDF 페이지 누락 또는 OCR 실패 가능. " +
+            "응답의 integrity.issues[kind=missing] 항목을 확인해 어느 PDF 인지 식별 후 재업로드.",
+        });
+      }
+      if (integritySummary.counts.duplicate > 0) {
+        recommendations.push({
+          priority: "low",
+          action: `중복 문항 ${integritySummary.counts.duplicate}건 검출`,
+          detail: "같은 (series, problem_no) 가 두 번 이상 나타남 — 같은 페이지가 두 번 OCR 됐거나 다른 페이지가 같은 번호 라벨. " +
+            "integrity.issues[kind=duplicate] 의 contentDigests 비교로 진짜 중복인지 판단.",
+        });
+      }
+      if (integritySummary.counts.unpaired > 0) {
+        recommendations.push({
+          priority: "high",
+          action: `페어 깨진 record ${integritySummary.counts.unpaired}건 — AI 보조 정제 권장`,
+          detail: "문제는 있는데 풀이가 없거나 반대. ASSISTED_PAIRING_ENABLED=true 설정 후 " +
+            "POST /api/drive/analysis/refine-pairing { \"apply\": false } 로 dry-run → { \"apply\": true } 로 적용.",
+        });
+      }
+    }
+
     return NextResponse.json({
       ok: true,
       driveAnalysisFolderId: folderId,
       rootFolders: byRoot,
       noRootFilesCount: noRootFiles.length,
       sizeLimitMb,
+      pdfLimitMb: Number(process.env.ANALYSIS_PDF_MAX_MB) || 200,
       minKb,
       config: { allowedRoots, sizeLimitMb, minKb },
       integrity: integritySummary,
+      recommendations,
     });
   } catch (e) {
     return NextResponse.json({ ok: false, error: (e as Error).message }, { status: 500 });

@@ -182,6 +182,7 @@ export default function AutoPipelinePage() {
       highPrioritySuggestions: Array<{ priority: string; area: string; finding: string }>;
       suggestionsCount: number;
       pairingRate: number | null;
+      integrityIssues?: { missing: number; duplicate: number; unpaired: number };
       error: string | null;
     } | null;
   };
@@ -2240,6 +2241,7 @@ type HealthBadgesProps = {
       highPrioritySuggestions: Array<{ priority: string; area: string; finding: string }>;
       suggestionsCount: number;
       pairingRate: number | null;
+      integrityIssues?: { missing: number; duplicate: number; unpaired: number };
       error: string | null;
     } | null;
   } | null;
@@ -2323,6 +2325,17 @@ function HealthBadges({ health }: HealthBadgesProps) {
         >
           페어매핑 {(sup.pairingRate * 100).toFixed(0)}%
         </span>
+      )}
+      {sup?.integrityIssues && (sup.integrityIssues.missing + sup.integrityIssues.duplicate + sup.integrityIssues.unpaired > 0) && (
+        <a
+          href="/api/drive/analysis/diagnose"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="rounded border border-amber-400 bg-amber-50 px-1.5 py-0.5 text-amber-900 underline-offset-2 hover:underline"
+          title={`시리즈 누락 ${sup.integrityIssues.missing} / 중복 ${sup.integrityIssues.duplicate} / 페어 깨짐 ${sup.integrityIssues.unpaired}\n클릭: 진단 페이지에서 어떤 PDF·번호인지 확인 + 추천 액션`}
+        >
+          무결성 ⚠ {sup.integrityIssues.missing + sup.integrityIssues.duplicate + sup.integrityIssues.unpaired}
+        </a>
       )}
     </div>
   );

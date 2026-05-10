@@ -167,6 +167,20 @@ export async function generateRetrospective(
     pairingPairedRecs = sRes.count ?? 0;
   }
 
+  // 2-2) 시리즈 무결성 — 누락/중복/페어 깨짐. fetchAllRecords + checkIntegrity 로 직접 계산.
+  //      analysisCount 가 너무 크면 cost 가 부담이지만 현재 KB 53건 + 시중교재 누적 정도라 OK.
+  let integrityCounts = { missing: 0, duplicate: 0, unpaired: 0 };
+  try {
+    const { fetchAllRecords } = await import("./analysisRecordsStore");
+    const { checkIntegrity } = await import("./analysisIntegrityCheck");
+    const all = await fetchAllRecords();
+    if (all.length > 0) {
+      integrityCounts = checkIntegrity(all).counts;
+    }
+  } catch {
+    // best-effort
+  }
+
   // 3) 분석
   const summary = computeSummary(runs);
   const failureCategories = categorizeFailures(runs);
@@ -183,6 +197,7 @@ export async function generateRetrospective(
     analysisCount: analysisCount ?? 0,
     pairingProblemRecs,
     pairingPairedRecs,
+    integrityCounts,
   });
 
   return {
@@ -367,9 +382,11 @@ function deriveSuggestions(input: {
   pairingProblemRecs: number;
   /** problem_no + solution_text 둘 다 있는 analysis_records 수 */
   pairingPairedRecs: number;
+  /** 시리즈 무결성 카운트 (누락/중복/페어 깨짐) */
+  integrityCounts: { missing: number; duplicate: number; unpaired: number };
 }): ImprovementSuggestion[] {
   const out: ImprovementSuggestion[] = [];
-  const { summary, failureCategories, modelPerformance, promptFormatIssues, lowRatedRuns, analysisCount, pairingProblemRecs, pairingPairedRecs } = input;
+  const { summary, failureCategories, modelPerformance, promptFormatIssues, lowRatedRuns, analysisCount, pairingProblemRecs, pairingPairedRecs, integrityCounts } = input;
 
   // 1) 전체 성공률
   if (summary.totalRuns >= 10) {
@@ -512,6 +529,45 @@ function deriveSuggestions(input: {
         affectedFiles: ["src/lib/analysisTextNormalizer.ts"],
       });
     }
+  }
+
+  // 7-mid) 시리즈 무결성 임계 — 누락/중복/페어 깨짐
+  if (integrityCounts.missing > 0) {
+    out.push({
+      priority: integrityCounts.missing >= 10 ? "high" : "medium",
+      area: "시리즈 누락",
+      finding: `같은 series 안 problem_no 시퀀스에 ${integrityCounts.missing}건의 빈 번호 발견`,
+      suggestion:
+        "Drive 에서 해당 PDF 의 페이지가 빠졌거나 OCR 인식 실패. " +
+        "/api/drive/analysis/diagnose 응답의 integrity.issues[kind=missing] 으로 어느 series·번호인지 확인.",
+      affectedFiles: ["src/lib/analysisIntegrityCheck.ts"],
+    });
+  }
+  if (integrityCounts.duplicate > 0) {
+    out.push({
+      priority: integrityCounts.duplicate >= 5 ? "medium" : "low",
+      area: "중복 문항",
+      finding: `같은 (series, problem_no) 가 ${integrityCounts.duplicate}건 중복`,
+      suggestion:
+        "같은 페이지가 두 번 OCR 됐거나 다른 페이지가 같은 번호로 라벨됨. " +
+        "diagnose 응답 integrity.issues[kind=duplicate] 의 contentDigests 로 진짜 중복인지 판별 후 정리.",
+      affectedFiles: ["src/lib/analysisIntegrityCheck.ts"],
+    });
+  }
+  if (integrityCounts.unpaired >= 5) {
+    out.push({
+      priority: "high",
+      area: "페어 깨짐 정제 권장",
+      finding: `${integrityCounts.unpaired}건의 record 가 문제↔풀이 한쪽만 가지고 있음`,
+      suggestion:
+        "ASSISTED_PAIRING_ENABLED=true 환경변수 설정 후 " +
+        "POST /api/drive/analysis/refine-pairing 로 gemini-2.0-flash 분류 → 자동 페어링 적용. " +
+        "비용: record 100건 기준 약 $0.01.",
+      affectedFiles: [
+        "src/lib/pairingAssistedRefiner.ts",
+        "src/app/api/drive/analysis/refine-pairing/route.ts",
+      ],
+    });
   }
 
   // 7) 분석용 자료 누적도
