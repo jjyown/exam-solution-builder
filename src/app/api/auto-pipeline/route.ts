@@ -524,6 +524,23 @@ export async function POST(req: Request) {
         );
       }
 
+      // 「ok=false 인데 errors 가 비어 있는」 휑한 응답 방지.
+      // parsed=null 인 모든 케이스에 진단성 기본 메시지를 1줄 채워, 클라이언트가
+      // 「서버 200」 같은 무의미한 fallback 을 표시하지 않게 한다.
+      if (row.parsed === null && row.errors.length === 0) {
+        const checklistHint =
+          Array.isArray(row.manualReviewChecklist) && row.manualReviewChecklist[0]
+            ? ` (검수: ${String(row.manualReviewChecklist[0]).slice(0, 100)})`
+            : '';
+        const traceTail =
+          Array.isArray(row.trace) && row.trace.length > 0
+            ? ` [last stage=${row.trace[row.trace.length - 1]?.stage ?? 'unknown'}]`
+            : '';
+        row.errors.push(
+          `풀이 결과가 비어 있습니다 (parsed=null) — 검증 단계 통과 못 했거나 모델 응답이 형식 어긋남.${checklistHint}${traceTail}`,
+        );
+      }
+
       return NextResponse.json({
         ok: row.parsed !== null && row.errors.length === 0,
         parsed: row.parsed,

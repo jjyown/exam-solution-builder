@@ -428,10 +428,34 @@ export default function CropPage() {
         }),
       });
       const data = await res.json();
-      if (!res.ok || !data.ok) {
-        throw new Error(data.error || data.errors?.[0] || `서버 ${res.status}`);
+      const row0 = data.runs?.[0];
+      // 서버가 ok=false 로 응답할 때 진짜 원인 메시지를 끝까지 추출.
+      //   1) data.error (top-level error string — invalid body 등)
+      //   2) data.errors[0] (top-level errors 배열 첫 항목)
+      //   3) row0.errors[0] (단일 문항 row 의 errors)
+      //   4) row0.manualReviewChecklist[0] (검증기가 errors 대신 체크리스트로만 표시한 경우)
+      //   5) parsed=null 이지만 모든 배열이 비어 있는 진짜 휑한 케이스
+      //      → runId 가 있으면 /auto 로 가서 trace 확인 가능하다는 안내
+      function extractError(): string {
+        if (typeof data.error === "string" && data.error) return data.error;
+        if (Array.isArray(data.errors) && data.errors[0]) return String(data.errors[0]);
+        if (row0) {
+          if (Array.isArray(row0.errors) && row0.errors[0]) return String(row0.errors[0]);
+          if (Array.isArray(row0.manualReviewChecklist) && row0.manualReviewChecklist[0])
+            return String(row0.manualReviewChecklist[0]);
+          if (row0.parsed === null) {
+            const tail = row0.runId
+              ? ` (runId=${String(row0.runId).slice(0, 8)}… — 「자동에서 열기」로 trace 확인)`
+              : "";
+            return `풀이 결과가 비었습니다 (parsed=null, errors=[]).${tail}`;
+          }
+        }
+        return `서버 ${res.status} — 진단 정보 없음`;
       }
-      const row = data.runs?.[0] ?? data;
+      if (!res.ok || !data.ok) {
+        throw new Error(extractError());
+      }
+      const row = row0 ?? data;
       setCrops((prev) =>
         prev.map((c) =>
           c.id === entry.id
