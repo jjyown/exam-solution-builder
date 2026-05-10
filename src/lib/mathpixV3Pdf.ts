@@ -45,16 +45,23 @@ export async function submitMathpixPdf(
   new Uint8Array(ab).set(buffer);
   const blob = new Blob([ab], { type: "application/pdf" });
   form.append("file", blob, fileName || "document.pdf");
+  // 호출자가 includeLineData=true 를 넘기면 conversion_formats 에 lines.json 추가.
+  // 페어링률 <40% PDF 의 자동 폴백에서만 사용 — 일반 동선은 그대로.
+  const includeLineData = !!(options && (options as { includeLineData?: boolean }).includeLineData);
+  const opts = { ...(options ?? {}) };
+  delete (opts as { includeLineData?: boolean }).includeLineData;
   form.append(
     "options_json",
     JSON.stringify({
       // mmd · md 모두 가능 — 호환을 위해 둘 다 켜두고 호출 측에서 mmd 사용
-      conversion_formats: { mmd: true, md: true },
+      conversion_formats: includeLineData
+        ? { mmd: true, md: true, "lines.json": true }
+        : { mmd: true, md: true },
       // 한국어/수식 친화 — 인라인 $...$ / 디스플레이 $$...$$
       math_inline_delimiters: ["$", "$"],
       math_display_delimiters: ["$$", "$$"],
       rm_spaces: true,
-      ...(options ?? {}),
+      ...opts,
     }),
   );
 
@@ -130,6 +137,73 @@ export async function getMathpixPdfStatus(
     };
   }
   return { ok: true, body };
+}
+
+/**
+ * Mathpix v3 PDF lines.json 응답 (간략화 — 핵심 필드만).
+ * @see https://docs.mathpix.com/reference/pdf-lines-json
+ *
+ * 페어링률 <40% PDF 의 자동 폴백에서 segment 분할에 사용한다.
+ * (텍스트 헤더 매칭이 깨졌을 때 좌표 기반으로 다시 분리)
+ */
+export type MathpixPdfLinesJson = {
+  pages: Array<{
+    page: number;
+    image_id?: string;
+    page_height?: number;
+    page_width?: number;
+    lines: Array<{
+      id?: string;
+      type?: string;          // "text" | "math" | "page_info" | ...
+      cnt?: number[][];       // 픽셀 다각형 [[x,y],[x,y],...]
+      text?: string;
+      // 그 외 mathml/html/conf 등은 사용하지 않음
+    }>;
+  }>;
+};
+
+/** 완료된 pdf_id 의 lines.json 결과를 가져온다 — 자동 폴백 전용. */
+export async function getMathpixPdfLinesJson(
+  pdfId: string,
+): Promise<
+  | { ok: true; data: MathpixPdfLinesJson }
+  | { ok: false; status: number; message: string }
+> {
+  const cred = resolveMathpixCredentials();
+  if (!cred) {
+    return { ok: false, status: 501, message: "MATHPIX_APP_ID/KEY 미설정" };
+  }
+  let res: Response;
+  try {
+    res = await fetch(
+      `${MATHPIX_PDF_ENDPOINT}/${encodeURIComponent(pdfId)}.lines.json`,
+      {
+        method: "GET",
+        headers: { app_id: cred.appId, app_key: cred.appKey },
+      },
+    );
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return { ok: false, status: 502, message: `네트워크 오류: ${msg}` };
+  }
+  if (!res.ok) {
+    const raw = await res.text().catch(() => "");
+    return {
+      ok: false,
+      status: res.status,
+      message: raw.slice(0, 300) || `HTTP ${res.status}`,
+    };
+  }
+  let data: MathpixPdfLinesJson;
+  try {
+    data = (await res.json()) as MathpixPdfLinesJson;
+  } catch {
+    return { ok: false, status: 502, message: "lines.json 파싱 실패" };
+  }
+  if (!Array.isArray(data?.pages)) {
+    return { ok: false, status: 502, message: "lines.json 응답에 pages 배열 없음" };
+  }
+  return { ok: true, data };
 }
 
 /** 완료된 pdf_id 의 결과를 mmd 또는 md 로 가져와 텍스트 반환. */

@@ -191,6 +191,7 @@ export default function AutoPipelinePage() {
         { filesFound: number; sizeSkipped: number; ocrFailed: number; cacheHit: number; newOrChanged: number }
       >;
       lastLowPairingFiles?: Array<{
+        fileId: string;
         source: string;
         problemRecords: number;
         pairedRecords: number;
@@ -220,6 +221,54 @@ export default function AutoPipelinePage() {
   const [supervisorRunning, setSupervisorRunning] = useState(false);
   // bbox 재처리 권장 큐 토글 — 페어링률 <40% PDF 목록을 표시
   const [lowPairingOpen, setLowPairingOpen] = useState(false);
+  // 파일별 재처리 진행 상태/결과 — UI 표 옆에 즉시 보여주기
+  type BboxResult =
+    | { status: 'running' }
+    | {
+        status: 'done';
+        improved: boolean;
+        before: { problem: number; paired: number; rate: number };
+        after: { problem: number; paired: number; rate: number };
+      }
+    | { status: 'error'; message: string };
+  const [bboxResults, setBboxResults] = useState<Record<string, BboxResult>>({});
+
+  const runBboxFallback = useCallback(async (fileId: string) => {
+    if (!fileId) return;
+    setBboxResults((prev) => ({ ...prev, [fileId]: { status: 'running' } }));
+    try {
+      const res = await fetch('/api/drive/analysis/bbox-fallback', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fileId }),
+      });
+      const data = await res.json();
+      if (!data?.ok) {
+        setBboxResults((prev) => ({
+          ...prev,
+          [fileId]: {
+            status: 'error',
+            message: data?.error ?? `HTTP ${res.status}`,
+          },
+        }));
+        return;
+      }
+      setBboxResults((prev) => ({
+        ...prev,
+        [fileId]: {
+          status: 'done',
+          improved: !!data.improved,
+          before: data.before,
+          after: data.after,
+        },
+      }));
+    } catch (e) {
+      setBboxResults((prev) => ({
+        ...prev,
+        [fileId]: { status: 'error', message: (e as Error).message },
+      }));
+    }
+  }, []);
 
   // 분석 현황 탭 (시중교재/시험지 원안 진행 상태)
   const [analysisStatusOpen, setAnalysisStatusOpen] = useState(false);
@@ -1073,24 +1122,67 @@ export default function AutoPipelinePage() {
                         <th className="px-1 py-0.5 text-left">파일</th>
                         <th className="px-1 py-0.5 text-right">페어/문제</th>
                         <th className="px-1 py-0.5 text-right">적중률</th>
+                        <th className="px-1 py-0.5 text-center">재처리</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {(health?.drive_sync?.lastLowPairingFiles ?? []).map((f) => (
-                        <tr key={f.source} className="border-t border-rose-200">
-                          <td className="px-1 py-0.5 font-mono text-slate-800">
-                            {f.source.split('/').slice(-2).join('/')}
-                          </td>
-                          <td className="px-1 py-0.5 text-right text-slate-700">
-                            {f.pairedRecords}/{f.problemRecords}
-                          </td>
-                          <td className="px-1 py-0.5 text-right font-semibold text-rose-700">
-                            {(f.rate * 100).toFixed(0)}%
-                          </td>
-                        </tr>
-                      ))}
+                      {(health?.drive_sync?.lastLowPairingFiles ?? []).map((f) => {
+                        const result = f.fileId ? bboxResults[f.fileId] : undefined;
+                        return (
+                          <tr key={f.source} className="border-t border-rose-200">
+                            <td className="px-1 py-0.5 font-mono text-slate-800">
+                              {f.source.split('/').slice(-2).join('/')}
+                            </td>
+                            <td className="px-1 py-0.5 text-right text-slate-700">
+                              {f.pairedRecords}/{f.problemRecords}
+                            </td>
+                            <td className="px-1 py-0.5 text-right font-semibold text-rose-700">
+                              {(f.rate * 100).toFixed(0)}%
+                              {result?.status === 'done' && (
+                                <span
+                                  className={`ml-1 ${result.improved ? 'text-emerald-700' : 'text-slate-500'}`}
+                                  title={`재처리 결과: ${result.before.paired}/${result.before.problem} → ${result.after.paired}/${result.after.problem}`}
+                                >
+                                  → {(result.after.rate * 100).toFixed(0)}%
+                                  {result.improved ? ' ✓' : ' ='}
+                                </span>
+                              )}
+                            </td>
+                            <td className="px-1 py-0.5 text-center">
+                              {!f.fileId ? (
+                                <span className="text-slate-400" title="fileId 미보유 — 다음 sync 후 가능">
+                                  -
+                                </span>
+                              ) : result?.status === 'running' ? (
+                                <span className="text-rose-700">처리 중…</span>
+                              ) : result?.status === 'error' ? (
+                                <button
+                                  onClick={() => runBboxFallback(f.fileId)}
+                                  className="rounded border border-rose-400 bg-white px-1.5 py-0.5 text-rose-800 hover:bg-rose-100"
+                                  title={result.message}
+                                >
+                                  실패 — 재시도
+                                </button>
+                              ) : (
+                                <button
+                                  onClick={() => runBboxFallback(f.fileId)}
+                                  className="rounded border border-rose-700 bg-rose-700 px-1.5 py-0.5 font-semibold text-white hover:bg-rose-800"
+                                  title="Mathpix lines.json (좌표 기반) 재호출 → segment 재분할 → 페어링률 향상 시 records 갱신. 비용: Mathpix /v3/pdf 1회 추가."
+                                >
+                                  ⊕ bbox 재처리
+                                </button>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
                     </tbody>
                   </table>
+                  <p className="mt-1 text-[10px] text-slate-600">
+                    ⓘ 「⊕ bbox 재처리」: Mathpix lines.json (좌표 기반) 응답으로 segment 를
+                    다시 잘라 페어링률 회복 시도. 향상 시에만 records 갱신 (롤백 안전).
+                    환경변수 BBOX_FALLBACK_ENABLED=true 필요.
+                  </p>
                 </>
               )}
             </div>
@@ -2704,6 +2796,7 @@ type HealthBadgesProps = {
         { filesFound: number; sizeSkipped: number; ocrFailed: number; cacheHit: number; newOrChanged: number }
       >;
       lastLowPairingFiles?: Array<{
+        fileId: string;
         source: string;
         problemRecords: number;
         pairedRecords: number;

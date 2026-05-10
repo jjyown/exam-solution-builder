@@ -53,6 +53,7 @@ type AutoSyncSnapshot = {
    * 로 재처리 후보가 됨.
    */
   lastLowPairingFiles: Array<{
+    fileId: string;
     source: string;
     problemRecords: number;
     pairedRecords: number;
