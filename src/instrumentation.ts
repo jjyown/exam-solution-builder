@@ -4,23 +4,44 @@
  * @see https://nextjs.org/docs/app/api-reference/file-conventions/instrumentation
  */
 
+/**
+ * 일부 환경(Railway 특정 빌드, custom server 등)에서 instrumentation 이 호출 안 되는
+ * 사례가 있어 register 호출 여부를 모듈 전역 플래그로 노출.
+ * 헬스체크에서 이 플래그를 보고 instrumentation 미동작을 즉시 진단할 수 있다.
+ */
+export let instrumentationRegistered = false;
+
 export async function register(): Promise<void> {
   if (process.env.NEXT_RUNTIME !== "nodejs") return;
+
+  console.log("[instrumentation] register() 호출 — 백그라운드 스케줄러 등록 시작");
 
   // 1) Supabase 마이그레이션 자동 적용 (멱등) — SUPABASE_DB_URL 있을 때만
   try {
     const { runSupabaseMigrationsOnStartup } = await import("./lib/supabaseMigrations");
     await runSupabaseMigrationsOnStartup();
-  } catch {
-    // best-effort — 실패해도 서버는 정상 기동
+  } catch (e) {
+    console.warn("[instrumentation] supabase migration skipped:", (e as Error).message);
   }
 
   // 2) Drive 분석자료 백그라운드 자동 동기화 스케줄러
-  const { startDriveAnalysisAutoSync } = await import("./lib/driveAnalysisAutoSync");
-  startDriveAnalysisAutoSync();
+  try {
+    const { startDriveAnalysisAutoSync } = await import("./lib/driveAnalysisAutoSync");
+    startDriveAnalysisAutoSync();
+    console.log("[instrumentation] startDriveAnalysisAutoSync() 등록 완료");
+  } catch (e) {
+    console.error("[instrumentation] drive sync 등록 실패:", (e as Error).message);
+  }
 
-  // 3) 감독관 (retrospective) 자동 루프 — 6시간 주기로 누적 데이터 분석,
-  //    HIGH priority 제안 발견 시 console.warn 으로 운영 로그에 노출.
-  const { startSupervisorScheduler } = await import("./lib/supervisorScheduler");
-  startSupervisorScheduler();
+  // 3) 감독관 (retrospective) 자동 루프
+  try {
+    const { startSupervisorScheduler } = await import("./lib/supervisorScheduler");
+    startSupervisorScheduler();
+    console.log("[instrumentation] startSupervisorScheduler() 등록 완료");
+  } catch (e) {
+    console.error("[instrumentation] supervisor 등록 실패:", (e as Error).message);
+  }
+
+  instrumentationRegistered = true;
+  console.log("[instrumentation] register() 완료 — instrumentationRegistered=true");
 }

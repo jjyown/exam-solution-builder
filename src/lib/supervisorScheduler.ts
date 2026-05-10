@@ -61,6 +61,10 @@ let lastSnapshot: SupervisorSnapshot = {
 };
 
 export function getSupervisorSnapshot(): SupervisorSnapshot {
+  // 안전망: instrumentation 미동작 환경 대비 — 첫 호출 시 자동 시작 (idempotent).
+  if (!started) {
+    startSupervisorScheduler();
+  }
   return lastSnapshot;
 }
 

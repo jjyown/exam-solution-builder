@@ -595,11 +595,20 @@ export async function GET() {
       import('@/lib/driveAnalysisAutoSync'),
       import('@/lib/supervisorScheduler'),
     ]);
+    // instrumentation 등록 여부 확인 — Railway 빌드에서 안 호출되는 경우 진단용
+    let instrumentationRegistered = false;
+    try {
+      const inst = await import("@/instrumentation");
+      instrumentationRegistered = inst.instrumentationRegistered;
+    } catch {
+      // ignore
+    }
     return NextResponse.json({
       ok: true,
       kb_size: r.size(),
       drive_sync: getDriveAnalysisSyncSnapshot(),
       supervisor: getSupervisorSnapshot(),
+      instrumentationRegistered,
     });
   } catch (e) {
     return NextResponse.json({ ok: false, error: (e as Error).message }, { status: 500 });

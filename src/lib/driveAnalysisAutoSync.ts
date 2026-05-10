@@ -61,6 +61,12 @@ let snapshot: AutoSyncSnapshot = {
 };
 
 export function getDriveAnalysisSyncSnapshot(): AutoSyncSnapshot {
+  // 안전망: instrumentation.ts 의 register 가 Railway 등에서 호출 안 됐을 때
+  // 첫 API 호출 시점에 자동으로 스케줄러를 시작 (idempotent — `if (started) return`).
+  // 정상 부팅이면 startup 60초 안에 이미 started=true 라 영향 없음.
+  if (!started) {
+    startDriveAnalysisAutoSync();
+  }
   return snapshot;
 }
 
