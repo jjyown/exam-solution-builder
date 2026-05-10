@@ -16,6 +16,12 @@
  */
 import { NextResponse } from "next/server";
 import { buildExamExplanationHmlBuffer } from "@/lib/examExplanationHml";
+import {
+  getDriveClient,
+  isGoogleDriveConfigured,
+  resolveDriveWorkCompleteFolderId,
+  uploadBufferToDriveFolder,
+} from "@/lib/googleDrive";
 
 type ParsedStep = { text: string; equation: string };
 type Parsed = {
@@ -88,11 +94,42 @@ export async function POST(req: Request) {
   const buffer = Buffer.from(finalHml, "utf8");
 
   const fileName = `${safeFilename(examName)}_해설.hml`;
+
+  // Drive 「작업완료」 폴더 자동 업로드 — DOCX 와 동일 동선.
+  // HWP 가 실무 메인 포맷이므로 Drive 동기화도 동등하게 받쳐 준다.
+  let driveFileId = "";
+  let driveWebViewLink = "";
+  let driveError = "";
+  if (isGoogleDriveConfigured()) {
+    try {
+      const drive = getDriveClient();
+      const folderId = await resolveDriveWorkCompleteFolderId(drive);
+      const up = await uploadBufferToDriveFolder({
+        folderId,
+        fileName,
+        buffer,
+        mimeType: "application/x-hwpml",
+      });
+      driveFileId = up.id;
+      driveWebViewLink = up.webViewLink;
+    } catch (e) {
+      // 업로드 실패해도 다운로드는 성공시킴 — 사용자 작업 끊기지 않게
+      driveError = (e as Error).message;
+    }
+  }
+
   const headers: Record<string, string> = {
     "Content-Type": "application/x-hwpml; charset=utf-8",
     "Content-Disposition": `attachment; filename="${encodeURIComponent(fileName)}"`,
     "Content-Length": String(buffer.length),
-    "Access-Control-Expose-Headers": "Content-Disposition",
   };
+  if (driveFileId) {
+    headers["X-Drive-File-Id"] = driveFileId;
+    headers["X-Drive-Web-View-Link"] = driveWebViewLink;
+  }
+  if (driveError) headers["X-Drive-Upload-Error"] = encodeURIComponent(driveError);
+  headers["Access-Control-Expose-Headers"] =
+    "X-Drive-File-Id, X-Drive-Web-View-Link, X-Drive-Upload-Error, Content-Disposition";
+
   return new NextResponse(new Uint8Array(buffer), { status: 200, headers });
 }

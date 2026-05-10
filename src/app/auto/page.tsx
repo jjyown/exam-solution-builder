@@ -779,6 +779,15 @@ export default function AutoPipelinePage() {
     a.download = filename;
     a.click();
     URL.revokeObjectURL(url);
+
+    // Drive 작업완료 폴더에도 자동 업로드된 결과를 페이지에 노출 — DOCX 와 동등
+    const driveLink = res.headers.get('x-drive-web-view-link');
+    const driveErr = res.headers.get('x-drive-upload-error');
+    if (driveLink) {
+      setDriveUploadInfo({ link: driveLink, fileName: filename, error: null });
+    } else if (driveErr) {
+      setDriveUploadInfo({ link: null, fileName: filename, error: decodeURIComponent(driveErr) });
+    }
   }
 
   async function downloadDocx(scope: 'active' | 'all') {
@@ -1556,20 +1565,20 @@ function ResultsSection(props: {
                 📄 전체 미리보기
               </button>
               <button
-                onClick={() => handleDocx('all')}
-                disabled={successCount === 0 || docxBusy !== null}
-                className="rounded-md border border-indigo-700 bg-indigo-700 px-3 py-1 text-[11px] font-semibold text-white hover:bg-indigo-800 disabled:cursor-not-allowed disabled:opacity-50"
-                title="성공한 문항을 한 DOCX 파일로 묶어서 다운로드"
-              >
-                {docxBusy === 'all' ? 'DOCX 생성 중…' : `전체 DOCX (${successCount}문항)`}
-              </button>
-              <button
                 onClick={() => handleHml('all')}
                 disabled={successCount === 0 || hmlBusy !== null}
-                className="rounded-md border border-emerald-700 bg-emerald-700 px-3 py-1 text-[11px] font-semibold text-white hover:bg-emerald-800 disabled:cursor-not-allowed disabled:opacity-50"
-                title="성공한 문항을 한 HWP/HML 파일로 묶어서 다운로드 — 한컴 한글에서 열기"
+                className="rounded-md border border-indigo-700 bg-indigo-700 px-3 py-1 text-[11px] font-semibold text-white hover:bg-indigo-800 disabled:cursor-not-allowed disabled:opacity-50"
+                title="성공한 문항을 한 HWP/HML 파일로 묶어서 다운로드 — 한컴 한글에서 바로 열림 (메인 포맷)"
               >
-                {hmlBusy === 'all' ? 'HWP 생성 중…' : `전체 HWP (${successCount}문항)`}
+                {hmlBusy === 'all' ? 'HWP 생성 중…' : `📕 전체 HWP (${successCount}문항)`}
+              </button>
+              <button
+                onClick={() => handleDocx('all')}
+                disabled={successCount === 0 || docxBusy !== null}
+                className="rounded-md border border-slate-400 bg-white px-3 py-1 text-[11px] font-semibold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+                title="외부 공유·Google Drive 미리보기용 (보조 포맷). 학원 내부 작업은 HWP 권장"
+              >
+                {docxBusy === 'all' ? 'DOCX 중…' : `DOCX (${successCount})`}
               </button>
               <button
                 onClick={props.onDownloadRunsCsv}
@@ -1656,20 +1665,20 @@ function ResultsSection(props: {
                 📄 미리보기
               </button>
               <button
-                onClick={() => handleDocx('active')}
-                disabled={!active.parsed || docxBusy !== null}
-                className="rounded border border-emerald-700 bg-emerald-600 px-2 py-1 text-[11px] font-semibold text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-40"
-                title="이 문항을 DOCX로 다운로드"
-              >
-                {docxBusy === 'active' ? 'DOCX…' : 'DOCX'}
-              </button>
-              <button
                 onClick={() => handleHml('active')}
                 disabled={!active.parsed || hmlBusy !== null}
-                className="rounded border border-amber-700 bg-amber-600 px-2 py-1 text-[11px] font-semibold text-white hover:bg-amber-700 disabled:cursor-not-allowed disabled:opacity-40"
-                title="이 문항을 HWP/HML로 다운로드 — 한컴 한글에서 바로 열림"
+                className="rounded border border-indigo-700 bg-indigo-600 px-2 py-1 text-[11px] font-semibold text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-40"
+                title="이 문항을 HWP/HML 로 다운로드 — 한컴 한글에서 바로 열림 (메인 포맷)"
               >
-                {hmlBusy === 'active' ? 'HWP…' : 'HWP'}
+                {hmlBusy === 'active' ? 'HWP…' : '📕 HWP'}
+              </button>
+              <button
+                onClick={() => handleDocx('active')}
+                disabled={!active.parsed || docxBusy !== null}
+                className="rounded border border-slate-400 bg-white px-2 py-1 text-[11px] font-semibold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
+                title="외부 공유·Drive 미리보기 등 보조 용도"
+              >
+                {docxBusy === 'active' ? 'DOCX…' : 'DOCX'}
               </button>
               <button
                 onClick={props.onDownloadJson}
