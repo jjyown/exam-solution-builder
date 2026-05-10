@@ -394,6 +394,109 @@ async function handleCostTracker(req: Request) {
   // 비싼 라우트가 위로 오게 정렬
   byRoute.sort((a, b) => b.estUsd - a.estUsd);
 
+  // ── 4) byRouteModel — (라우트 × 모델) 교차 세부 ───────────────────────────
+  // "어디서 어떤 모델로 얼마"를 한 줄씩 보여주기 위한 더 fine-grained 집계.
+  // 같은 데이터를 다른 차원으로 자르는 view 라 byRoute 와 totalUsd 가 일치.
+  type RouteModelRow = {
+    route: string;
+    purpose: string;
+    model: string;
+    vendor: string;
+    calls: number;
+    units: number;
+    estUsd: number;
+    avgPerCallUsd: number;
+    source: "auto_pipeline_runs" | "analysis_records" | "api_call_logs";
+  };
+  const byRouteModel: RouteModelRow[] = [];
+
+  // (a) auto_pipeline_runs — model 별로 row 생성, 모두 /api/auto-pipeline 라우트
+  for (const [model, b] of Object.entries(byModel)) {
+    const vendor = /^gpt|openai/i.test(model) ? "openai" : "gemini";
+    byRouteModel.push({
+      route: "/api/auto-pipeline",
+      purpose: ROUTE_LABELS["/api/auto-pipeline"].purpose,
+      model,
+      vendor,
+      calls: b.calls,
+      units: b.attempts,
+      estUsd: Number(b.estUsd.toFixed(4)),
+      avgPerCallUsd: b.calls > 0 ? Number((b.estUsd / b.calls).toFixed(4)) : 0,
+      source: "auto_pipeline_runs",
+    });
+  }
+
+  // (b) analysis_records — model 정보가 row 에 없으므로 평균 단가 가정 1줄로 표현.
+  //    실제로는 mathpix 폴백 비율 모름 → gemini-2.0-flash 단일 추정.
+  if (drvTotalRecords > 0) {
+    byRouteModel.push({
+      route: "/api/drive/analysis/sync",
+      purpose: ROUTE_LABELS["/api/drive/analysis/sync"].purpose,
+      model: "gemini-2.0-flash (추정)",
+      vendor: "gemini",
+      calls: drvVisionCalls,
+      units: drvTotalRecords,
+      estUsd: Number(drvOcrEstUsd.toFixed(4)),
+      avgPerCallUsd: drvVisionCalls > 0 ? Number((drvOcrEstUsd / drvVisionCalls).toFixed(4)) : 0,
+      source: "analysis_records",
+    });
+  }
+
+  // (c) api_call_logs — (route, model) 튜플별 GROUP BY 다시 한 번
+  if (apiLogConfigured) {
+    try {
+      const { data: rmRows, error: rmErr } = await client
+        .from("api_call_logs")
+        .select("route, purpose, vendor, model, est_cost_usd, units")
+        .gte("created_at", sinceIso)
+        .limit(20000);
+      if (!rmErr && Array.isArray(rmRows)) {
+        type Key = string; // `${route}::${model}`
+        const m: Record<
+          Key,
+          { route: string; purpose: string; model: string; vendor: string; calls: number; units: number; estUsd: number }
+        > = {};
+        for (const r of rmRows) {
+          const route = (r.route as string) || "(unknown)";
+          const model = (r.model as string) || "unknown";
+          const key = `${route}::${model}`;
+          const purpose =
+            (r.purpose as string) || ROUTE_LABELS[route]?.purpose || route;
+          m[key] ??= {
+            route,
+            purpose,
+            model,
+            vendor: (r.vendor as string) || "other",
+            calls: 0,
+            units: 0,
+            estUsd: 0,
+          };
+          m[key].calls += 1;
+          m[key].units += Number(r.units) || 1;
+          m[key].estUsd += Number(r.est_cost_usd) || 0;
+        }
+        for (const v of Object.values(m)) {
+          byRouteModel.push({
+            route: v.route,
+            purpose: v.purpose,
+            model: v.model,
+            vendor: v.vendor,
+            calls: v.calls,
+            units: v.units,
+            estUsd: Number(v.estUsd.toFixed(4)),
+            avgPerCallUsd: v.calls > 0 ? Number((v.estUsd / v.calls).toFixed(4)) : 0,
+            source: "api_call_logs",
+          });
+        }
+      }
+    } catch {
+      /* swallow — 이미 byRoute 단계에서 동일 케이스 처리됨 */
+    }
+  }
+
+  // 비싼 행이 위로 — 사용자가 「줄일 첫 후보」를 즉시 보게.
+  byRouteModel.sort((a, b) => b.estUsd - a.estUsd);
+
   const total = autoEstUsd + drvOcrEstUsd + apiLogTotalUsd + academyEstUsd;
   const totalKrw = total * KRW_PER_USD;
 
@@ -493,6 +596,10 @@ async function handleCostTracker(req: Request) {
       estKrw: Math.round(apiLogTotalUsd * KRW_PER_USD),
     },
     byRoute: byRoute.map((r) => ({
+      ...r,
+      estKrw: Math.round(r.estUsd * KRW_PER_USD),
+    })),
+    byRouteModel: byRouteModel.map((r) => ({
       ...r,
       estKrw: Math.round(r.estUsd * KRW_PER_USD),
     })),

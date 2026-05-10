@@ -38,6 +38,19 @@ type ByRouteRow = {
   source: "auto_pipeline_runs" | "analysis_records" | "api_call_logs";
 };
 
+type ByRouteModelRow = {
+  route: string;
+  purpose: string;
+  model: string;
+  vendor: string;
+  calls: number;
+  units: number;
+  estUsd: number;
+  estKrw: number;
+  avgPerCallUsd: number;
+  source: "auto_pipeline_runs" | "analysis_records" | "api_call_logs";
+};
+
 type CostResponse = {
   ok: boolean;
   configured?: boolean;
@@ -66,6 +79,7 @@ type CostResponse = {
     estKrw: number;
   };
   byRoute: ByRouteRow[];
+  byRouteModel?: ByRouteModelRow[];
   total: {
     estUsd: number;
     estKrw: number;
@@ -417,6 +431,24 @@ export default function CostPage() {
         </section>
       )}
 
+      {/* 라우트 × 모델 세부 — 「어디서 어떤 모델로 얼마」 한 줄씩 */}
+      {data && Array.isArray(data.byRouteModel) && data.byRouteModel.length > 0 && (
+        <section className="mb-4 rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+          <h2 className="mb-1 text-sm font-semibold text-slate-900">
+            라우트 × 모델 세부 ({data.byRouteModel.length}행)
+          </h2>
+          <p className="mb-2 text-[11px] text-slate-600">
+            같은 데이터를 「작업 + 사용 모델」 조합으로 더 잘게 자른 표.{" "}
+            <strong>비싼 행이 위로</strong> — 줄일 첫 후보가 바로 보입니다.
+            전체 합계는 위 라우트별 표와 동일.
+          </p>
+          <RouteModelTable
+            rows={data.byRouteModel}
+            totalEstUsd={totalEstUsd}
+          />
+        </section>
+      )}
+
       {/* 진단 메시지 */}
       {data && data.diagnoses && data.diagnoses.length > 0 && (
         <section className="mb-4 space-y-1.5">
@@ -558,6 +590,106 @@ function SummaryCard({
       </div>
       <div className="text-[11px] tabular-nums text-slate-600">{fmtKrw(valueKrw)}</div>
       {note && <div className="mt-1 text-[10px] text-slate-500">{note}</div>}
+    </div>
+  );
+}
+
+/**
+ * 「라우트 × 모델」 표 — 같은 데이터를 더 잘게 자른 view.
+ *  비싼 행이 위로. 비중 % 막대로 시각화 — 한눈에 어디가 큰 비용인지 식별.
+ */
+function RouteModelTable({
+  rows,
+  totalEstUsd,
+}: {
+  rows: ByRouteModelRow[];
+  totalEstUsd: number;
+}) {
+  const maxCost = Math.max(0.0001, ...rows.map((r) => r.estUsd));
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full text-xs">
+        <thead>
+          <tr className="border-b border-slate-200 text-left text-slate-600">
+            <th className="py-2 pr-2 font-semibold">작업 (라우트)</th>
+            <th className="py-2 pr-2 font-semibold">모델</th>
+            <th className="py-2 pr-2 font-semibold">벤더</th>
+            <th className="py-2 pr-2 text-right font-semibold">호출</th>
+            <th className="py-2 pr-2 text-right font-semibold">평균 단가</th>
+            <th className="py-2 pr-2 text-right font-semibold">추정 비용</th>
+            <th className="py-2 pr-2 text-right font-semibold">비중</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r, i) => {
+            const pct = totalEstUsd > 0 ? (r.estUsd / totalEstUsd) * 100 : 0;
+            const widthPct = Math.max(2, Math.round((r.estUsd / maxCost) * 100));
+            return (
+              <tr
+                key={`${r.route}::${r.model}::${i}`}
+                className="border-b border-slate-100"
+              >
+                <td className="py-2 pr-2 align-top">
+                  <div className="font-mono text-[11px] text-slate-800">{r.route}</div>
+                  <div className="text-[10px] text-slate-500">{r.purpose}</div>
+                </td>
+                <td className="py-2 pr-2 align-top">
+                  <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-mono text-slate-700">
+                    {r.model}
+                  </span>
+                </td>
+                <td className="py-2 pr-2 align-top">
+                  <span
+                    className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${
+                      r.vendor === "openai"
+                        ? "bg-emerald-100 text-emerald-800"
+                        : r.vendor === "mathpix"
+                          ? "bg-amber-100 text-amber-800"
+                          : r.vendor === "gemini"
+                            ? "bg-indigo-100 text-indigo-800"
+                            : "bg-slate-100 text-slate-700"
+                    }`}
+                  >
+                    {r.vendor}
+                  </span>
+                </td>
+                <td className="py-2 pr-2 text-right align-top tabular-nums text-slate-800">
+                  {r.calls.toLocaleString()}
+                  {r.units !== r.calls && (
+                    <div className="text-[10px] text-slate-500">
+                      {r.units.toLocaleString()} units
+                    </div>
+                  )}
+                </td>
+                <td className="py-2 pr-2 text-right align-top tabular-nums text-slate-600">
+                  {fmtUsd(r.avgPerCallUsd)}
+                </td>
+                <td className="py-2 pr-2 text-right align-top">
+                  <div className="font-semibold tabular-nums text-slate-900">
+                    {fmtUsd(r.estUsd)}
+                  </div>
+                  <div className="text-[10px] tabular-nums text-slate-500">
+                    {fmtKrw(r.estKrw)}
+                  </div>
+                </td>
+                <td className="py-2 pr-2 text-right align-top">
+                  <div className="flex items-center justify-end gap-1.5">
+                    <div className="h-1.5 w-20 overflow-hidden rounded-full bg-slate-100">
+                      <div
+                        className="h-full bg-indigo-500"
+                        style={{ width: `${widthPct}%` }}
+                      />
+                    </div>
+                    <span className="w-8 text-right text-[10px] tabular-nums text-slate-500">
+                      {pct.toFixed(0)}%
+                    </span>
+                  </div>
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
     </div>
   );
 }
