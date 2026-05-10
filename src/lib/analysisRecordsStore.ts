@@ -125,6 +125,103 @@ export async function fetchAllRecords(): Promise<ReferenceRecord[]> {
   return (data as Row[]).map(rowToRecord);
 }
 
+/**
+ * 보조 페어 매핑 plan 을 Supabase 에 적용.
+ *
+ * plan.classifications 를 보고 같은 series + 같은 problem_no 의
+ * problem record 와 solution record 를 join — solution record 의 content 를
+ * problem record 의 solution_text 에 채워 넣고, solution record 는 보조 chunk 로 둔다.
+ *
+ * 보수적으로 동작:
+ *  - confidence < 0.6 인 분류는 적용 안 함
+ *  - 같은 (series, problemNo) 에 problem 이 둘 이상이면 가장 긴 쪽을 정본
+ *  - 이미 solution_text 가 채워져 있으면 덮어쓰지 않음
+ *  - 모든 변경은 row 단위 update — 트랜잭션 아님 (Supabase JS 한계)
+ *
+ * 반환: 적용 통계 + 미적용 사유
+ */
+export async function applyAssistedPairing(plan: {
+  classifications: Array<{
+    id: string;
+    side: "problem" | "solution" | "unknown";
+    problemNo: number | null;
+    series: string;
+    confidence: number;
+  }>;
+  stats: { callsMade: number; recordsProcessed: number; model: string };
+}): Promise<{ updated: number; skipped: number; failures: string[] }> {
+  const sb = getSupabaseServiceClient();
+  if (!sb) return { updated: 0, skipped: 0, failures: ["supabase 미설정"] };
+
+  let updated = 0;
+  let skipped = 0;
+  const failures: string[] = [];
+
+  // (series, problemNo) → { problem ids[], solution ids[] }
+  type Bucket = { problems: string[]; solutions: string[] };
+  const buckets = new Map<string, Bucket>();
+  for (const c of plan.classifications) {
+    if (c.confidence < 0.6) {
+      skipped += 1;
+      continue;
+    }
+    if (c.problemNo === null || c.side === "unknown") {
+      skipped += 1;
+      continue;
+    }
+    const key = `${c.series}::${c.problemNo}`;
+    const b = buckets.get(key) ?? { problems: [], solutions: [] };
+    if (c.side === "problem") b.problems.push(c.id);
+    else b.solutions.push(c.id);
+    buckets.set(key, b);
+  }
+
+  // 각 bucket 마다 한 번 update — problem 이 있고 solution 도 있는 경우만
+  for (const [, bucket] of buckets) {
+    if (bucket.problems.length === 0 || bucket.solutions.length === 0) {
+      skipped += bucket.problems.length + bucket.solutions.length;
+      continue;
+    }
+    // 정본 problem: 가장 긴 content 가진 record
+    const allIds = [...bucket.problems, ...bucket.solutions];
+    const { data, error } = await sb.from(TABLE).select("*").in("id", allIds);
+    if (error || !data) {
+      failures.push(error?.message || "fetch 실패");
+      continue;
+    }
+    const rows = data as Row[];
+    const problems = rows.filter((r) => bucket.problems.includes(r.id));
+    const solutions = rows.filter((r) => bucket.solutions.includes(r.id));
+    if (problems.length === 0 || solutions.length === 0) {
+      skipped += rows.length;
+      continue;
+    }
+    const primaryProblem = problems.reduce((a, b) => (a.content.length >= b.content.length ? a : b));
+    const bestSolution = solutions.reduce((a, b) =>
+      (a.content?.length ?? 0) >= (b.content?.length ?? 0) ? a : b,
+    );
+    if (primaryProblem.solution_text && primaryProblem.solution_text.trim()) {
+      // 이미 채워져 있으면 안 건드림
+      skipped += 1;
+      continue;
+    }
+    const { error: updErr } = await sb
+      .from(TABLE)
+      .update({
+        solution_text: bestSolution.content,
+        solution_equations: bestSolution.equations ?? [],
+      })
+      .eq("id", primaryProblem.id);
+    if (updErr) {
+      failures.push(`${primaryProblem.id}: ${updErr.message}`);
+      continue;
+    }
+    updated += 1;
+  }
+
+  return { updated, skipped, failures };
+}
+
 /** 사용자 검색 (problem_hint + content + solution_text trigram). limit 기본 30. */
 export async function searchAnalysisRecords(
   query: string,

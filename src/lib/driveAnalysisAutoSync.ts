@@ -37,6 +37,16 @@ type AutoSyncSnapshot = {
   lastErrors: string[];
   /** 다음 자동 실행 주기(ms) — 0 이면 비활성 */
   intervalMs: number;
+  /**
+   * 화이트리스트 root 폴더(시중교재/시험지 원안 등) 별 마지막 처리 결과.
+   * 사용자가 「시중교재 0건 처리됐다」 같은 진단을 UI 에서 즉시 볼 수 있게.
+   */
+  lastByRootFolder: Record<
+    string,
+    { filesFound: number; sizeSkipped: number; ocrFailed: number; cacheHit: number; newOrChanged: number }
+  >;
+  /** 마지막 학습에서 발견된 시리즈 무결성 카운트 (누락/중복/페어 깨짐) */
+  lastIntegrityCounts: { missing: number; duplicate: number; unpaired: number };
 };
 
 let snapshot: AutoSyncSnapshot = {
@@ -46,6 +56,8 @@ let snapshot: AutoSyncSnapshot = {
   lastTotalFiles: 0,
   lastErrors: [],
   intervalMs: 0,
+  lastByRootFolder: {},
+  lastIntegrityCounts: { missing: 0, duplicate: 0, unpaired: 0 },
 };
 
 export function getDriveAnalysisSyncSnapshot(): AutoSyncSnapshot {
@@ -83,11 +95,22 @@ export function startDriveAnalysisAutoSync(): void {
         lastNewOrChanged: summary.newOrChanged,
         lastTotalFiles: summary.totalFiles,
         lastErrors: summary.errors,
+        lastByRootFolder: summary.byRootFolder,
+        lastIntegrityCounts: summary.integrity.counts,
       };
       // 화이트리스트 매칭 0건처럼 명시적 경고가 나오면 운영 로그에 흘려둔다
       for (const err of summary.errors) {
         if (/화이트리스트 매칭 0건/.test(err)) {
           console.warn(`[driveAnalysisAutoSync] ${err}`);
+        }
+      }
+      // 화이트리스트 폴더 중 처리된 newOrChanged 가 0이고 sizeSkipped 가 있다면 — 시중교재가 OCR 안 된 패턴
+      for (const [folder, stat] of Object.entries(summary.byRootFolder)) {
+        if (stat.filesFound > 0 && stat.newOrChanged === 0 && stat.cacheHit === 0) {
+          console.warn(
+            `[driveAnalysisAutoSync] 폴더 「${folder}」: 파일 ${stat.filesFound}개 발견했지만 처리 0건 ` +
+              `(size-skip ${stat.sizeSkipped}, ocr-fail ${stat.ocrFailed}). ANALYSIS_FILE_MAX_MB 상향 또는 PDF 분할 필요.`,
+          );
         }
       }
     } catch (e) {

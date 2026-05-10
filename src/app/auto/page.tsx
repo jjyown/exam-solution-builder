@@ -168,6 +168,10 @@ export default function AutoPipelinePage() {
       lastTotalFiles: number;
       lastErrors: string[];
       intervalMs: number;
+      lastByRootFolder?: Record<
+        string,
+        { filesFound: number; sizeSkipped: number; ocrFailed: number; cacheHit: number; newOrChanged: number }
+      >;
     } | null;
     supervisor: {
       ranAt: number | null;
@@ -2222,6 +2226,10 @@ type HealthBadgesProps = {
       lastTotalFiles: number;
       lastErrors: string[];
       intervalMs: number;
+      lastByRootFolder?: Record<
+        string,
+        { filesFound: number; sizeSkipped: number; ocrFailed: number; cacheHit: number; newOrChanged: number }
+      >;
     } | null;
     supervisor: {
       ranAt: number | null;
@@ -2253,21 +2261,35 @@ function HealthBadges({ health }: HealthBadgesProps) {
         KB {health.kb_size}건
       </span>
       {sync && (
-        <span
-          className={`rounded border px-1.5 py-0.5 ${
+        <a
+          href="/api/drive/analysis/diagnose"
+          target="_blank"
+          rel="noopener noreferrer"
+          className={`rounded border px-1.5 py-0.5 hover:underline underline-offset-2 ${
             syncWarn
               ? 'border-rose-300 bg-rose-50 text-rose-800'
               : 'border-emerald-300 bg-emerald-50 text-emerald-800'
           }`}
-          title={
-            syncWarn
-              ? `경고: ${sync.lastErrors.slice(0, 2).join(' / ')}`
-              : `백그라운드 자동 동기화 — 주기 ${Math.round(sync.intervalMs / 60000)}분, 마지막에 ${sync.lastNewOrChanged}건 새/변경`
-          }
+          title={(() => {
+            const lines: string[] = [];
+            if (syncWarn) lines.push(`경고: ${sync.lastErrors.slice(0, 2).join(' / ')}`);
+            lines.push(`주기 ${Math.round(sync.intervalMs / 60000)}분, 마지막 새/변경 ${sync.lastNewOrChanged}건`);
+            const folders = sync.lastByRootFolder ?? {};
+            for (const [name, stat] of Object.entries(folders)) {
+              const flags: string[] = [];
+              if (stat.sizeSkipped > 0) flags.push(`size-skip ${stat.sizeSkipped}`);
+              if (stat.ocrFailed > 0) flags.push(`ocr-fail ${stat.ocrFailed}`);
+              if (stat.filesFound > 0 && stat.newOrChanged === 0 && stat.cacheHit === 0) flags.push('처리 0건');
+              const tag = flags.length > 0 ? ` ⚠ ${flags.join(', ')}` : '';
+              lines.push(`· ${name}: ${stat.filesFound}개 (캐시 ${stat.cacheHit}, 신규 ${stat.newOrChanged})${tag}`);
+            }
+            lines.push('(클릭: /api/drive/analysis/diagnose 진단)');
+            return lines.join('\n');
+          })()}
         >
           분석자료 {sync.lastRunAt ? `${formatRelative(sync.lastRunAt)} 동기화` : '미실행'}
           {syncWarn && ' ⚠'}
-        </span>
+        </a>
       )}
       {sup && sup.ranAt && (
         <a

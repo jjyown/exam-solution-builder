@@ -32,6 +32,7 @@ import {
   pruneOrphanRecords,
 } from "./analysisRecordsStore";
 import { normalizeOcrTextForPairing } from "./analysisTextNormalizer";
+import { checkIntegrity, type IntegrityIssue } from "./analysisIntegrityCheck";
 
 type CacheEntry = {
   modifiedTime: string | null;
@@ -109,6 +110,31 @@ export type AnalysisLearnSummary = {
     /** OCR 정규화 시 매칭된 룰 개수 (디버깅) */
     normalizedFiles: number;
   };
+  /**
+   * 화이트리스트 root 폴더(시중교재/시험지 원안 등) 별 처리 결과.
+   * "시중교재 PDF가 0건 처리됐다" 같은 진단을 즉시 가능하게 함.
+   */
+  byRootFolder: Record<
+    string,
+    {
+      filesFound: number;       // 폴더에서 발견된 파일 수 (사이즈 게이트 통과 후)
+      sizeSkipped: number;      // 35MB 초과로 skip 된 파일 수
+      ocrFailed: number;        // OCR 실패 카운트
+      cacheHit: number;         // Supabase 캐시 적중
+      newOrChanged: number;     // 새로/재 OCR 된 파일
+    }
+  >;
+  /**
+   * 시리즈 무결성 — 같은 series 안 problem_no 시퀀스의 누락·중복·페어 깨짐.
+   * 학습 직후 규칙 기반(checkIntegrity)으로 계산. 비용 0.
+   * 사용자에게 「쎈 대수 4번 누락」 「EBS 2024 7번 중복」 같은 알림을 보여주는 기반.
+   */
+  integrity: {
+    issuesCount: number;
+    counts: { missing: number; duplicate: number; unpaired: number };
+    /** 너무 길어지면 응답 비대 — 상위 N개만 노출 */
+    sampleIssues: IntegrityIssue[];
+  };
 };
 
 /**
@@ -134,6 +160,28 @@ export async function loadDriveAnalysisRecords(): Promise<{
       unpairedProblems: 0,
       normalizedFiles: 0,
     },
+    byRootFolder: {},
+    integrity: {
+      issuesCount: 0,
+      counts: { missing: 0, duplicate: 0, unpaired: 0 },
+      sampleIssues: [],
+    },
+  };
+
+  // 폴더별 카운트를 안전하게 누적하는 헬퍼
+  const bumpRoot = (
+    root: string,
+    field: keyof AnalysisLearnSummary["byRootFolder"][string],
+  ) => {
+    const key = root || "(루트)";
+    summary.byRootFolder[key] ??= {
+      filesFound: 0,
+      sizeSkipped: 0,
+      ocrFailed: 0,
+      cacheHit: 0,
+      newOrChanged: 0,
+    };
+    summary.byRootFolder[key][field] += 1;
   };
 
   if (!isGoogleDriveConfigured()) {
@@ -225,23 +273,30 @@ export async function loadDriveAnalysisRecords(): Promise<{
   /** 단일 파일 처리 — 캐시 → 다운로드 → OCR → Supabase 저장. */
   type DriveFileMeta = (typeof files)[number];
   async function processOneFile(f: DriveFileMeta): Promise<ReferenceRecord[]> {
+    const root = f.pathSegments[0] ?? "(루트)";
+    bumpRoot(root, "filesFound");
     // 1) in-memory 캐시 적중
     const cached = fileCache.get(f.id);
     if (cached && cached.modifiedTime === f.modifiedTime) {
+      bumpRoot(root, "cacheHit");
       return cached.records;
     }
     // 2) Supabase 영구 캐시 적중 — 재배포·재시작 후에도 OCR 안 함
     const persisted = await fetchCachedRecords(f.id, f.modifiedTime);
     if (persisted && persisted.length > 0) {
+      bumpRoot(root, "cacheHit");
       fileCache.set(f.id, { modifiedTime: f.modifiedTime, records: persisted });
       return persisted;
     }
     // 3) OOM 방지: 너무 큰 파일은 download 자체를 skip
     if (typeof f.size === "number" && f.size > ANALYSIS_FILE_MAX_BYTES) {
+      bumpRoot(root, "sizeSkipped");
       const mb = (f.size / (1024 * 1024)).toFixed(1);
-      summary.errors.push(
-        `${f.name}: ${mb}MB — ANALYSIS_FILE_MAX_MB(${(ANALYSIS_FILE_MAX_BYTES / 1024 / 1024) | 0}MB) 초과로 OCR skip.`,
-      );
+      const limit = (ANALYSIS_FILE_MAX_BYTES / 1024 / 1024) | 0;
+      const msg = `${f.name}: ${mb}MB — ANALYSIS_FILE_MAX_MB(${limit}MB) 초과로 OCR skip. (폴더: ${root})`;
+      summary.errors.push(msg);
+      // 답지 병합본 시중교재가 자주 35MB 초과 → 운영 로그에 명시적으로 떨군다
+      console.warn(`[driveAnalysisLearner] size-skip: ${msg}`);
       return [];
     }
     // 4) 캐시 둘 다 miss → Mathpix 우선 → Gemini 폴백 OCR
@@ -271,7 +326,8 @@ export async function loadDriveAnalysisRecords(): Promise<{
       });
       base64 = null;
       if (!v.ok) {
-        summary.errors.push(`${f.name}: ${v.error}`);
+        bumpRoot(root, "ocrFailed");
+        summary.errors.push(`${f.name}: ${v.error} (폴더: ${root})`);
         return [];
       }
       // OCR 결과를 표준 헤더로 사전 정규화 — 1:1 매핑 적중률 향상.
@@ -288,9 +344,11 @@ export async function loadDriveAnalysisRecords(): Promise<{
         // silent
       }
       summary.newOrChanged += 1;
+      bumpRoot(root, "newOrChanged");
       return records;
     } catch (e) {
-      summary.errors.push(`${f.name}: ${(e as Error).message}`);
+      bumpRoot(root, "ocrFailed");
+      summary.errors.push(`${f.name}: ${(e as Error).message} (폴더: ${root})`);
       return [];
     }
   }
@@ -341,6 +399,19 @@ export async function loadDriveAnalysisRecords(): Promise<{
   summary.pairing.pairedRecords = pairedRecs;
   summary.pairing.unpairedProblems = problemRecs - pairedRecs;
   summary.pairing.pairingRate = problemRecs > 0 ? pairedRecs / problemRecs : 0;
+
+  // 무결성 검사 — 누락/중복/페어 깨짐. 비용 0 규칙 기반.
+  const integrity = checkIntegrity(merged);
+  summary.integrity = {
+    issuesCount: integrity.issues.length,
+    counts: integrity.counts,
+    sampleIssues: integrity.issues.slice(0, 30),
+  };
+  if (integrity.issues.length > 0) {
+    console.warn(
+      `[driveAnalysisLearner] integrity: 누락 ${integrity.counts.missing}, 중복 ${integrity.counts.duplicate}, 페어 깨짐 ${integrity.counts.unpaired}`,
+    );
+  }
 
   return { records: merged, summary };
 }
