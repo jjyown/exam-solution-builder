@@ -11,8 +11,10 @@
  *  - 「자동에서 열기」 : /auto?restoreRun=<id> 로 이동 (해당 run 결과 복원)
  *  - 「📕 HWP / 묶음 HWP」  : /api/auto-pipeline/hml 호출 — 한컴 한글에서 바로 열림 (메인 포맷)
  *  - 「DOCX / 묶음 DOCX」  : /api/auto-pipeline/docx 호출 — 외부 공유·Drive 미리보기용 (보조)
+ *  - 인라인 평점·메모 (★1~5 + 💬) : /api/auto-pipeline/feedback 호출 — /auto 로 옮겨가지 않고
+ *    이 페이지에서 바로 평가 저장. 별 클릭은 즉시 POST + 낙관적 UI, 메모는 토글 sub-row 입력.
  */
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 
 type RunRow = {
@@ -74,6 +76,99 @@ export default function InboxPage() {
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<Filter>("all");
   const [busyDocxId, setBusyDocxId] = useState<string | null>(null);
+  // ── 인라인 평가 상태 ────────────────────────────────────────────────────
+  // 「자동에서 열기」로 옮겨 가지 않고 이 페이지에서 바로 별점·메모를 저장.
+  // 별 클릭은 즉시 POST → 낙관적 업데이트(rows 의 user_rating·reviewed_at 갱신).
+  // 메모는 토글로 펼치는 sub-row 에서 입력 → [저장] 버튼.
+  const [openMemoIds, setOpenMemoIds] = useState<Set<string>>(new Set());
+  const [memoText, setMemoText] = useState<Record<string, string>>({});
+  const [feedbackBusyId, setFeedbackBusyId] = useState<string | null>(null);
+  /** 마지막으로 저장된 시각(ms) — UI 「✓ 저장됨」 일시 표시. */
+  const [feedbackSavedAt, setFeedbackSavedAt] = useState<Record<string, number>>({});
+
+  function toggleMemo(id: string) {
+    setOpenMemoIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  /** 별점만 단독 저장 — 클릭 즉시 POST + 낙관적 UI. 메모는 별도 저장 흐름. */
+  async function saveRatingInline(row: RunRow, nextRating: number | null) {
+    if (!row.id) return;
+    // 낙관적 업데이트 — 실패해도 서버 응답으로 다시 갱신할 일은 거의 없으니 즉시 반영
+    setRows((prev) =>
+      prev.map((r) =>
+        r.id === row.id
+          ? { ...r, user_rating: nextRating, reviewed_at: r.reviewed_at ?? new Date().toISOString() }
+          : r,
+      ),
+    );
+    setFeedbackBusyId(row.id);
+    try {
+      const res = await fetch("/api/auto-pipeline/feedback", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          runId: row.id,
+          userRating: nextRating ?? undefined,
+          // 별점만 바꿀 때 메모는 손대지 않음
+        }),
+      });
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
+      if (!data.ok) {
+        alert(`별점 저장 실패: ${data.error ?? res.statusText}`);
+        // 실패 시 원복
+        setRows((prev) => prev.map((r) => (r.id === row.id ? { ...r, user_rating: row.user_rating } : r)));
+        return;
+      }
+      setFeedbackSavedAt((prev) => ({ ...prev, [row.id]: Date.now() }));
+    } catch (e) {
+      alert(`별점 저장 실패: ${(e as Error).message}`);
+      setRows((prev) => prev.map((r) => (r.id === row.id ? { ...r, user_rating: row.user_rating } : r)));
+    } finally {
+      setFeedbackBusyId(null);
+    }
+  }
+
+  /** 메모(자유 텍스트) 저장 — 현재 별점도 함께 보내(서버 측 reviewed_at 갱신). */
+  async function saveMemoInline(row: RunRow) {
+    const note = (memoText[row.id] ?? "").trim();
+    if (!note) {
+      alert("메모를 입력하세요.");
+      return;
+    }
+    setFeedbackBusyId(row.id);
+    try {
+      const res = await fetch("/api/auto-pipeline/feedback", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          runId: row.id,
+          userRating: row.user_rating ?? undefined,
+          userFeedback: note,
+        }),
+      });
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
+      if (!data.ok) {
+        alert(`메모 저장 실패: ${data.error ?? res.statusText}`);
+        return;
+      }
+      setFeedbackSavedAt((prev) => ({ ...prev, [row.id]: Date.now() }));
+      // reviewed_at 도 갱신 — 메모 저장 후 「검수됨」으로 보이도록
+      setRows((prev) =>
+        prev.map((r) =>
+          r.id === row.id ? { ...r, reviewed_at: new Date().toISOString() } : r,
+        ),
+      );
+    } catch (e) {
+      alert(`메모 저장 실패: ${(e as Error).message}`);
+    } finally {
+      setFeedbackBusyId(null);
+    }
+  }
   /**
    * 사용자가 명시적으로 토글한 그룹 — examName → true(펼침) | false(접힘).
    * 명시 안 된 그룹은 AUTO_COLLAPSE_THRESHOLD 규칙으로 결정.
@@ -522,8 +617,13 @@ export default function InboxPage() {
                     })
                     .map((r) => {
                       const docxBtnDisabled = !r.parsed || busyDocxId === r.id;
+                      const memoOpen = openMemoIds.has(r.id);
+                      const ratingBusy = feedbackBusyId === r.id;
+                      const savedRecently =
+                        feedbackSavedAt[r.id] && Date.now() - feedbackSavedAt[r.id] < 3000;
                       return (
-                        <tr key={r.id} className="border-t border-slate-100 align-top">
+                        <Fragment key={r.id}>
+                        <tr className="border-t border-slate-100 align-top">
                           <td className="px-3 py-2 font-bold text-slate-800">
                             {r.question_no ?? "-"}
                           </td>
@@ -543,8 +643,48 @@ export default function InboxPage() {
                               {r.ok ? "✓ 성공" : "✗ 실패"} · {r.attempts}회
                             </span>
                           </td>
-                          <td className="px-3 py-2 text-slate-700">
-                            {r.user_rating ? `★${r.user_rating}` : r.reviewed_at ? "검수됨" : "—"}
+                          {/* 평점 셀 — 인라인 별점 + 메모 토글. 클릭 즉시 저장. */}
+                          <td className="px-3 py-2">
+                            <div className="flex items-center gap-0.5">
+                              {[1, 2, 3, 4, 5].map((n) => {
+                                const filled = (r.user_rating ?? 0) >= n;
+                                return (
+                                  <button
+                                    key={n}
+                                    type="button"
+                                    onClick={() =>
+                                      saveRatingInline(
+                                        r,
+                                        // 같은 별 다시 누르면 별점 해제(null) — 실수 보정용
+                                        r.user_rating === n ? null : n,
+                                      )
+                                    }
+                                    disabled={ratingBusy}
+                                    className={`text-base leading-none transition-transform hover:scale-110 disabled:opacity-50 ${
+                                      filled ? "text-amber-500" : "text-slate-300 hover:text-amber-300"
+                                    }`}
+                                    title={`${n}점 — ${n === 1 ? "재생성 필요" : n === 5 ? "그대로 사용" : "보통"}`}
+                                  >
+                                    ★
+                                  </button>
+                                );
+                              })}
+                              <button
+                                type="button"
+                                onClick={() => toggleMemo(r.id)}
+                                className={`ml-1 rounded px-1 py-0.5 text-[10px] font-semibold ${
+                                  memoOpen
+                                    ? "bg-indigo-600 text-white"
+                                    : "border border-slate-300 bg-white text-slate-600 hover:bg-slate-50"
+                                }`}
+                                title="이 결과에 대한 메모(피드백) 입력"
+                              >
+                                💬
+                              </button>
+                            </div>
+                            <div className="mt-0.5 text-[10px] text-slate-500">
+                              {ratingBusy ? "저장 중…" : savedRecently ? "✓ 저장됨" : r.reviewed_at ? "검수됨" : ""}
+                            </div>
                           </td>
                           <td className="px-3 py-2 text-slate-600">
                             {questionPreview(r.question_text)}
@@ -554,7 +694,7 @@ export default function InboxPage() {
                               <Link
                                 href={`/auto?restoreRun=${encodeURIComponent(r.id)}`}
                                 className="rounded border border-slate-300 bg-white px-2 py-0.5 text-[11px] font-semibold text-slate-700 hover:bg-slate-50"
-                                title="자동 해설 페이지에서 이 결과를 복원"
+                                title="자동 해설 페이지에서 이 결과를 복원 (풍부한 검수·재시도 패널)"
                               >
                                 자동에서 열기
                               </Link>
@@ -579,6 +719,42 @@ export default function InboxPage() {
                             </div>
                           </td>
                         </tr>
+                        {/* 메모 입력 sub-row — 토글 시 colspan 으로 펼침 */}
+                        {memoOpen && (
+                          <tr className="border-t border-slate-50 bg-indigo-50/40">
+                            <td colSpan={7} className="px-3 py-2">
+                              <div className="flex flex-col gap-1.5 sm:flex-row sm:items-start">
+                                <textarea
+                                  value={memoText[r.id] ?? ""}
+                                  onChange={(e) =>
+                                    setMemoText((prev) => ({ ...prev, [r.id]: e.target.value }))
+                                  }
+                                  placeholder="이 결과에 대한 메모 — 객관식인데 단답으로 답함, 선지 누락, 풀이 단계 비약 등. 다음 풀이 호출 프롬프트에 같은 문항 피드백으로 반영됩니다."
+                                  rows={2}
+                                  className="flex-1 rounded border border-indigo-200 bg-white p-1.5 text-[11px] focus:border-indigo-500 focus:outline-none"
+                                />
+                                <div className="flex items-center gap-1">
+                                  <button
+                                    type="button"
+                                    onClick={() => saveMemoInline(r)}
+                                    disabled={ratingBusy || !(memoText[r.id] ?? "").trim()}
+                                    className="rounded border border-indigo-700 bg-indigo-700 px-2 py-1 text-[11px] font-semibold text-white hover:bg-indigo-800 disabled:opacity-50"
+                                  >
+                                    {ratingBusy ? "저장 중…" : "메모 저장"}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => toggleMemo(r.id)}
+                                    className="rounded border border-slate-300 bg-white px-2 py-1 text-[11px] font-semibold text-slate-600 hover:bg-slate-50"
+                                  >
+                                    닫기
+                                  </button>
+                                </div>
+                              </div>
+                            </td>
+                          </tr>
+                        )}
+                        </Fragment>
                       );
                     })}
                 </tbody>
