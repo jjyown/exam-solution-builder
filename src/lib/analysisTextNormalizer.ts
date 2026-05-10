@@ -62,6 +62,7 @@ export function normalizeOcrTextForPairing(input: string): NormalizeResult {
 
   // ── 2) 강한 문항 시작 신호 표준화 ─────────────────────────────────────────
   // 「예제 7」, 「유형 12」, 「**3.**」, 「**3)**」 → `[문항 N]`
+  // 시험지 원안의 「1.」 「2.」 「3.」 페이지 시작 번호도 표준화.
   // 이미 [문항 N] 으로 시작하는 줄은 건드리지 않음.
   if (!hasStandardProblemMarker) {
     const before = text;
@@ -73,6 +74,15 @@ export function normalizeOcrTextForPairing(input: string): NormalizeResult {
     // 「예제 N」 / 「유형 N」 / 「문제 N」 (단독 줄, 뒤에 콜론·점 가능)
     text = text.replace(
       /(^|\n)\s*(?:예제|유형|문제)\s*(\d{1,3})\s*[\.\:\)]?\s*(?=\n|\S)/g,
+      "$1[문항 $2]\n",
+    );
+    // 시험지 원안 패턴 — 줄 시작에 「N.」 또는 「N)」 + 공백 + 한글/수식.
+    //   다음 조건 충족 시만 매핑 (false-positive 방지):
+    //   · 1~99 범위
+    //   · 그 줄이 한글/$/ 수식으로 이어짐 (단순 1.5 같은 소수 차단)
+    //   · `[3점]` 같은 배점 표기와 같은 줄 자주 등장 → 강한 신호
+    text = text.replace(
+      /(^|\n)\s*(\d{1,2})\s*[\.\)]\s+(?=[가-힣\$\(\\\[°∀-⋿])/g,
       "$1[문항 $2]\n",
     );
     if (text !== before) applied.push("problem-marker-standardized");

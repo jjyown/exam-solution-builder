@@ -26,6 +26,8 @@ type Job = {
   summary: AnalysisLearnSummary | null;
   recordCount: number;
   error: string | null;
+  /** 진행 중일 때 사용자에게 보여줄 elapsed 시간 (ms) */
+  elapsedMs?: number;
 };
 
 // 모듈 전역 — Railway 단일 인스턴스 가정. 다중 replica 면 별도 store 필요(현재 안 씀).
@@ -85,5 +87,13 @@ export async function POST() {
 }
 
 export async function GET() {
-  return NextResponse.json({ ok: true, job: currentJob });
+  // 진행 중이면 elapsed 시간 계산해 응답 — 사용자가 「N분째 처리 중」 확인 가능.
+  const elapsedMs =
+    currentJob.status === "running" && currentJob.startedAt
+      ? Date.now() - currentJob.startedAt
+      : undefined;
+  return NextResponse.json({
+    ok: true,
+    job: { ...currentJob, elapsedMs },
+  });
 }

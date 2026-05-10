@@ -156,6 +156,7 @@ export default function AutoPipelinePage() {
     { link: string | null; fileName: string; error: string | null } | null
   >(null);
   const [analysisSyncing, setAnalysisSyncing] = useState(false);
+  const [syncElapsedMs, setSyncElapsedMs] = useState<number>(0);
   const [analysisSyncResult, setAnalysisSyncResult] = useState<
     | {
         ok: true;
@@ -272,9 +273,11 @@ export default function AutoPipelinePage() {
         });
         return;
       }
-      // 2) 상태 폴링 — 3초 간격으로 GET, 최대 10분
+      // 2) 상태 폴링 — 3초 간격으로 GET, 최대 30분.
+      //    참고: timeout 후에도 백그라운드 작업은 서버에서 계속 진행됨.
+      //    fire-and-forget 패턴이라 사용자가 닫아도 OK.
       const startedAt = Date.now();
-      const TIMEOUT_MS = 10 * 60 * 1000;
+      const TIMEOUT_MS = 30 * 60 * 1000;
       // 약간의 정착 시간(첫 번째 GET 이 still running 잡도록)
       await new Promise((r) => setTimeout(r, 500));
       while (Date.now() - startedAt < TIMEOUT_MS) {
@@ -284,6 +287,10 @@ export default function AutoPipelinePage() {
         if (!job) {
           await new Promise((r) => setTimeout(r, 3000));
           continue;
+        }
+        // 진행 중이면 elapsed 시간을 UI 에 노출 (버튼 라벨)
+        if (typeof job.elapsedMs === 'number') {
+          setSyncElapsedMs(job.elapsedMs);
         }
         if (job.status === 'completed') {
           const s = job.summary ?? {};
@@ -310,11 +317,20 @@ export default function AutoPipelinePage() {
         // running — 계속 폴링
         await new Promise((r) => setTimeout(r, 3000));
       }
-      setAnalysisSyncResult({ ok: false, error: '시간 초과 (10분)' });
+      // ⚠️ timeout 도달 — 학습이 「실패」 한 게 아니라 클라이언트 폴링만 끊김.
+      // 서버 백그라운드는 계속 처리 중. 사용자에게 진행 중임을 명시.
+      setAnalysisSyncResult({
+        ok: false,
+        error:
+          '폴링 시간 초과 (30분) — 그러나 서버 백그라운드 작업은 계속 진행 중입니다. ' +
+          '큰 시중교재 PDF 처리는 30분 이상 걸릴 수 있습니다. ' +
+          '잠시 후 「분석 현황」 패널에서 record 수가 늘어나는지 확인하세요.',
+      });
     } catch (e) {
       setAnalysisSyncResult({ ok: false, error: (e as Error).message });
     } finally {
       setAnalysisSyncing(false);
+      setSyncElapsedMs(0);
     }
   }, []);
 
@@ -875,7 +891,9 @@ export default function AutoPipelinePage() {
             className="rounded-md border border-emerald-300 bg-white px-3 py-1.5 text-xs font-semibold text-emerald-800 hover:bg-emerald-50 disabled:opacity-50"
             title="Drive 「분석용 자료」(시중교재/개인자료 포함) 폴더를 다시 읽어 KB 에 합칩니다. 자동 감지도 동작 — 새 PDF 올린 후 ~1분 안 첫 풀이 호출에서 자동 반영됩니다."
           >
-            {analysisSyncing ? '분석자료 동기화 중…' : '분석자료 새로 학습'}
+            {analysisSyncing
+              ? `분석자료 동기화 중… ${syncElapsedMs > 0 ? `(${Math.floor(syncElapsedMs / 60000)}분 ${Math.floor((syncElapsedMs % 60000) / 1000)}초)` : ''}`
+              : '분석자료 새로 학습'}
           </button>
           <button
             onClick={() => setHistoryOpen((v) => !v)}
