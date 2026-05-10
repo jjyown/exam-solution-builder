@@ -197,6 +197,19 @@ export default function AutoPipelinePage() {
         pairedRecords: number;
         rate: number;
       }>;
+      lastAutoFallback?: {
+        enabled: boolean;
+        attempted: number;
+        improved: number;
+        results: Array<{
+          fileId: string;
+          source: string;
+          improved: boolean;
+          beforeRate: number;
+          afterRate: number;
+          error?: string;
+        }>;
+      };
     } | null;
     supervisor: {
       ranAt: number | null;
@@ -1110,12 +1123,36 @@ export default function AutoPipelinePage() {
                     📦 페어링률 &lt;40% PDF {health!.drive_sync!.lastLowPairingFiles!.length}개 — bbox 분할 권장
                   </p>
                   <p className="mb-2 text-rose-800">
-                    텍스트 헤더 매칭 깨짐. 로컬에서{' '}
-                    <code className="rounded bg-white px-1 py-0.5 font-mono">
-                      python scripts/textbook_page_split_mathpix.py &lt;파일경로&gt;
-                    </code>{' '}
-                    로 재처리하면 bbox 기반 분할로 살아납니다 (Mathpix include_line_data=true).
+                    텍스트 헤더 매칭 깨짐. 「⊕ bbox 재처리」 버튼 클릭 시 Node 에서 직접
+                    Mathpix lines.json 호출로 재처리 (Python·로컬 실행 불필요).
                   </p>
+                  {/*
+                    자동 폴백 상태 — BBOX_FALLBACK_AUTO=true 면 sync 직후 상위 N개를 자동 처리.
+                    여기에 「자동 적용 X/Y건」 형태로 결과 요약 노출.
+                  */}
+                  {health?.drive_sync?.lastAutoFallback?.enabled && (
+                    <p className="mb-2 rounded border border-emerald-300 bg-emerald-50 px-1.5 py-1 text-emerald-900">
+                      ✓ 자동 폴백 활성 — 마지막 sync 에서 {health.drive_sync.lastAutoFallback.attempted}건 시도,
+                      {' '}{health.drive_sync.lastAutoFallback.improved}건 적용됨.
+                      {health.drive_sync.lastAutoFallback.results.length > 0 && (
+                        <span className="ml-1 text-emerald-700">
+                          ({health.drive_sync.lastAutoFallback.results
+                            .filter((r) => r.improved)
+                            .map((r) => r.source.split('/').pop())
+                            .slice(0, 3)
+                            .join(', ') || '향상 0건'})
+                        </span>
+                      )}
+                    </p>
+                  )}
+                  {!health?.drive_sync?.lastAutoFallback?.enabled && (
+                    <p className="mb-2 rounded border border-slate-300 bg-slate-50 px-1.5 py-1 text-slate-700">
+                      ⓘ 자동 폴백 OFF — Railway env 에 <code className="font-mono">BBOX_FALLBACK_AUTO=true</code>
+                      {' '}+ <code className="font-mono">BBOX_FALLBACK_ENABLED=true</code> 설정 시 sync 직후
+                      상위 {' '}<code className="font-mono">BBOX_FALLBACK_MAX_PER_SYNC</code>(기본 3)개 PDF 가
+                      자동으로 재처리됩니다.
+                    </p>
+                  )}
                   <table className="w-full text-[11px]">
                     <thead className="text-rose-700">
                       <tr>
@@ -2802,6 +2839,19 @@ type HealthBadgesProps = {
         pairedRecords: number;
         rate: number;
       }>;
+      lastAutoFallback?: {
+        enabled: boolean;
+        attempted: number;
+        improved: number;
+        results: Array<{
+          fileId: string;
+          source: string;
+          improved: boolean;
+          beforeRate: number;
+          afterRate: number;
+          error?: string;
+        }>;
+      };
     } | null;
     supervisor: {
       ranAt: number | null;

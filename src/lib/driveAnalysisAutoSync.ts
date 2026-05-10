@@ -59,6 +59,24 @@ type AutoSyncSnapshot = {
     pairedRecords: number;
     rate: number;
   }>;
+  /**
+   * sync 직후 자동 트리거된 bbox 폴백 결과 — BBOX_FALLBACK_AUTO=true 일 때만 채워짐.
+   * 비용 보호: BBOX_FALLBACK_MAX_PER_SYNC (기본 3) 으로 한 sync 당 최대 N개만 시도.
+   * UI 「bbox 재처리」 패널에서 「✓ 자동 적용」 표기로 노출.
+   */
+  lastAutoFallback: {
+    enabled: boolean;
+    attempted: number;
+    improved: number;
+    results: Array<{
+      fileId: string;
+      source: string;
+      improved: boolean;
+      beforeRate: number;
+      afterRate: number;
+      error?: string;
+    }>;
+  };
 };
 
 let snapshot: AutoSyncSnapshot = {
@@ -71,6 +89,7 @@ let snapshot: AutoSyncSnapshot = {
   lastByRootFolder: {},
   lastIntegrityCounts: { missing: 0, duplicate: 0, unpaired: 0 },
   lastLowPairingFiles: [],
+  lastAutoFallback: { enabled: false, attempted: 0, improved: 0, results: [] },
 };
 
 export function getDriveAnalysisSyncSnapshot(): AutoSyncSnapshot {
@@ -128,6 +147,81 @@ export function startDriveAnalysisAutoSync(): void {
           );
         }
       }
+
+      // 자동 bbox 폴백 — BBOX_FALLBACK_AUTO=true + BBOX_FALLBACK_ENABLED=true 일 때만.
+      // 비용 보호: 한 sync 당 최대 N 개만 (BBOX_FALLBACK_MAX_PER_SYNC, 기본 3).
+      // 가장 깨진(rate 오름차순) 파일부터, fileId 가 있는 것만 시도.
+      const autoEnabled =
+        /^(1|true|yes|on)$/i.test(process.env.BBOX_FALLBACK_AUTO || "") &&
+        /^(1|true|yes|on)$/i.test(process.env.BBOX_FALLBACK_ENABLED || "");
+      const maxPerSync = (() => {
+        const raw = Number(process.env.BBOX_FALLBACK_MAX_PER_SYNC);
+        return Number.isFinite(raw) && raw > 0 && raw <= 20 ? Math.floor(raw) : 3;
+      })();
+      const autoResults: AutoSyncSnapshot["lastAutoFallback"]["results"] = [];
+      let attempted = 0;
+      let improvedCount = 0;
+      if (autoEnabled && summary.pairing.lowPairingFiles.length > 0) {
+        const { bboxFallbackForFile } = await import("./driveAnalysisLearner");
+        const candidates = summary.pairing.lowPairingFiles
+          .filter((f) => f.fileId)
+          .slice(0, maxPerSync);
+        for (const f of candidates) {
+          attempted += 1;
+          try {
+            const r = await bboxFallbackForFile(f.fileId);
+            if (r.ok) {
+              if (r.improved) improvedCount += 1;
+              autoResults.push({
+                fileId: f.fileId,
+                source: f.source,
+                improved: r.improved,
+                beforeRate: r.before.rate,
+                afterRate: r.after.rate,
+              });
+              console.warn(
+                `[driveAnalysisAutoSync] auto-fallback ${f.source}: ` +
+                  `${(r.before.rate * 100).toFixed(0)}% → ${(r.after.rate * 100).toFixed(0)}% ` +
+                  `${r.improved ? "✓ 적용" : "= 변화 없음"}`,
+              );
+            } else {
+              autoResults.push({
+                fileId: f.fileId,
+                source: f.source,
+                improved: false,
+                beforeRate: f.rate,
+                afterRate: f.rate,
+                error: r.message,
+              });
+              console.warn(
+                `[driveAnalysisAutoSync] auto-fallback 실패 ${f.source}: ${r.message}`,
+              );
+            }
+          } catch (e) {
+            autoResults.push({
+              fileId: f.fileId,
+              source: f.source,
+              improved: false,
+              beforeRate: f.rate,
+              afterRate: f.rate,
+              error: (e as Error).message,
+            });
+          }
+        }
+        // records 가 갱신됐으니 retriever 캐시 무효화
+        if (improvedCount > 0) {
+          resetAutoPipelineRetriever();
+        }
+      }
+      snapshot = {
+        ...snapshot,
+        lastAutoFallback: {
+          enabled: autoEnabled,
+          attempted,
+          improved: improvedCount,
+          results: autoResults,
+        },
+      };
       // 화이트리스트 매칭 0건처럼 명시적 경고가 나오면 운영 로그에 흘려둔다
       for (const err of summary.errors) {
         if (/화이트리스트 매칭 0건/.test(err)) {
