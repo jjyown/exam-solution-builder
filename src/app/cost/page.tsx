@@ -212,9 +212,22 @@ export default function CostPage() {
     setError(null);
     try {
       const res = await fetch(`/api/cost-tracker?days=${d}`);
-      const j = (await res.json()) as CostResponse;
-      if (!j.ok) throw new Error("응답 ok=false");
-      setData(j);
+      // 본문이 비어있는 500(=Unexpected end of JSON input)도 잡기 위해 text 먼저 읽음
+      const raw = await res.text();
+      let j: CostResponse | { ok: false; error?: string; stack?: string } | null = null;
+      try {
+        j = raw ? (JSON.parse(raw) as typeof j) : null;
+      } catch {
+        // JSON 파싱 실패 — 빈 본문 또는 비-JSON 응답
+      }
+      if (!res.ok || !j || !("ok" in j) || !j.ok) {
+        const errMsg =
+          (j && "error" in j && j.error) ||
+          `HTTP ${res.status}${raw ? ` — ${raw.slice(0, 300)}` : ""}`;
+        const stack = j && "stack" in j && typeof j.stack === "string" ? j.stack : null;
+        throw new Error(stack ? `${errMsg}\n\n${stack}` : errMsg);
+      }
+      setData(j as CostResponse);
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -270,7 +283,10 @@ export default function CostPage() {
 
       {error && (
         <div className="mb-3 rounded-md border border-rose-300 bg-rose-50 p-3 text-xs text-rose-900">
-          ✗ {error}
+          <div className="font-semibold">✗ /api/cost-tracker 응답 실패</div>
+          <pre className="mt-1 max-h-64 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] text-rose-900">
+            {error}
+          </pre>
         </div>
       )}
 
