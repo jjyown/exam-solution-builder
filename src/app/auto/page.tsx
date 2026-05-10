@@ -2438,14 +2438,22 @@ function HealthBadges({ health }: HealthBadgesProps) {
           target="_blank"
           rel="noopener noreferrer"
           className={`rounded border px-1.5 py-0.5 hover:underline underline-offset-2 ${
-            syncWarn
-              ? 'border-rose-300 bg-rose-50 text-rose-800'
-              : 'border-emerald-300 bg-emerald-50 text-emerald-800'
+            sync.intervalMs === 0
+              ? 'border-rose-400 bg-rose-100 text-rose-900 font-semibold'
+              : syncWarn
+                ? 'border-rose-300 bg-rose-50 text-rose-800'
+                : 'border-emerald-300 bg-emerald-50 text-emerald-800'
           }`}
           title={(() => {
             const lines: string[] = [];
-            if (syncWarn) lines.push(`경고: ${sync.lastErrors.slice(0, 2).join(' / ')}`);
-            lines.push(`주기 ${Math.round(sync.intervalMs / 60000)}분, 마지막 새/변경 ${sync.lastNewOrChanged}건`);
+            if (sync.intervalMs === 0) {
+              lines.push('🔴 자동 백그라운드 동기화 OFF');
+              lines.push('Railway env: DRIVE_ANALYSIS_AUTO_SYNC_MS 를 삭제하거나 14400000(4h)로 설정');
+              lines.push('현재 「분석자료 새로 학습」 수동 클릭 외엔 학습 안 됨');
+            } else {
+              if (syncWarn) lines.push(`경고: ${sync.lastErrors.slice(0, 2).join(' / ')}`);
+              lines.push(`주기 ${Math.round(sync.intervalMs / 60000)}분, 마지막 새/변경 ${sync.lastNewOrChanged}건`);
+            }
             const folders = sync.lastByRootFolder ?? {};
             for (const [name, stat] of Object.entries(folders)) {
               const flags: string[] = [];
@@ -2459,8 +2467,10 @@ function HealthBadges({ health }: HealthBadgesProps) {
             return lines.join('\n');
           })()}
         >
-          분석자료 {sync.lastRunAt ? `${formatRelative(sync.lastRunAt)} 동기화` : '미실행'}
-          {syncWarn && ' ⚠'}
+          {sync.intervalMs === 0
+            ? '자동sync 🔴 OFF'
+            : `분석자료 ${sync.lastRunAt ? `${formatRelative(sync.lastRunAt)} 동기화` : '미실행'}`}
+          {syncWarn && sync.intervalMs !== 0 && ' ⚠'}
         </a>
       )}
       {sup && sup.ranAt && (

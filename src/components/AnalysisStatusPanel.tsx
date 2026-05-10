@@ -321,6 +321,11 @@ export function AnalysisStatusPanel() {
         <MathpixStatusBanner status={data.mathpixStatus} />
       )}
 
+      {/* ─── 백그라운드 자동 학습 OFF 경고 ─────────────────────────────
+          drive_sync.intervalMs===0 이면 env 가 명시적으로 비활성화된 상태.
+          사용자가 며칠간 학습 0 상태로 방치되는 걸 막기 위해 큰 빨간 배너로 노출. */}
+      {/* AutoSyncOffWarning 은 cost-tracker 카드 아래 별도로 렌더링됨 */}
+
       {/* ─── 비용 추적 카드 ──────────────────────────────────────────── */}
       {costData && (
         <CostTrackerCard data={costData} days={costDays} onChangeDays={setCostDays} />
