@@ -285,6 +285,8 @@ export default function AutoPipelinePage() {
           });
           // 헬스 스냅샷도 즉시 갱신 — 라벨이 「방금」 으로 바뀜
           void fetchHealth();
+          // 분석 현황 패널이 열려 있으면 즉시 갱신 (이벤트 브로드캐스트)
+          window.dispatchEvent(new Event('analysis-sync-completed'));
           return;
         }
         if (job.status === 'failed') {

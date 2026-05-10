@@ -43,6 +43,36 @@ type SeriesStat = {
   problemNos: { min: number | null; max: number | null; count: number };
 };
 
+type RefineStatus = {
+  ok: boolean;
+  enabled: boolean;
+  killSwitch: boolean;
+  hasGeminiKey: boolean;
+  unpairedCount: number;
+  model: string;
+  canRun: boolean;
+  blockers: string[];
+};
+
+type RefinePlanResponse = {
+  ok: boolean;
+  dryRun: boolean;
+  unpairedCount?: number;
+  plan?: {
+    classifications: Array<{
+      id: string;
+      side: 'problem' | 'solution' | 'unknown';
+      problemNo: number | null;
+      series: string;
+      confidence: number;
+    }>;
+    stats: { callsMade: number; recordsProcessed: number; estimatedCostUsd: number; model: string };
+  };
+  applied?: { updated: number; skipped: number; failures: string[] };
+  error?: string;
+  hint?: string;
+};
+
 type DiagnoseResponse = {
   ok: boolean;
   driveAnalysisFolderId?: string;
@@ -72,6 +102,44 @@ export function AnalysisStatusPanel() {
   const [expandedFolder, setExpandedFolder] = useState<string | null>(null);
   const [issueKindFilter, setIssueKindFilter] = useState<'all' | 'missing' | 'duplicate' | 'unpaired'>('all');
 
+  // AI 페어 정제 — 설정 상태 + dry-run 결과 + 적용 결과
+  const [refineStatus, setRefineStatus] = useState<RefineStatus | null>(null);
+  const [refinePlan, setRefinePlan] = useState<RefinePlanResponse | null>(null);
+  const [refineBusy, setRefineBusy] = useState<null | 'dry' | 'apply'>(null);
+  const [refineExpanded, setRefineExpanded] = useState(false);
+
+  const fetchRefineStatus = useCallback(async () => {
+    try {
+      const r = await fetch('/api/drive/analysis/refine-pairing');
+      const json: RefineStatus = await r.json();
+      if (json.ok) setRefineStatus(json);
+    } catch {
+      // best-effort
+    }
+  }, []);
+
+  const runRefine = useCallback(
+    async (apply: boolean) => {
+      setRefineBusy(apply ? 'apply' : 'dry');
+      try {
+        const r = await fetch('/api/drive/analysis/refine-pairing', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ apply, maxRecords: 100 }),
+        });
+        const json: RefinePlanResponse = await r.json();
+        setRefinePlan(json);
+        // 적용 후 상태 다시 + 진단 갱신
+        await fetchRefineStatus();
+      } catch (e) {
+        setRefinePlan({ ok: false, dryRun: !apply, error: (e as Error).message });
+      } finally {
+        setRefineBusy(null);
+      }
+    },
+    [fetchRefineStatus],
+  );
+
   const fetchData = useCallback(async () => {
     setLoading(true);
     setError(null);
@@ -93,9 +161,24 @@ export function AnalysisStatusPanel() {
 
   useEffect(() => {
     void fetchData();
-    const t = setInterval(() => void fetchData(), 60_000);  // 60초 자동 갱신
-    return () => clearInterval(t);
-  }, [fetchData]);
+    void fetchRefineStatus();
+    const t = setInterval(() => {
+      void fetchData();
+      void fetchRefineStatus();
+    }, 60_000);  // 60초 자동 갱신
+
+    // 다른 영역에서 학습 완료 신호 전파 — 패널 즉시 갱신
+    const onSync = () => {
+      void fetchData();
+      void fetchRefineStatus();
+    };
+    window.addEventListener('analysis-sync-completed', onSync);
+
+    return () => {
+      clearInterval(t);
+      window.removeEventListener('analysis-sync-completed', onSync);
+    };
+  }, [fetchData, fetchRefineStatus]);
 
   const folders = useMemo(() => {
     if (!data?.rootFolders) return [];
@@ -327,6 +410,166 @@ export function AnalysisStatusPanel() {
               </tbody>
             </table>
           </div>
+        </section>
+      )}
+
+      {/* ─── AI 페어 정제 ─────────────────────────────────────────── */}
+      {refineStatus && (
+        <section className="mb-5 rounded-lg border border-indigo-200 bg-indigo-50/40 p-3">
+          <div className="flex items-start justify-between gap-2">
+            <div>
+              <h3 className="font-semibold text-indigo-900">AI 페어 정제 (gemini-2.0-flash)</h3>
+              <p className="mt-0.5 text-[11px] text-indigo-800">
+                규칙 기반으로 못 묶인 record 들을 분류하여 같은 series 의 문제 ↔ 풀이를 페어링.
+                {' · '}대상 unpaired: <b>{refineStatus.unpairedCount}건</b>
+                {' · '}모델: <code className="rounded bg-white px-1">{refineStatus.model}</code>
+              </p>
+            </div>
+            <button
+              onClick={() => setRefineExpanded((v) => !v)}
+              className="text-[11px] text-indigo-700 hover:text-indigo-900"
+            >
+              {refineExpanded ? '접기' : '펼치기 ▾'}
+            </button>
+          </div>
+
+          {refineExpanded && (
+            <div className="mt-3 space-y-2">
+              {!refineStatus.canRun && refineStatus.blockers.length > 0 && (
+                <div className="rounded border border-amber-300 bg-amber-50 p-2 text-[11px] text-amber-900">
+                  <div className="font-semibold">활성화 조건 미충족:</div>
+                  <ul className="mt-0.5 list-disc pl-4">
+                    {refineStatus.blockers.map((b, i) => (
+                      <li key={i}>{b}</li>
+                    ))}
+                  </ul>
+                  {!refineStatus.enabled && (
+                    <p className="mt-1 text-amber-800">
+                      Railway Variables 에 <code className="rounded bg-white px-1">ASSISTED_PAIRING_ENABLED=true</code> 추가 후 재배포.
+                    </p>
+                  )}
+                </div>
+              )}
+
+              {refineStatus.canRun && (
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    onClick={() => runRefine(false)}
+                    disabled={!!refineBusy}
+                    className="rounded-md border border-indigo-300 bg-white px-3 py-1 text-[11px] font-semibold text-indigo-800 hover:bg-indigo-50 disabled:opacity-50"
+                    title="모델 호출만 — Supabase 변경 없음. 분류 결과 + 비용 추정 미리보기"
+                  >
+                    {refineBusy === 'dry' ? '분석 중…' : '1) 미리보기 (dry-run)'}
+                  </button>
+                  <button
+                    onClick={() => {
+                      if (
+                        confirm(
+                          `정말 ${refineStatus.unpairedCount}건 (최대 100건) 에 대해 적용하시겠습니까?\n` +
+                            `gemini-2.0-flash 모델 호출 + Supabase update 가 즉시 실행됩니다.`,
+                        )
+                      ) {
+                        void runRefine(true);
+                      }
+                    }}
+                    disabled={!!refineBusy || !refinePlan?.plan}
+                    className="rounded-md bg-indigo-700 px-3 py-1 text-[11px] font-semibold text-white hover:bg-indigo-800 disabled:opacity-50"
+                    title={refinePlan?.plan ? '미리보기 결과로 실제 적용' : '먼저 미리보기를 실행하세요'}
+                  >
+                    {refineBusy === 'apply' ? '적용 중…' : '2) 적용 (실제 변경)'}
+                  </button>
+                  <span className="text-[10px] text-indigo-700">한 번에 최대 100건, 비용은 미리보기 결과에 표시</span>
+                </div>
+              )}
+
+              {refinePlan && (
+                <div className="mt-2 rounded border border-indigo-200 bg-white p-2 text-[11px]">
+                  {refinePlan.error ? (
+                    <p className="text-rose-700">실패: {refinePlan.error}</p>
+                  ) : (
+                    <>
+                      <div className="font-semibold text-slate-800">
+                        {refinePlan.dryRun ? '미리보기 결과' : '적용 결과'}
+                      </div>
+                      {refinePlan.plan && (
+                        <div className="mt-1 grid grid-cols-2 gap-2 md:grid-cols-4">
+                          <Stat label="처리 record" value={refinePlan.plan.stats.recordsProcessed} />
+                          <Stat label="모델 호출" value={refinePlan.plan.stats.callsMade} />
+                          <Stat label="분류됨" value={refinePlan.plan.classifications.length} />
+                          <div className="rounded border border-emerald-200 bg-emerald-50 px-1.5 py-0.5 text-center">
+                            <div className="text-[9px] text-emerald-700">예상 비용</div>
+                            <div className="text-xs font-bold text-emerald-900">
+                              ${refinePlan.plan.stats.estimatedCostUsd.toFixed(4)}
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                      {refinePlan.applied && (
+                        <div className="mt-2 grid grid-cols-3 gap-1 text-[11px]">
+                          <Stat label="페어링 적용" value={refinePlan.applied.updated} />
+                          <Stat label="skip" value={refinePlan.applied.skipped} />
+                          <Stat label="실패" value={refinePlan.applied.failures.length} warn={refinePlan.applied.failures.length > 0} />
+                        </div>
+                      )}
+                      {refinePlan.applied && refinePlan.applied.failures.length > 0 && (
+                        <details className="mt-2">
+                          <summary className="cursor-pointer text-[10px] text-rose-700">실패 상세 ({refinePlan.applied.failures.length})</summary>
+                          <ul className="mt-1 max-h-40 space-y-0.5 overflow-y-auto pl-3 text-[10px] text-rose-800">
+                            {refinePlan.applied.failures.slice(0, 20).map((f, i) => (
+                              <li key={i} className="font-mono">· {f}</li>
+                            ))}
+                          </ul>
+                        </details>
+                      )}
+                      {refinePlan.plan && refinePlan.plan.classifications.length > 0 && (
+                        <details className="mt-2">
+                          <summary className="cursor-pointer text-[10px] text-indigo-700">
+                            분류 결과 sample ({refinePlan.plan.classifications.length})
+                          </summary>
+                          <div className="mt-1 max-h-48 overflow-y-auto rounded border border-slate-200">
+                            <table className="w-full text-[10px]">
+                              <thead className="bg-slate-50 text-slate-600">
+                                <tr>
+                                  <th className="border-b px-1.5 py-1 text-left">id</th>
+                                  <th className="border-b px-1.5 py-1 text-left">side</th>
+                                  <th className="border-b px-1.5 py-1 text-right">번호</th>
+                                  <th className="border-b px-1.5 py-1 text-right">신뢰도</th>
+                                  <th className="border-b px-1.5 py-1 text-left">시리즈</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {refinePlan.plan.classifications.slice(0, 30).map((c, i) => (
+                                  <tr key={i} className="hover:bg-slate-50">
+                                    <td className="border-b border-slate-100 px-1.5 py-0.5 font-mono">{truncate(c.id, 22)}</td>
+                                    <td className="border-b border-slate-100 px-1.5 py-0.5">
+                                      <span
+                                        className={`rounded px-1 text-[9px] font-semibold ${
+                                          c.side === 'problem'
+                                            ? 'bg-blue-100 text-blue-800'
+                                            : c.side === 'solution'
+                                              ? 'bg-amber-100 text-amber-900'
+                                              : 'bg-slate-100 text-slate-600'
+                                        }`}
+                                      >
+                                        {c.side}
+                                      </span>
+                                    </td>
+                                    <td className="border-b border-slate-100 px-1.5 py-0.5 text-right">{c.problemNo ?? '—'}</td>
+                                    <td className="border-b border-slate-100 px-1.5 py-0.5 text-right">{(c.confidence * 100).toFixed(0)}%</td>
+                                    <td className="border-b border-slate-100 px-1.5 py-0.5">{truncate(c.series, 30)}</td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        </details>
+                      )}
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
         </section>
       )}
 

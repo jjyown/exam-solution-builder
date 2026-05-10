@@ -24,6 +24,45 @@ import {
   isAssistedPairingEnabled,
 } from "@/lib/pairingAssistedRefiner";
 
+/**
+ * GET — 설정 상태 + 처리 가능한 unpaired record 수.
+ * UI 패널이 「AI 페어 정제」 섹션을 보여주기 전에 호출해 활성화 가능 여부 판단.
+ */
+export async function GET() {
+  const enabled = isAssistedPairingEnabled();
+  const killSwitch = /^(1|true|yes|on)$/i.test(process.env.GEMINI_OCR_DISABLED || "");
+  const hasGeminiKey = !!(process.env.GEMINI_API_KEY?.trim());
+
+  let unpairedCount = 0;
+  try {
+    const all = await fetchAllRecords();
+    unpairedCount = all.filter((r) => {
+      if (typeof r.problem_no !== "number") return false;
+      const hasSolution = !!(r.solution_text && r.solution_text.trim());
+      const hasProblem = !!(r.content && r.content.trim());
+      return (!hasSolution && hasProblem) || (hasSolution && !hasProblem);
+    }).length;
+  } catch {
+    // best-effort
+  }
+
+  return NextResponse.json({
+    ok: true,
+    enabled,
+    killSwitch,
+    hasGeminiKey,
+    unpairedCount,
+    model: process.env.ASSISTED_PAIRING_MODEL || "gemini-2.0-flash",
+    canRun: enabled && !killSwitch && hasGeminiKey && unpairedCount > 0,
+    blockers: [
+      ...(enabled ? [] : ["ASSISTED_PAIRING_ENABLED=true 환경변수 필요"]),
+      ...(killSwitch ? ["GEMINI_OCR_DISABLED 킬스위치 활성"] : []),
+      ...(hasGeminiKey ? [] : ["GEMINI_API_KEY 미설정"]),
+      ...(unpairedCount === 0 ? ["페어 깨진 record 가 없음 (정제 불필요)"] : []),
+    ],
+  });
+}
+
 export async function POST(req: Request) {
   if (!isAssistedPairingEnabled()) {
     return NextResponse.json(
