@@ -463,12 +463,17 @@ export default function CropPage() {
     }
   }
 
-  async function downloadDocxAll() {
+  /**
+   * 성공한 크롭들로 묶음 다운로드를 수행한다.
+   * format='hml' 이 메인(한컴 한글) — /auto 와 동일.
+   * format='docx' 는 외부 공유·Drive 미리보기용 보조.
+   */
+  async function downloadAll(format: "hml" | "docx") {
     const successRuns = crops
       .filter((c) => c.parsed)
       .map((c) => ({
         questionNo: c.questionNo,
-        // 잘라낸 이미지를 마크다운 이미지 라인으로 전달 → DOCX 빌더가 dataURL 디코드해 임베드
+        // 잘라낸 이미지를 마크다운 이미지 라인으로 전달 → DOCX/HML 빌더가 dataURL 디코드해 임베드
         questionText: `![문제 원본 — ${c.pageLabel}](${c.imageDataUrl})`,
         parsed: c.parsed,
       }));
@@ -476,7 +481,10 @@ export default function CropPage() {
       alert("성공한 크롭이 없습니다.");
       return;
     }
-    const res = await fetch("/api/auto-pipeline/docx", {
+    const endpoint =
+      format === "hml" ? "/api/auto-pipeline/hml" : "/api/auto-pipeline/docx";
+    const labelUpper = format === "hml" ? "HWP/HML" : "DOCX";
+    const res = await fetch(endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -486,19 +494,27 @@ export default function CropPage() {
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
-      alert(`DOCX 생성 실패: ${err.error ?? res.statusText}`);
+      alert(`${labelUpper} 생성 실패: ${err.error ?? res.statusText}`);
       return;
     }
     const blob = await res.blob();
+    // /auto 와 동일하게 서버가 content-disposition 으로 파일명 지정해 주면 그걸 우선 사용
+    const cd = res.headers.get("content-disposition") ?? "";
+    const filenameMatch = cd.match(/filename="?([^";]+)"?/);
+    const fallback = `${examName || "크롭_해설지"}_${successRuns.length}q.${format}`;
+    const filename = filenameMatch ? decodeURIComponent(filenameMatch[1]) : fallback;
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `${examName || "크롭_해설지"}_${successRuns.length}q.docx`;
+    a.download = filename;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
   }
+  // 호출 편의 wrapper — 버튼에서 직접 호출 시 가독성용
+  const downloadHmlAll = () => downloadAll("hml");
+  const downloadDocxAll = () => downloadAll("docx");
 
   const activeSrc = sources[activePage];
 
@@ -775,7 +791,7 @@ export default function CropPage() {
               크롭 목록 ({crops.length}) · 성공{" "}
               {crops.filter((c) => c.parsed).length}
             </h2>
-            <div className="flex gap-2">
+            <div className="flex flex-wrap gap-2">
               <button
                 onClick={processAll}
                 disabled={crops.every((c) => c.status !== "idle")}
@@ -783,12 +799,23 @@ export default function CropPage() {
               >
                 ▶ 모두 풀이
               </button>
+              {/* HWP — 메인 포맷 (한컴 한글). /auto 와 동일하게 인디고 채움 버튼. */}
+              <button
+                onClick={downloadHmlAll}
+                disabled={crops.filter((c) => c.parsed).length === 0}
+                className="rounded-md border border-indigo-700 bg-indigo-700 px-3 py-1.5 text-xs font-semibold text-white hover:bg-indigo-800 disabled:cursor-not-allowed disabled:opacity-50"
+                title="성공한 크롭들을 한 HWP/HML 파일로 묶어 다운로드 — 한컴 한글에서 바로 열림 (메인 포맷)"
+              >
+                📕 전체 HWP ({crops.filter((c) => c.parsed).length}문항)
+              </button>
+              {/* DOCX — 보조 포맷 (외부 공유·Drive 미리보기용). 흰 배경 outline 버튼. */}
               <button
                 onClick={downloadDocxAll}
                 disabled={crops.filter((c) => c.parsed).length === 0}
-                className="rounded-md border border-emerald-700 bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
+                className="rounded-md border border-slate-400 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+                title="외부 공유·Google Drive 미리보기용 (보조 포맷). 학원 내부 작업은 HWP 권장"
               >
-                📄 전체 DOCX 다운로드
+                DOCX ({crops.filter((c) => c.parsed).length})
               </button>
             </div>
           </div>

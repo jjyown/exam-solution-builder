@@ -9,7 +9,8 @@
  *
  *  - 「크롭에서 이어서」: /crop?examName=<name> 으로 이동 (시험명 prefill)
  *  - 「자동에서 열기」 : /auto?restoreRun=<id> 로 이동 (해당 run 결과 복원)
- *  - 「DOCX 단건」    : /api/auto-pipeline/docx 호출 (즉시 다운로드)
+ *  - 「📕 HWP / 묶음 HWP」  : /api/auto-pipeline/hml 호출 — 한컴 한글에서 바로 열림 (메인 포맷)
+ *  - 「DOCX / 묶음 DOCX」  : /api/auto-pipeline/docx 호출 — 외부 공유·Drive 미리보기용 (보조)
  */
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
@@ -193,95 +194,111 @@ export default function InboxPage() {
     });
   }, [filtered]);
 
-  async function downloadSingleDocx(row: RunRow) {
-    if (!row.parsed) return;
-    setBusyDocxId(row.id);
+  /**
+   * 단건 / 묶음 다운로드의 공통 본체.
+   *  format='hml'  → /api/auto-pipeline/hml  (한컴 한글 — 메인 포맷)
+   *  format='docx' → /api/auto-pipeline/docx (외부 공유·Drive 미리보기 — 보조)
+   *
+   *  busyId 는 「어떤 row/group 가 다운로드 중인지」 식별. 단건이면 row.id, 묶음이면 `group:<examName>`.
+   *  /auto 와 /crop 의 다운로드 흐름과 정확히 같은 엔드포인트·페이로드를 사용한다.
+   */
+  async function downloadFile(
+    format: "hml" | "docx",
+    examName: string,
+    runs: Array<{ questionNo: string; questionText: string; parsed: NonNullable<RunRow["parsed"]> }>,
+    busyId: string,
+    fallbackName: string,
+  ) {
+    if (runs.length === 0) {
+      alert(
+        format === "hml"
+          ? "HWP 로 만들 결과가 없습니다 (parsed 비어 있음)."
+          : "DOCX 로 만들 결과가 없습니다 (parsed 비어 있음).",
+      );
+      return;
+    }
+    setBusyDocxId(busyId);
     try {
-      const res = await fetch("/api/auto-pipeline/docx", {
+      const endpoint =
+        format === "hml" ? "/api/auto-pipeline/hml" : "/api/auto-pipeline/docx";
+      const labelUpper = format === "hml" ? "HWP/HML" : "DOCX";
+      const res = await fetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          examName: row.exam_name ?? "",
-          runs: [
-            {
-              questionNo: row.question_no ?? "?",
-              questionText: row.question_text ?? "",
-              parsed: row.parsed,
-            },
-          ],
-        }),
+        body: JSON.stringify({ examName, runs }),
       });
       if (!res.ok) {
         const t = await res.text();
-        alert(`DOCX 생성 실패: ${t.slice(0, 200)}`);
+        alert(`${labelUpper} 생성 실패: ${t.slice(0, 200)}`);
         return;
       }
       const blob = await res.blob();
+      // /auto 와 동일 — 서버가 content-disposition 으로 파일명 줄 때 그것 우선
+      const cd = res.headers.get("content-disposition") ?? "";
+      const filenameMatch = cd.match(/filename="?([^";]+)"?/);
+      const filename = filenameMatch ? decodeURIComponent(filenameMatch[1]) : fallbackName;
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      const safeExam = (row.exam_name ?? "해설").replace(/[\\/:*?"<>|]/g, "_");
-      const qn = row.question_no ?? "단건";
-      a.download = `${safeExam}_${qn}.docx`;
+      a.download = filename;
       document.body.appendChild(a);
       a.click();
       a.remove();
       URL.revokeObjectURL(url);
     } catch (e) {
-      alert(`DOCX 다운로드 실패: ${(e as Error).message}`);
+      alert(`${format === "hml" ? "HWP" : "DOCX"} 다운로드 실패: ${(e as Error).message}`);
     } finally {
       setBusyDocxId(null);
     }
   }
 
-  async function downloadGroupDocx(examName: string, groupRows: RunRow[]) {
-    const valid = groupRows.filter((r) => r.parsed);
-    if (valid.length === 0) {
-      alert("이 시험명에 DOCX 로 만들 결과가 없습니다 (parsed 비어 있음).");
-      return;
-    }
-    setBusyDocxId(`group:${examName}`);
-    try {
-      const res = await fetch("/api/auto-pipeline/docx", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          examName,
-          runs: valid
-            .slice()
-            .sort((a, b) => {
-              const ai = parseInt(a.question_no || "0", 10) || 0;
-              const bi = parseInt(b.question_no || "0", 10) || 0;
-              return ai - bi;
-            })
-            .map((r) => ({
-              questionNo: r.question_no ?? "?",
-              questionText: r.question_text ?? "",
-              parsed: r.parsed,
-            })),
-        }),
-      });
-      if (!res.ok) {
-        const t = await res.text();
-        alert(`DOCX 생성 실패: ${t.slice(0, 200)}`);
-        return;
-      }
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      const safeExam = examName.replace(/[\\/:*?"<>|]/g, "_");
-      a.download = `${safeExam}_묶음.docx`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
-    } catch (e) {
-      alert(`DOCX 다운로드 실패: ${(e as Error).message}`);
-    } finally {
-      setBusyDocxId(null);
-    }
+  async function downloadSingle(format: "hml" | "docx", row: RunRow) {
+    if (!row.parsed) return;
+    const safeExam = (row.exam_name ?? "해설").replace(/[\\/:*?"<>|]/g, "_");
+    const qn = row.question_no ?? "단건";
+    const fallback = `${safeExam}_${qn}.${format}`;
+    await downloadFile(
+      format,
+      row.exam_name ?? "",
+      [
+        {
+          questionNo: row.question_no ?? "?",
+          questionText: row.question_text ?? "",
+          parsed: row.parsed,
+        },
+      ],
+      row.id,
+      fallback,
+    );
   }
+
+  async function downloadGroup(format: "hml" | "docx", examName: string, groupRows: RunRow[]) {
+    const valid = groupRows.filter((r) => r.parsed);
+    const safeExam = examName.replace(/[\\/:*?"<>|]/g, "_");
+    const fallback = `${safeExam}_묶음.${format}`;
+    const sorted = valid
+      .slice()
+      .sort((a, b) => {
+        const ai = parseInt(a.question_no || "0", 10) || 0;
+        const bi = parseInt(b.question_no || "0", 10) || 0;
+        return ai - bi;
+      })
+      .map((r) => ({
+        questionNo: r.question_no ?? "?",
+        questionText: r.question_text ?? "",
+        parsed: r.parsed!,
+      }));
+    await downloadFile(format, examName, sorted, `group:${examName}`, fallback);
+  }
+
+  // 호출 편의 wrapper — 기존 함수명 유지(버튼 핸들러 변경 최소화)
+  const downloadSingleHml = (row: RunRow) => downloadSingle("hml", row);
+  const downloadSingleDocx = (row: RunRow) => downloadSingle("docx", row);
+  const downloadGroupHml = (examName: string, groupRows: RunRow[]) =>
+    downloadGroup("hml", examName, groupRows);
+  const downloadGroupDocx = (examName: string, groupRows: RunRow[]) =>
+    downloadGroup("docx", examName, groupRows);
+
 
   return (
     <div className="mx-auto max-w-6xl px-4 py-6">
@@ -292,7 +309,7 @@ export default function InboxPage() {
           </h1>
           <p className="mt-1 text-xs text-slate-600">
             「해설 제작」·「크롭」에서 진행했던 풀이 이력을 시험명별로 묶어 보여줍니다.
-            클릭 한 번으로 자동/크롭 화면으로 돌아가거나 DOCX 로 바로 받을 수 있습니다.
+            클릭 한 번으로 자동/크롭 화면으로 돌아가거나 <strong>HWP (메인)</strong> · DOCX (보조) 로 바로 받을 수 있습니다.
           </p>
         </div>
         <button
@@ -458,12 +475,23 @@ export default function InboxPage() {
                   >
                     ✂ 크롭에서 이어서
                   </Link>
+                  {/* HWP — 메인 포맷 (한컴 한글). /auto 와 동일 스타일. */}
+                  <button
+                    onClick={() => downloadGroupHml(examName, groupRows)}
+                    disabled={busyDocxId === `group:${examName}`}
+                    className="rounded border border-indigo-700 bg-indigo-700 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-indigo-800 disabled:opacity-60"
+                    title="이 시험명 묶음을 HWP/HML 로 다운로드 — 한컴 한글에서 바로 열림 (메인 포맷)"
+                  >
+                    {busyDocxId === `group:${examName}` ? "묶는 중…" : "📕 묶음 HWP"}
+                  </button>
+                  {/* DOCX — 보조 포맷. */}
                   <button
                     onClick={() => downloadGroupDocx(examName, groupRows)}
                     disabled={busyDocxId === `group:${examName}`}
-                    className="rounded border border-indigo-300 bg-white px-2.5 py-1 text-[11px] font-semibold text-indigo-700 hover:bg-indigo-50 disabled:opacity-60"
+                    className="rounded border border-slate-400 bg-white px-2.5 py-1 text-[11px] font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-60"
+                    title="외부 공유·Drive 미리보기용 (보조 포맷). 학원 내부 작업은 HWP 권장"
                   >
-                    {busyDocxId === `group:${examName}` ? "묶는 중…" : "📄 묶음 DOCX"}
+                    묶음 DOCX
                   </button>
                 </div>
               </div>
@@ -530,13 +558,23 @@ export default function InboxPage() {
                               >
                                 자동에서 열기
                               </Link>
+                              {/* HWP — 메인 포맷 (한컴 한글). */}
+                              <button
+                                onClick={() => downloadSingleHml(r)}
+                                disabled={docxBtnDisabled}
+                                className="rounded border border-indigo-700 bg-indigo-700 px-2 py-0.5 text-[11px] font-semibold text-white hover:bg-indigo-800 disabled:opacity-50"
+                                title={r.parsed ? "이 풀이를 HWP/HML 단건 다운로드 — 한컴에서 바로 열림 (메인)" : "parsed 결과가 없어 HWP 생성 불가"}
+                              >
+                                {busyDocxId === r.id ? "받는 중…" : "📕 HWP"}
+                              </button>
+                              {/* DOCX — 보조 포맷. */}
                               <button
                                 onClick={() => downloadSingleDocx(r)}
                                 disabled={docxBtnDisabled}
-                                className="rounded border border-indigo-300 bg-white px-2 py-0.5 text-[11px] font-semibold text-indigo-700 hover:bg-indigo-50 disabled:opacity-50"
-                                title={r.parsed ? "이 풀이로 단건 DOCX 다운로드" : "parsed 결과가 없어 DOCX 생성 불가"}
+                                className="rounded border border-slate-300 bg-white px-2 py-0.5 text-[11px] font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                                title={r.parsed ? "이 풀이를 DOCX 단건 다운로드 (외부 공유·Drive 미리보기용 보조)" : "parsed 결과가 없어 DOCX 생성 불가"}
                               >
-                                {busyDocxId === r.id ? "다운로드 중…" : "DOCX 단건"}
+                                {busyDocxId === r.id ? "받는 중…" : "DOCX"}
                               </button>
                             </div>
                           </td>
