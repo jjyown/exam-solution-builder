@@ -23,6 +23,7 @@
  * ────────────────────────────────────────────────────────────────────────────
  */
 import { useCallback, useEffect, useState } from "react";
+import { AnalysisStatusPanel } from "@/components/AnalysisStatusPanel";
 
 type ByRouteRow = {
   route: string;
@@ -559,7 +560,49 @@ export default function CostPage() {
       {data?.hint && (
         <p className="mt-3 text-[11px] text-slate-500">💡 {data.hint}</p>
       )}
+
+      {/* 분석 현황 — /auto 에서 이동. 시중교재/시험지 원안 진행상태·DB 통계·무결성 이슈를 비용 옆에서 함께 보게. */}
+      <AnalysisStatusSection />
     </div>
+  );
+}
+
+/**
+ * 분석 현황 섹션 — 토글 접힘. AnalysisStatusPanel 자체가 fetch 비용이 있어
+ * 사용자가 열 때만 마운트(=fetch). 기본 닫힘 상태로 페이지 로딩 가볍게.
+ */
+function AnalysisStatusSection() {
+  const [open, setOpen] = useState(false);
+  return (
+    <section className="mt-4 rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-center justify-between text-left"
+        aria-expanded={open}
+      >
+        <div>
+          <h2 className="text-sm font-semibold text-slate-900">
+            📚 분석 현황 (시중교재 · 시험지 원안 학습 진행)
+          </h2>
+          <p className="mt-0.5 text-[11px] text-slate-600">
+            폴더별 OCR 처리율, DB record 통계, 무결성 이슈, 자동 추천 액션을 한눈에.
+            비용 폭증 원인 추적할 때 같이 보면 유용합니다.
+          </p>
+        </div>
+        <span
+          aria-hidden
+          className={`inline-block w-3 text-[11px] text-slate-500 transition-transform ${open ? "rotate-90" : ""}`}
+        >
+          ▶
+        </span>
+      </button>
+      {open && (
+        <div className="mt-3">
+          <AnalysisStatusPanel />
+        </div>
+      )}
+    </section>
   );
 }
 
