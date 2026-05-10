@@ -36,7 +36,7 @@
  * ────────────────────────────────────────────────────────────────────────────
  */
 import { NextResponse } from "next/server";
-import { getSupabaseServiceClient } from "@/lib/supabaseServiceClient";
+import { getSupabaseServiceClient, getAcademySupabaseClient } from "@/lib/supabaseServiceClient";
 import { isAssistedPairingEnabled } from "@/lib/pairingAssistedRefiner";
 
 const KRW_PER_USD = 1330;  // 환율 추정 — 진짜 환율은 변동, ±5% 오차
@@ -151,7 +151,57 @@ export async function GET(req: Request) {
   const drvVisionCalls = Math.ceil(drvTotalRecords * 0.5);
   const drvOcrEstUsd = drvVisionCalls * (VISION_OCR_COST_USD["gemini-2.0-flash"] ?? 0.0001);
 
-  const total = autoEstUsd + drvOcrEstUsd;
+  // ── 학원 관리 (academy_manager) ─────────────────────────────────────────
+  // 별도 Supabase 프로젝트. ACADEMY_SUPABASE_URL/KEY env 있을 때만 조회.
+  // 호출 로그 테이블이 따로 없어 결과 테이블의 row 수로 추정:
+  //   - student_evaluations  : 종합평가 1건 ≈ 입시지식 검색 1회 + 본문 생성 1회 = 2회 호출
+  //                            gemini-2.5-flash 기준 호출당 ~$0.005 → 1건당 $0.010
+  //   - admissions_knowledge : 입시 지식 수집 1건 ≈ 1회 호출 → $0.005
+  //   - grading_results      : AI 채점 1건 ≈ 평균 20문항 × (OCR 2회 + 채점 1회) = 60회 → $0.30
+  //                            (Gemini Flash 가성비 기준, 정확도 보수적으로 잡음)
+  //
+  // env 미설정 또는 조회 실패 시 academyConfigured: false 로 표시.
+  const academyClient = getAcademySupabaseClient();
+  let academyConfigured = false;
+  let academyError: string | null = null;
+  let academyEstUsd = 0;
+  const academyByCategory: Record<string, { rows: number; estUsd: number; model: string; perRowUsd: number }> = {};
+  if (academyClient) {
+    academyConfigured = true;
+    try {
+      const [evalRes, kbRes, gradingRes] = await Promise.all([
+        academyClient.from("student_evaluations").select("id", { count: "exact", head: true }).gte("created_at", sinceIso),
+        academyClient.from("admissions_knowledge").select("id", { count: "exact", head: true }).gte("created_at", sinceIso),
+        academyClient.from("grading_results").select("id", { count: "exact", head: true }).gte("created_at", sinceIso),
+      ]);
+      const ev = evalRes.count ?? 0;
+      const kb = kbRes.count ?? 0;
+      const gr = gradingRes.count ?? 0;
+      academyByCategory["종합평가 생성"] = {
+        rows: ev,
+        estUsd: ev * 0.010,
+        model: "gemini-2.5-flash",
+        perRowUsd: 0.010,
+      };
+      academyByCategory["입시지식 수집"] = {
+        rows: kb,
+        estUsd: kb * 0.005,
+        model: "gemini-2.5-flash",
+        perRowUsd: 0.005,
+      };
+      academyByCategory["AI 채점"] = {
+        rows: gr,
+        estUsd: gr * 0.30,
+        model: "gemini-2.5-flash + OCR",
+        perRowUsd: 0.30,
+      };
+      academyEstUsd = Object.values(academyByCategory).reduce((s, c) => s + c.estUsd, 0);
+    } catch (e) {
+      academyError = (e as Error).message;
+    }
+  }
+
+  const total = autoEstUsd + drvOcrEstUsd + academyEstUsd;
   const totalKrw = total * KRW_PER_USD;
 
   // 진단 로직 — 사용량 폭증 원인 자동 식별
@@ -225,13 +275,26 @@ export async function GET(req: Request) {
       ocrEstUsd: Number(drvOcrEstUsd.toFixed(4)),
       ocrEstKrw: Math.round(drvOcrEstUsd * KRW_PER_USD),
     },
+    academy: {
+      configured: academyConfigured,
+      error: academyError,
+      byCategory: academyByCategory,
+      estUsd: Number(academyEstUsd.toFixed(4)),
+      estKrw: Math.round(academyEstUsd * KRW_PER_USD),
+    },
     total: {
       estUsd: Number(total.toFixed(4)),
       estKrw: Math.round(totalKrw),
+      // 합산 분배
+      breakdown: {
+        해설제작_자동파이프라인: Number(autoEstUsd.toFixed(4)),
+        해설제작_Drive학습: Number(drvOcrEstUsd.toFixed(4)),
+        학원관리: Number(academyEstUsd.toFixed(4)),
+      },
     },
     assistedPairingEnabled: isAssistedPairingEnabled(),
     diagnoses,
     hint:
-      "추정 비용은 모델별 평균 단가 기준 ±50% 오차. 정확한 청구액은 Google AI Studio billing 또는 Anthropic Console 확인.",
+      "추정 비용은 모델별 평균 단가 기준 ±50% 오차. 정확한 청구액은 Google AI Studio billing 확인.",
   });
 }

@@ -29,3 +29,21 @@ export function getSupabaseServiceClient(): SupabaseClient | null {
     auth: { persistSession: false, autoRefreshToken: false },
   });
 }
+
+/**
+ * Academy Manager (학원 관리) 별도 Supabase 프로젝트 클라이언트.
+ *  - 시험지 해설 제작 ↔ academy_manager 는 다른 Supabase 인스턴스이므로
+ *    cross-app 비용 통계를 보려면 ACADEMY env 별도 추가 필요.
+ *  - 누락 시 null — UI 에서 「academy 통계 미연결」 으로 표시.
+ *
+ *  env: ACADEMY_SUPABASE_URL + ACADEMY_SUPABASE_SERVICE_ROLE_KEY
+ */
+export function getAcademySupabaseClient(): SupabaseClient | null {
+  loadLocalEnv();
+  const url = process.env.ACADEMY_SUPABASE_URL?.trim() || "";
+  const key = process.env.ACADEMY_SUPABASE_SERVICE_ROLE_KEY?.trim() || "";
+  if (!url || !key) return null;
+  return createClient(url, key, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+}

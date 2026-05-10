@@ -96,7 +96,18 @@ type CostTrackerResponse = {
     ocrEstUsd: number;
     ocrEstKrw: number;
   };
-  total: { estUsd: number; estKrw: number };
+  academy?: {
+    configured: boolean;
+    error?: string | null;
+    byCategory: Record<string, { rows: number; estUsd: number; model: string; perRowUsd: number }>;
+    estUsd: number;
+    estKrw: number;
+  };
+  total: {
+    estUsd: number;
+    estKrw: number;
+    breakdown?: { 해설제작_자동파이프라인: number; 해설제작_Drive학습: number; 학원관리: number };
+  };
   diagnoses: Array<{ level: 'info' | 'warn' | 'high'; message: string }>;
   hint?: string;
   assistedPairingEnabled?: boolean;
@@ -903,17 +914,46 @@ function CostTrackerCard({
   days: number;
   onChangeDays: (n: number) => void;
 }) {
+  const [activeTab, setActiveTab] = useState<'total' | 'solution' | 'academy'>('total');
   const models = Object.entries(data.autoPipeline.byModel || {}).sort((a, b) => b[1].estUsd - a[1].estUsd);
   const heavyModel = models[0]; // 비용 1위 모델
+  const academyEntries = data.academy ? Object.entries(data.academy.byCategory) : [];
   return (
     <details className="mb-3 rounded border border-purple-200 bg-purple-50/40 p-2 text-[11px]" open={data.diagnoses.some((d) => d.level !== 'info')}>
       <summary className="cursor-pointer">
         <span className="font-semibold text-purple-900">💰 비용 추적 (최근 {data.periodDays}일)</span>
         <span className="ml-2 text-purple-800">
-          총 <b>${data.total.estUsd.toFixed(3)}</b> ≈ <b>₩{data.total.estKrw.toLocaleString()}</b> ·
-          {' '}자동 파이프라인 {data.autoPipeline.totalCalls}회 · Drive 학습 record {data.driveLearning.totalRecords}건
+          총 <b>${data.total.estUsd.toFixed(3)}</b> ≈ <b>₩{data.total.estKrw.toLocaleString()}</b>
+          {data.academy?.configured ? (
+            <>
+              {' · '}해설제작 ₩{((data.autoPipeline.estKrw + data.driveLearning.ocrEstKrw)).toLocaleString()}
+              {' · '}학원관리 ₩{data.academy.estKrw.toLocaleString()}
+            </>
+          ) : (
+            <>{' · '}자동 파이프라인 {data.autoPipeline.totalCalls}회 · Drive {data.driveLearning.totalRecords}건</>
+          )}
         </span>
       </summary>
+      {/* 탭 전환 */}
+      <div className="mt-2 flex gap-1 border-b border-purple-200">
+        {[
+          { k: 'total' as const, label: '🧾 합산' },
+          { k: 'solution' as const, label: '📘 해설 제작' },
+          { k: 'academy' as const, label: '🏫 학원 관리' + (data.academy?.configured ? '' : ' (미연결)') },
+        ].map((t) => (
+          <button
+            key={t.k}
+            onClick={() => setActiveTab(t.k)}
+            className={`-mb-px rounded-t border-b-2 px-2 py-0.5 text-[11px] ${
+              activeTab === t.k
+                ? 'border-purple-700 bg-white text-purple-900 font-semibold'
+                : 'border-transparent text-purple-700 hover:bg-white/50'
+            }`}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
       <div className="mt-2 space-y-2">
         {/* 기간 토글 */}
         <div className="flex items-center gap-1">
@@ -931,29 +971,119 @@ function CostTrackerCard({
           ))}
         </div>
 
-        {/* 비용 분배 */}
-        <div className="grid grid-cols-2 gap-1.5">
-          <div className="rounded border border-purple-200 bg-white p-1.5">
-            <div className="text-[9px] text-purple-700 uppercase">자동 파이프라인 (사용자 풀이)</div>
-            <div className="text-base font-bold text-purple-900">${data.autoPipeline.estUsd.toFixed(3)}</div>
-            <div className="text-[9px] text-slate-600">
-              {data.autoPipeline.totalCalls} 호출
-              {data.autoPipeline.totalAttempts && data.autoPipeline.totalAttempts > data.autoPipeline.totalCalls
-                ? ` · 평균 재시도 ${(data.autoPipeline.totalAttempts / data.autoPipeline.totalCalls).toFixed(2)}회`
-                : ''}
+        {/* === 합산 탭 === */}
+        {activeTab === 'total' && (
+          <div className="grid grid-cols-3 gap-1.5">
+            <div className="rounded border border-purple-200 bg-white p-1.5">
+              <div className="text-[9px] text-purple-700 uppercase">📘 해설 (자동 파이프라인)</div>
+              <div className="text-base font-bold text-purple-900">${data.autoPipeline.estUsd.toFixed(3)}</div>
+              <div className="text-[9px] text-slate-600">≈ ₩{data.autoPipeline.estKrw.toLocaleString()}</div>
+            </div>
+            <div className="rounded border border-purple-200 bg-white p-1.5">
+              <div className="text-[9px] text-purple-700 uppercase">📘 해설 (Drive 학습)</div>
+              <div className="text-base font-bold text-purple-900">${data.driveLearning.ocrEstUsd.toFixed(3)}</div>
+              <div className="text-[9px] text-slate-600">≈ ₩{data.driveLearning.ocrEstKrw.toLocaleString()}</div>
+            </div>
+            <div className={`rounded border p-1.5 ${data.academy?.configured ? 'border-blue-200 bg-blue-50' : 'border-slate-200 bg-slate-50'}`}>
+              <div className="text-[9px] text-purple-700 uppercase">🏫 학원 관리</div>
+              <div className="text-base font-bold text-purple-900">
+                {data.academy?.configured ? `$${data.academy.estUsd.toFixed(3)}` : '— 미연결'}
+              </div>
+              <div className="text-[9px] text-slate-600">
+                {data.academy?.configured ? `≈ ₩${data.academy.estKrw.toLocaleString()}` : 'env: ACADEMY_SUPABASE_URL/KEY'}
+              </div>
             </div>
           </div>
-          <div className="rounded border border-purple-200 bg-white p-1.5">
-            <div className="text-[9px] text-purple-700 uppercase">Drive 학습 OCR (백그라운드)</div>
-            <div className="text-base font-bold text-purple-900">${data.driveLearning.ocrEstUsd.toFixed(3)}</div>
-            <div className="text-[9px] text-slate-600">
-              {data.driveLearning.totalRecords} record (Vision 호출 ~{data.driveLearning.visionCallsEst ?? 0})
-            </div>
-          </div>
-        </div>
+        )}
 
-        {/* 모델별 분포 */}
-        {models.length > 0 && (
+        {/* === 해설 제작 탭 === */}
+        {activeTab === 'solution' && (
+          <>
+            <div className="grid grid-cols-2 gap-1.5">
+              <div className="rounded border border-purple-200 bg-white p-1.5">
+                <div className="text-[9px] text-purple-700 uppercase">자동 파이프라인 (사용자 풀이)</div>
+                <div className="text-base font-bold text-purple-900">${data.autoPipeline.estUsd.toFixed(3)}</div>
+                <div className="text-[9px] text-slate-600">
+                  {data.autoPipeline.totalCalls} 호출
+                  {data.autoPipeline.totalAttempts && data.autoPipeline.totalAttempts > data.autoPipeline.totalCalls
+                    ? ` · 평균 재시도 ${(data.autoPipeline.totalAttempts / data.autoPipeline.totalCalls).toFixed(2)}회`
+                    : ''}
+                </div>
+              </div>
+              <div className="rounded border border-purple-200 bg-white p-1.5">
+                <div className="text-[9px] text-purple-700 uppercase">Drive 학습 OCR (백그라운드)</div>
+                <div className="text-base font-bold text-purple-900">${data.driveLearning.ocrEstUsd.toFixed(3)}</div>
+                <div className="text-[9px] text-slate-600">
+                  {data.driveLearning.totalRecords} record (Vision 호출 ~{data.driveLearning.visionCallsEst ?? 0})
+                </div>
+              </div>
+            </div>
+          </>
+        )}
+
+        {/* === 학원 관리 탭 === */}
+        {activeTab === 'academy' && (
+          <div className="space-y-2">
+            {!data.academy?.configured ? (
+              <div className="rounded border border-amber-300 bg-amber-50 p-2 text-amber-900">
+                <div className="font-semibold">🏫 학원 관리 (academy_manager) 미연결</div>
+                <p className="mt-1 text-[11px]">
+                  Railway Variables 에 다음 두 값 추가하면 학원 관리 비용까지 합산됩니다:
+                </p>
+                <pre className="mt-1 overflow-x-auto rounded bg-white p-1.5 text-[10px] text-slate-800">
+{`ACADEMY_SUPABASE_URL=https://<academy-project>.supabase.co
+ACADEMY_SUPABASE_SERVICE_ROLE_KEY=eyJ...`}
+                </pre>
+                <p className="mt-1 text-[10px] text-amber-700">
+                  학원 관리 Supabase 프로젝트의 Settings → API → service_role key 복사.
+                </p>
+              </div>
+            ) : (
+              <>
+                <div className="rounded border border-blue-200 bg-blue-50/50 p-1.5 text-blue-900">
+                  <div className="text-[10px] font-semibold">🏫 학원 관리 (최근 {data.periodDays}일)</div>
+                  <div className="text-base font-bold">${data.academy.estUsd.toFixed(3)} ≈ ₩{data.academy.estKrw.toLocaleString()}</div>
+                </div>
+                {academyEntries.length > 0 && (
+                  <table className="w-full text-[10px]">
+                    <thead className="bg-blue-50 text-blue-700">
+                      <tr>
+                        <th className="border-b border-blue-200 px-1.5 py-0.5 text-left">기능</th>
+                        <th className="border-b border-blue-200 px-1.5 py-0.5 text-left">모델</th>
+                        <th className="border-b border-blue-200 px-1.5 py-0.5 text-right">건수</th>
+                        <th className="border-b border-blue-200 px-1.5 py-0.5 text-right">단가</th>
+                        <th className="border-b border-blue-200 px-1.5 py-0.5 text-right">비용</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {academyEntries
+                        .sort((a, b) => b[1].estUsd - a[1].estUsd)
+                        .map(([cat, c]) => (
+                          <tr key={cat} className="hover:bg-blue-50/30">
+                            <td className="border-b border-blue-100 px-1.5 py-0.5">{cat}</td>
+                            <td className="border-b border-blue-100 px-1.5 py-0.5 font-mono text-[9px] text-slate-600">{c.model}</td>
+                            <td className="border-b border-blue-100 px-1.5 py-0.5 text-right">{c.rows}</td>
+                            <td className="border-b border-blue-100 px-1.5 py-0.5 text-right text-slate-500">${c.perRowUsd.toFixed(3)}</td>
+                            <td className="border-b border-blue-100 px-1.5 py-0.5 text-right font-semibold">${c.estUsd.toFixed(3)}</td>
+                          </tr>
+                        ))}
+                    </tbody>
+                  </table>
+                )}
+                <p className="text-[9px] text-blue-700">
+                  ⚠ 학원 관리 추정 단가는 결과 row 수 기반 (호출 로그 테이블 없음).
+                  종합평가 1건≈$0.010 / 입시지식 1건≈$0.005 / AI채점 1건≈$0.30 (평균 20문항 기준).
+                </p>
+                {data.academy.error && (
+                  <p className="rounded border border-rose-300 bg-rose-50 p-1 text-[10px] text-rose-800">조회 오류: {data.academy.error}</p>
+                )}
+              </>
+            )}
+          </div>
+        )}
+
+        {/* 모델별 분포 — 해설 탭에서만 */}
+        {activeTab === 'solution' && models.length > 0 && (
           <div>
             <div className="mb-0.5 text-[10px] font-semibold text-purple-800">모델별 비용 (자동 파이프라인)</div>
             <table className="w-full text-[10px]">
@@ -992,8 +1122,8 @@ function CostTrackerCard({
           </div>
         )}
 
-        {/* Drive 일별 추이 */}
-        {Object.keys(data.driveLearning.byDay).length > 0 && (
+        {/* Drive 일별 추이 — 해설 탭 */}
+        {activeTab === 'solution' && Object.keys(data.driveLearning.byDay).length > 0 && (
           <div>
             <div className="mb-0.5 text-[10px] font-semibold text-purple-800">Drive 학습 일별 record 수</div>
             <div className="flex items-end gap-0.5">
