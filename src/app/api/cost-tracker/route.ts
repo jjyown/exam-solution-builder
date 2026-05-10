@@ -127,6 +127,24 @@ function inferUnitCost(model: string | null): number {
 }
 
 export async function GET(req: Request) {
+  try {
+    return await handleCostTracker(req);
+  } catch (e) {
+    // 어떤 단계에서든 throw 가 발생하면 JSON 500 으로 본문에 메시지를 담아 반환.
+    // (빈 본문 500 → 클라이언트가 「Unexpected end of JSON input」 으로 보임)
+    const err = e as Error;
+    return NextResponse.json(
+      {
+        ok: false,
+        error: err?.message || "cost-tracker internal error",
+        stack: process.env.NODE_ENV !== "production" ? err?.stack : undefined,
+      },
+      { status: 500 },
+    );
+  }
+}
+
+async function handleCostTracker(req: Request) {
   const url = new URL(req.url);
   const days = clampInt(url.searchParams.get("days"), 7, 1, 90);
   const sinceDate = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
