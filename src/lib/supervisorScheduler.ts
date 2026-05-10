@@ -60,6 +60,19 @@ let lastSnapshot: SupervisorSnapshot = {
   error: null,
 };
 
+/**
+ * 감독관이 retrospective 결과에서 자동 추출한 「검토 메모」.
+ * 사용자가 별점·피드백을 남기지 않아도, 자주 발생하는 실패 패턴이 다음 호출의
+ * cautionNotes 로 주입돼 같은 실수를 반복하지 않게 한다.
+ *
+ * findRelevantCautions(autoPipelineLog.ts) 가 이 배열을 함께 가져와 프롬프트에 합친다.
+ */
+let autoCautions: string[] = [];
+
+export function getAutoSupervisorCautions(): string[] {
+  return autoCautions;
+}
+
 export function getSupervisorSnapshot(): SupervisorSnapshot {
   // 안전망: instrumentation 미동작 환경 대비 — 첫 호출 시 자동 시작 (idempotent).
   if (!started) {
@@ -103,6 +116,73 @@ function reportToSnapshot(report: RetrospectiveReport): SupervisorSnapshot {
   };
 }
 
+/**
+ * retrospective 의 failureCategories / lowRatedRuns 에서 자동 cautionNote 를 만들어낸다.
+ * 사용자가 별점 안 남겨도, 「최근 N건이 X 사유로 실패」 라는 사실 자체가 학습 메모가 됨.
+ *
+ * - 카테고리별 임계치: count >= 3 일 때만 메모로 채택 (소음 차단)
+ * - 카테고리당 1줄 + 가장 흔한 실제 에러 1건 인용
+ * - 최대 5건으로 제한해 프롬프트 길이 폭증 방지
+ */
+function deriveAutoCautions(report: import("./retrospective").RetrospectiveReport): string[] {
+  const out: string[] = [];
+  const cats = Object.entries(report.failureCategories ?? {})
+    .sort((a, b) => b[1].count - a[1].count)
+    .slice(0, 5);
+  for (const [cat, info] of cats) {
+    if (info.count < 3) continue;
+    const sample = (info.examples?.[0] ?? "").split(":").slice(1).join(":").trim().slice(0, 140);
+    const human = labelForCategory(cat);
+    out.push(
+      `[감독관 자동 메모] 최근 ${report.summary.totalRuns}건 중 ${info.count}건이 「${human}」 사유로 실패함${
+        sample ? ` (예: ${sample})` : ""
+      }. 같은 종류의 오류·누락을 반복하지 마세요.`,
+    );
+    if (out.length >= 5) break;
+  }
+  // 낮은 평점 구체 피드백도 1~2건 같이 — supervisor 가 별점 학습을 보강
+  for (const lr of report.lowRatedRuns.slice(0, 2)) {
+    const fb = (lr.feedback ?? "").trim();
+    if (!fb) continue;
+    out.push(`[감독관] 과거 ★${lr.rating} 평가 피드백: ${fb.slice(0, 200)}`);
+    if (out.length >= 7) break;
+  }
+  return out;
+}
+
+function labelForCategory(cat: string): string {
+  switch (cat) {
+    case "format-mismatch":
+      return "형식 미달 / JSON 파싱 / 평문에 raw LaTeX 노출";
+    case "json-parse-failed":
+      return "JSON 파싱 실패";
+    case "quota-exhausted":
+      return "API 한도 초과";
+    case "timeout":
+      return "타임아웃";
+    case "network":
+      return "네트워크 오류";
+    case "empty-output":
+      return "빈 응답";
+    case "no-detail":
+      return "원인 미상 실패";
+    default:
+      return cat;
+  }
+}
+
+/**
+ * 외부에서 즉시 한 번 감독관을 돌리고 갱신된 스냅샷·자동 메모를 반환한다.
+ * 6시간 주기를 기다리지 않고 변경 직후 학습 결과를 확인하고 싶을 때 사용.
+ */
+export async function runSupervisorNow(): Promise<{
+  snapshot: SupervisorSnapshot;
+  autoCautions: string[];
+}> {
+  await runOnce();
+  return { snapshot: lastSnapshot, autoCautions };
+}
+
 async function runOnce(): Promise<void> {
   if (inProgress) return;
   inProgress = true;
@@ -110,6 +190,12 @@ async function runOnce(): Promise<void> {
     const { generateRetrospective } = await import("./retrospective");
     const report = await generateRetrospective({ days: 30, maxRows: 1000 });
     lastSnapshot = reportToSnapshot(report);
+    autoCautions = deriveAutoCautions(report);
+    if (autoCautions.length > 0) {
+      console.warn(
+        `[supervisor] 자동 메모 ${autoCautions.length}건 갱신 — 다음 풀이 호출의 cautionNotes 에 주입됨`,
+      );
+    }
     if (lastSnapshot.highPrioritySuggestions.length > 0) {
       // Railway 로그·관제에 잡히도록 명시적 warn
       console.warn(

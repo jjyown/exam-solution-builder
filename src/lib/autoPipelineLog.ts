@@ -94,6 +94,11 @@ export type RunHistoryRow = {
   attempts: number;
   user_rating: number | null;
   reviewed_at: string | null;
+  /** UI 「복원」 버튼이 결과 패널까지 되살리기 위한 컬럼 — 새로고침 후에도 보이게 함 */
+  parsed?: unknown;
+  trace?: unknown;
+  errors?: string[] | null;
+  manual_review_checklist?: string[] | null;
 };
 
 export type ListResult =
@@ -110,7 +115,7 @@ export async function listRecentRunsWithStatus(limit = 30): Promise<ListResult> 
   const { data, error } = await client
     .from(TABLE)
     .select(
-      "id, created_at, exam_name, question_no, question_text, model, ok, attempts, user_rating, reviewed_at",
+      "id, created_at, exam_name, question_no, question_text, model, ok, attempts, user_rating, reviewed_at, parsed, trace, errors, manual_review_checklist",
     )
     .order("created_at", { ascending: false })
     .limit(limit);
@@ -148,11 +153,21 @@ export async function findRelevantCautions(
   questionText: string,
   limit = 3,
 ): Promise<string[]> {
+  // 감독관(supervisor)이 retrospective 결과에서 자동 추출한 메모를 항상 먼저 포함.
+  // 사용자가 별점 안 남겨도 이게 다음 호출에 「같은 실수 반복 금지」 가이드로 작동.
+  let supervisorNotes: string[] = [];
+  try {
+    const sup = await import("./supervisorScheduler");
+    supervisorNotes = sup.getAutoSupervisorCautions().slice(0, 3);
+  } catch {
+    /* best-effort */
+  }
+
   const client = getSupabaseServiceClient();
-  if (!client) return [];
+  if (!client) return supervisorNotes;
 
   const tokens = extractMatchingTokens(questionText);
-  if (tokens.length === 0) return [];
+  if (tokens.length === 0) return supervisorNotes;
 
   // PostgREST or 절: question_text.ilike.%token1%,question_text.ilike.%token2%,...
   // 너무 흔한 한 글자 토큰은 제외해 노이즈 차단
@@ -173,11 +188,11 @@ export async function findRelevantCautions(
     .order("created_at", { ascending: false })
     .limit(Math.max(limit * 3, 6));
 
-  if (error || !data) return [];
+  if (error || !data) return supervisorNotes;
 
-  // 같은 피드백 중복 제거 후 limit 만큼만
+  // 같은 피드백 중복 제거 후 limit 만큼만 — 감독관 자동 메모와 합쳐 반환
   const seen = new Set<string>();
-  const out: string[] = [];
+  const userNotes: string[] = [];
   for (const row of data as Array<{
     question_text: string | null;
     question_no: string | null;
@@ -190,10 +205,10 @@ export async function findRelevantCautions(
     if (seen.has(key)) continue;
     seen.add(key);
     const qno = row.question_no ? `(과거 ${row.question_no}번) ` : "";
-    out.push(`${qno}${fb.slice(0, 240)}`);
-    if (out.length >= limit) break;
+    userNotes.push(`${qno}${fb.slice(0, 240)}`);
+    if (userNotes.length >= limit) break;
   }
-  return out;
+  return [...supervisorNotes, ...userNotes];
 }
 
 /** 한글·영문·수식 토큰 추출 — 2글자 이상, 흔한 어미·조사 제외. */

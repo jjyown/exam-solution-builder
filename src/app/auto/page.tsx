@@ -97,6 +97,11 @@ type RunHistoryRow = {
   attempts: number;
   user_rating: number | null;
   reviewed_at: string | null;
+  // 새로고침 후 「복원」 클릭 시 결과 패널까지 되살리기 위한 컬럼
+  parsed?: ParsedExplanation | null;
+  trace?: TraceEvent[] | null;
+  errors?: string[] | null;
+  manual_review_checklist?: string[] | null;
 };
 
 type ExtractedQuestionPreview = {
@@ -198,8 +203,15 @@ export default function AutoPipelinePage() {
       integrityIssues?: { missing: number; duplicate: number; unpaired: number };
       error: string | null;
     } | null;
+    /**
+     * 감독관이 retrospective 결과에서 자동 추출한 「검토 메모」.
+     * 다음 풀이 호출의 cautionNotes 에 자동 주입됨 — 이 패널로 가시화.
+     */
+    supervisor_cautions: string[];
   };
   const [health, setHealth] = useState<HealthSnapshot | null>(null);
+  const [cautionsOpen, setCautionsOpen] = useState(false);
+  const [supervisorRunning, setSupervisorRunning] = useState(false);
 
   // 분석 현황 탭 (시중교재/시험지 원안 진행 상태)
   const [analysisStatusOpen, setAnalysisStatusOpen] = useState(false);
@@ -245,6 +257,9 @@ export default function AutoPipelinePage() {
           kb_size: data.kb_size ?? 0,
           drive_sync: data.drive_sync ?? null,
           supervisor: data.supervisor ?? null,
+          supervisor_cautions: Array.isArray(data.supervisor_cautions)
+            ? data.supervisor_cautions
+            : [],
         });
       }
     } catch {
@@ -258,6 +273,33 @@ export default function AutoPipelinePage() {
     const t = setInterval(() => void fetchHealth(), 30_000);
     return () => clearInterval(t);
   }, [fetchHealth]);
+
+  /** 감독관 즉시 실행 — 6시간 주기 안 기다리고 바로 자동 메모 갱신 */
+  const runSupervisorNow = useCallback(async () => {
+    setSupervisorRunning(true);
+    try {
+      const res = await fetch('/api/retrospective', { method: 'POST' });
+      const data = await res.json();
+      if (data?.ok) {
+        setHealth((prev) =>
+          prev
+            ? {
+                ...prev,
+                supervisor: data.snapshot ?? prev.supervisor,
+                supervisor_cautions: Array.isArray(data.autoCautions)
+                  ? data.autoCautions
+                  : prev.supervisor_cautions,
+              }
+            : prev,
+        );
+        setCautionsOpen(true);
+      }
+    } catch {
+      /* 무시 — 다음 fetchHealth tick 에 결과 반영 */
+    } finally {
+      setSupervisorRunning(false);
+    }
+  }, []);
 
   const syncDriveAnalysis = useCallback(async () => {
     setAnalysisSyncing(true);
@@ -660,6 +702,90 @@ export default function AutoPipelinePage() {
     await run();
   }
 
+  /**
+   * 「다음 N개 처리」 — 25문항 중 앞 10개를 처리하고 나서, 사용자가 결과를 검토한 뒤
+   * 11~20 / 21~25 같은 다음 배치를 이어서 처리할 때 호출.
+   * 서버 MAX_QUESTIONS_PER_REQUEST(=10) 는 그대로 두고, UI 가 batch 를 누적한다.
+   */
+  async function runNextBatch(nextNumbers: number[]) {
+    if (!uploadedFile) return; // 텍스트 입력 모드에는 배치 개념 없음
+    if (nextNumbers.length === 0) return;
+    setRunning(true);
+    const t0 = performance.now();
+    const previousRuns = result?.runs ?? [];
+    const previousExtracted = result?.extracted;
+
+    try {
+      const fileData = await convertFileToBase64(uploadedFile);
+      const requestBody = {
+        examName: examName || undefined,
+        questionNo: questionNo || undefined,
+        model,
+        profile,
+        topK,
+        maxRetries,
+        fileData,
+        fileName: uploadedFile.name,
+        fileType: uploadedFile.type,
+        explanationMode: 'partial' as const,
+        selectedQuestions: nextNumbers,
+      };
+      const res = await fetch('/api/auto-pipeline', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(requestBody),
+      });
+      const data = (await res.json()) as PipelineResponse;
+      // 이전 batch + 새 batch 결과 합산
+      const mergedRuns = [...previousRuns, ...(data.runs ?? [])];
+      const mergedSelected = [
+        ...(previousExtracted?.selectedNumbers ?? []),
+        ...(data.extracted?.selectedNumbers ?? []),
+      ];
+      setResult({
+        ...data,
+        runs: mergedRuns,
+        partialFailures: mergedRuns.filter((r) => !r.parsed).length,
+        extracted: data.extracted
+          ? {
+              totalQuestions: data.extracted.totalQuestions,
+              selectedNumbers: mergedSelected,
+              source: data.extracted.source,
+            }
+          : previousExtracted,
+        ok: mergedRuns.every((r) => !!r.parsed),
+      });
+      setActiveIdx(previousRuns.length); // 새 batch 첫 문항으로 점프
+    } catch (e) {
+      const msg = (e as Error).message;
+      // 실패해도 이전 batch 보존
+      setResult((prev) =>
+        prev
+          ? {
+              ...prev,
+              runs: [
+                ...prev.runs,
+                {
+                  questionNo: '?',
+                  questionText: `(다음 batch 호출 실패: ${nextNumbers.join(', ')})`,
+                  parsed: null,
+                  attempts: 0,
+                  errors: [msg],
+                  trace: [],
+                  manualReviewChecklist: [`[batch 호출 오류] ${msg}`],
+                  runId: null,
+                },
+              ],
+            }
+          : prev,
+      );
+    } finally {
+      setElapsed(Math.round(performance.now() - t0));
+      setRunning(false);
+      loadHistory();
+    }
+  }
+
   // 활성 문항 (다중 모드일 땐 탭 선택, 단일 모드는 runs[0])
   const activeRun = result?.runs?.[activeIdx] ?? null;
 
@@ -866,6 +992,50 @@ export default function AutoPipelinePage() {
             결과는 Supabase에 기록되며 사용자 피드백이 다음 호출에 반영됩니다.
           </p>
           <HealthBadges health={health} />
+          {/*
+            감독관 자동 메모 — 6시간마다 retrospective 결과에서 추출되며 다음 풀이 호출의
+            cautionNotes 에 자동 주입된다. 사용자가 별점 안 남겨도 자동 학습.
+            아래 「최신 메모 N건」 칩 클릭 시 패널 열고, 「지금 갱신」 버튼으로 즉시 갱신.
+          */}
+          <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[11px]">
+            <button
+              type="button"
+              onClick={() => setCautionsOpen((v) => !v)}
+              className={`rounded border px-1.5 py-0.5 ${
+                (health?.supervisor_cautions?.length ?? 0) > 0
+                  ? 'border-indigo-400 bg-indigo-50 text-indigo-900 hover:bg-indigo-100'
+                  : 'border-slate-300 bg-white text-slate-700 hover:bg-slate-50'
+              }`}
+              title="감독관이 retrospective 결과에서 자동 추출한 「검토 메모」. 다음 풀이 호출의 프롬프트에 자동 주입돼 같은 실수를 반복하지 않게 함."
+            >
+              📋 감독관 메모 {health?.supervisor_cautions?.length ?? 0}건 {cautionsOpen ? '닫기' : '열기'}
+            </button>
+            <button
+              type="button"
+              onClick={runSupervisorNow}
+              disabled={supervisorRunning}
+              className="rounded border border-indigo-700 bg-indigo-700 px-1.5 py-0.5 font-semibold text-white hover:bg-indigo-800 disabled:cursor-not-allowed disabled:opacity-50"
+              title="6시간 주기를 기다리지 않고 지금 감독관을 한 번 돌려 자동 메모를 갱신. V6 같은 변경 직후 효과 확인용."
+            >
+              {supervisorRunning ? '갱신 중…' : '지금 갱신'}
+            </button>
+          </div>
+          {cautionsOpen && (
+            <div className="mt-2 rounded-lg border border-indigo-200 bg-indigo-50 p-2 text-[11px] text-indigo-950">
+              {(health?.supervisor_cautions?.length ?? 0) === 0 ? (
+                <p className="text-slate-700">
+                  자동 메모 없음 — 최근 30일에 임계치(같은 사유 ≥3건) 도달한 실패 패턴이 없거나, 감독관이
+                  아직 한 번도 안 돌았습니다. 「지금 갱신」 클릭 시 즉시 1회 실행.
+                </p>
+              ) : (
+                <ul className="list-disc space-y-1 pl-4">
+                  {(health?.supervisor_cautions ?? []).map((c, i) => (
+                    <li key={i}>{c}</li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
         </div>
         <div className="flex items-center gap-2">
           <button
@@ -1017,7 +1187,36 @@ export default function AutoPipelinePage() {
       )}
 
       {historyOpen && (
-        <HistoryPanel rows={history} onPick={(row) => { setQuestionText(row.question_text); setExamName(row.exam_name ?? ''); setQuestionNo(row.question_no ?? ''); }} />
+        <HistoryPanel
+          rows={history}
+          onPick={(row) => {
+            setQuestionText(row.question_text);
+            setExamName(row.exam_name ?? '');
+            setQuestionNo(row.question_no ?? '');
+            // 결과 패널까지 복원 — Supabase에 저장된 parsed/trace/errors 를 그대로 재구성
+            const restoredRun: RunRow = {
+              questionNo: row.question_no ?? '?',
+              questionText: row.question_text,
+              parsed: row.parsed ?? null,
+              attempts: row.attempts,
+              errors: row.errors ?? [],
+              trace: row.trace ?? [],
+              manualReviewChecklist: row.manual_review_checklist ?? [],
+              runId: row.id,
+            };
+            setResult({
+              ok: row.ok,
+              parsed: restoredRun.parsed,
+              attempts: restoredRun.attempts,
+              errors: restoredRun.errors,
+              trace: restoredRun.trace,
+              manualReviewChecklist: restoredRun.manualReviewChecklist,
+              runId: restoredRun.runId,
+              runs: [restoredRun],
+            });
+            setActiveIdx(0);
+          }}
+        />
       )}
 
       <section className="grid grid-cols-1 gap-4 lg:grid-cols-[1fr_320px]">
@@ -1459,6 +1658,9 @@ export default function AutoPipelinePage() {
           onDownloadRunsCsv={downloadRunsCsv}
           onDownloadRunsJson={downloadRunsJson}
           driveUploadInfo={driveUploadInfo}
+          canRunNextBatch={!!uploadedFile}
+          running={running}
+          onRunNextBatch={runNextBatch}
         />
       )}
     </div>
@@ -1486,6 +1688,10 @@ function ResultsSection(props: {
   onDownloadRunsCsv: () => void;
   onDownloadRunsJson: () => void;
   driveUploadInfo: { link: string | null; fileName: string; error: string | null } | null;
+  /** 파일 업로드 모드일 때만 다음 batch 호출 가능 */
+  canRunNextBatch: boolean;
+  running: boolean;
+  onRunNextBatch: (numbers: number[]) => Promise<void>;
 }) {
   const { result, activeIdx, onActiveIdx } = props;
   const runs = result.runs ?? [];
@@ -1632,6 +1838,43 @@ function ResultsSection(props: {
               </button>
             ))}
           </div>
+          {/*
+            다음 batch 안내·버튼 — 추출된 totalQuestions > 처리된 selectedNumbers 일 때 노출.
+            서버 MAX_QUESTIONS_PER_REQUEST=10 을 그대로 두고 UI 가 10개씩 누적 호출.
+            사용자 답: 「10개 결과 확인 후, 좋으면 계속/이상하면 피드백 후 중단」.
+          */}
+          {result.extracted &&
+            result.extracted.totalQuestions > (result.extracted.selectedNumbers?.length ?? 0) &&
+            props.canRunNextBatch &&
+            (() => {
+              const total = result.extracted!.totalQuestions;
+              const done = new Set(result.extracted!.selectedNumbers ?? []);
+              const remaining = Array.from({ length: total }, (_, i) => i + 1).filter(
+                (n) => !done.has(n),
+              );
+              const next = remaining.slice(0, 10);
+              return (
+                <div className="mt-3 flex flex-wrap items-center gap-2 rounded-md border border-amber-300 bg-amber-50 p-2 text-[11px] text-amber-900">
+                  <span className="font-semibold">
+                    📦 전체 {total}문항 중 {done.size}개 처리됨 · 남은 {remaining.length}개
+                  </span>
+                  <span className="text-amber-700">
+                    결과를 검토 후, 좋으면 다음 {next.length}개를 이어서 처리하세요. 이상하면
+                    별점·피드백을 남기고 멈추면 됩니다.
+                  </span>
+                  <button
+                    onClick={() => props.onRunNextBatch(next)}
+                    disabled={props.running || next.length === 0}
+                    className="ml-auto rounded-md border border-amber-700 bg-amber-700 px-3 py-1 font-semibold text-white hover:bg-amber-800 disabled:cursor-not-allowed disabled:opacity-50"
+                    title={`다음 ${next.length}개 (${next[0]}~${next[next.length - 1]}번) 이어서 처리`}
+                  >
+                    {props.running
+                      ? '처리 중…'
+                      : `▶ 다음 ${next.length}개 처리 (${next[0]}~${next[next.length - 1]}번)`}
+                  </button>
+                </div>
+              );
+            })()}
         </div>
       )}
 
