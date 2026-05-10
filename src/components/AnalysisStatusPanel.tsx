@@ -169,6 +169,47 @@ export function AnalysisStatusPanel() {
   const [refineBusy, setRefineBusy] = useState<null | 'dry' | 'apply'>(null);
   const [refineExpanded, setRefineExpanded] = useState(false);
 
+  // problem_no backfill — 기존 record content 에서 번호 추출 (비용 0)
+  type BackfillResp = {
+    ok: boolean;
+    dryRun: boolean;
+    result: {
+      scanned: number;
+      alreadyHadProblemNo: number;
+      extracted: number;
+      applied: number;
+      failures: string[];
+      samples: Array<{ id: string; source: string; problemNo: number; snippet: string }>;
+    };
+  };
+  const [backfillResult, setBackfillResult] = useState<BackfillResp | null>(null);
+  const [backfillBusy, setBackfillBusy] = useState<null | 'dry' | 'apply'>(null);
+
+  const runBackfill = useCallback(async (apply: boolean) => {
+    setBackfillBusy(apply ? 'apply' : 'dry');
+    try {
+      const r = await fetch('/api/drive/analysis/backfill-pairing', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ dryRun: !apply, maxApply: 5000 }),
+      });
+      const json: BackfillResp = await r.json();
+      setBackfillResult(json);
+      // 적용 후 패널·refine 상태 즉시 갱신 — 같은 이벤트로 broadcast (분석자료 sync 와 동일 동선)
+      if (apply) {
+        window.dispatchEvent(new Event('analysis-sync-completed'));
+      }
+    } catch (e) {
+      setBackfillResult({
+        ok: false,
+        dryRun: !apply,
+        result: { scanned: 0, alreadyHadProblemNo: 0, extracted: 0, applied: 0, failures: [(e as Error).message], samples: [] },
+      });
+    } finally {
+      setBackfillBusy(null);
+    }
+  }, []);
+
   // 비용 추적 — 최근 N일 호출 수 + 추정 USD/KRW
   const [costData, setCostData] = useState<CostTrackerResponse | null>(null);
   const [costDays, setCostDays] = useState(7);
@@ -511,6 +552,101 @@ export function AnalysisStatusPanel() {
               </tbody>
             </table>
           </div>
+        </section>
+      )}
+
+      {/* ─── 번호 Backfill ─────────────────────────────────────────────
+          기존 record 의 content 에서 problem_no 사후 추출 — 재OCR 없이 비용 0.
+          시중교재 패턴 위주로 학습됐던 시기에 problem_no=null 로 저장된
+          시험지 원안 record 들을 새 정규식 패턴으로 backfill 한다. */}
+      {integrity && integrity.totalRecords > 0 && integrity.seriesStats.some((s) => s.withProblemNo === 0 && s.totalRecords > 0) && (
+        <section className="mb-5 rounded-lg border border-emerald-300 bg-emerald-50/50 p-3">
+          <div>
+            <h3 className="font-semibold text-emerald-900">📌 번호 Backfill (재OCR 없이 problem_no 채우기)</h3>
+            <p className="mt-0.5 text-[11px] text-emerald-800">
+              기존 학습된 record 중 일부가 문항 번호 인식이 안 됐습니다 (이전 정규식 패턴 부족 + Drive 캐시 hit).
+              {' '}이 버튼은 record content 에서 「[문항 N]」 「N.」 「N번」 패턴을 직접 찾아 problem_no 만 update 합니다.
+              {' '}<b>비용 0</b> — Mathpix/Gemini 호출 없음.
+            </p>
+          </div>
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <button
+              onClick={() => runBackfill(false)}
+              disabled={backfillBusy !== null}
+              className="rounded-md border border-emerald-400 bg-white px-3 py-1 text-[11px] font-semibold text-emerald-800 hover:bg-emerald-100 disabled:opacity-50"
+              title="실제 update 안 함 — 추출 결과만 미리보기"
+            >
+              {backfillBusy === 'dry' ? '미리보기 중…' : '1) 미리보기 (dry-run)'}
+            </button>
+            <button
+              onClick={() => {
+                if (!backfillResult?.result.extracted) {
+                  alert('먼저 미리보기를 실행해 추출 가능 record 수를 확인하세요.');
+                  return;
+                }
+                if (confirm(`최대 5000건의 problem_no 를 update 합니다. 진행할까요?`)) {
+                  void runBackfill(true);
+                }
+              }}
+              disabled={backfillBusy !== null || !backfillResult?.result.extracted}
+              className="rounded-md bg-emerald-700 px-3 py-1 text-[11px] font-semibold text-white hover:bg-emerald-800 disabled:opacity-50"
+              title={backfillResult?.result.extracted ? '미리보기 결과로 실제 적용' : '먼저 미리보기 실행'}
+            >
+              {backfillBusy === 'apply' ? '적용 중…' : '2) 적용 (Supabase update)'}
+            </button>
+            <span className="text-[10px] text-emerald-700">한 번에 최대 5000건 — 대용량 안전</span>
+          </div>
+
+          {backfillResult && (
+            <div className="mt-2 rounded border border-emerald-200 bg-white p-2 text-[11px]">
+              <div className="font-semibold text-slate-800">
+                {backfillResult.dryRun ? '미리보기 결과' : '적용 결과'}
+              </div>
+              <div className="mt-1 grid grid-cols-2 gap-1.5 md:grid-cols-4">
+                <Stat label="스캔" value={backfillResult.result.scanned} />
+                <Stat label="이미 보유" value={backfillResult.result.alreadyHadProblemNo} />
+                <Stat label="새로 추출" value={backfillResult.result.extracted} />
+                <Stat label="적용" value={backfillResult.result.applied} warn={backfillResult.result.applied === 0 && !backfillResult.dryRun} />
+              </div>
+              {backfillResult.result.failures.length > 0 && (
+                <details className="mt-2">
+                  <summary className="cursor-pointer text-[10px] text-rose-700">실패 ({backfillResult.result.failures.length})</summary>
+                  <ul className="mt-1 max-h-32 space-y-0.5 overflow-y-auto pl-3 text-[10px] text-rose-800">
+                    {backfillResult.result.failures.slice(0, 10).map((f, i) => (
+                      <li key={i} className="font-mono">· {f}</li>
+                    ))}
+                  </ul>
+                </details>
+              )}
+              {backfillResult.result.samples.length > 0 && (
+                <details className="mt-2" open>
+                  <summary className="cursor-pointer text-[10px] text-emerald-700">
+                    추출 sample ({backfillResult.result.samples.length})
+                  </summary>
+                  <div className="mt-1 max-h-48 overflow-y-auto rounded border border-slate-200">
+                    <table className="w-full text-[10px]">
+                      <thead className="bg-slate-50 text-slate-600">
+                        <tr>
+                          <th className="border-b px-1.5 py-1 text-left">번호</th>
+                          <th className="border-b px-1.5 py-1 text-left">출처</th>
+                          <th className="border-b px-1.5 py-1 text-left">본문 시작</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {backfillResult.result.samples.map((s, i) => (
+                          <tr key={i} className="hover:bg-emerald-50/50">
+                            <td className="border-b border-slate-100 px-1.5 py-0.5 text-right font-bold text-emerald-700">{s.problemNo}</td>
+                            <td className="border-b border-slate-100 px-1.5 py-0.5 font-mono">{truncate(s.source.split('/').pop() || s.source, 26)}</td>
+                            <td className="border-b border-slate-100 px-1.5 py-0.5 text-slate-700">{truncate(s.snippet, 50)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </details>
+              )}
+            </div>
+          )}
         </section>
       )}
 
