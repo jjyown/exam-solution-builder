@@ -123,6 +123,50 @@ async function tryReadQuickSummary(dir: string): Promise<string | null> {
   }
 }
 
+// 같은 시험지의 옛 산출물(`<examName>_해설_YYYYMMDD_HHMMSS.docx`)을
+// `해설지 최종본/_old/` 로 이동해 최종본 폴더에는 가장 최근 1개만 표면에 두도록 한다.
+// 이름 규칙은 buildExamExplanationDocxBuffer 와 동일.
+async function archiveOldFinalDocx(outDir: string, currentDocxFileName: string): Promise<number> {
+  const m = currentDocxFileName.match(/^(.*_해설_)\d{8}_\d{6}\.docx$/);
+  if (!m?.[1]) return 0;
+  const prefix = m[1];
+  const escaped = prefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const dupRe = new RegExp(`^${escaped}\\d{8}_\\d{6}\\.docx$`);
+  let entries;
+  try {
+    entries = await fs.readdir(outDir, { withFileTypes: true });
+  } catch {
+    return 0;
+  }
+  const archiveDir = path.join(outDir, "_old");
+  let mkdirDone = false;
+  let moved = 0;
+  for (const e of entries) {
+    if (!e.isFile()) continue;
+    if (e.name === currentDocxFileName) continue;
+    if (!dupRe.test(e.name)) continue;
+    if (!mkdirDone) {
+      await fs.mkdir(archiveDir, { recursive: true });
+      mkdirDone = true;
+    }
+    const src = path.join(outDir, e.name);
+    const dst = path.join(archiveDir, e.name);
+    try {
+      await fs.rename(src, dst);
+      moved += 1;
+    } catch {
+      const altDst = path.join(archiveDir, `${Date.now()}_${e.name}`);
+      try {
+        await fs.rename(src, altDst);
+        moved += 1;
+      } catch {
+        // 정리 실패는 본 작업을 막지 않음
+      }
+    }
+  }
+  return moved;
+}
+
 async function main() {
   const { buildExamExplanationDocxBuffer } = await import("./src/lib/examExplanationDocx");
   const args = parseArgs(process.argv);
@@ -220,6 +264,11 @@ async function main() {
   await fs.writeFile(docxPath, buffer);
 
   console.log(`저장 완료: ${docxPath}`);
+
+  const archivedCount = await archiveOldFinalDocx(outDir, docxFileName);
+  if (archivedCount > 0) {
+    console.log(`[정리] 같은 시험지의 옛 산출물 ${archivedCount}개를 _old/ 로 이동했습니다.`);
+  }
 }
 
 main().catch((e) => {
