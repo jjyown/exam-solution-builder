@@ -21,6 +21,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import ReactCrop, { type Crop, type PixelCrop } from "react-image-crop";
 import "react-image-crop/dist/ReactCrop.css";
+import {
+  readSharedOptions,
+  writeSharedOptions,
+  SHARED_OPTIONS_DEFAULT,
+} from "@/lib/explanationOptions";
 
 type ParsedExplanation = {
   answer: string;
@@ -82,7 +87,13 @@ export default function CropPage() {
   const [crop, setCrop] = useState<Crop>();
   const imgRef = useRef<HTMLImageElement | null>(null);
   const [crops, setCrops] = useState<CropEntry[]>([]);
-  const [model, setModel] = useState<"gemini" | "openai">("openai"); // 비용 절감 — 기본 OpenAI
+  // /auto 와 동일 옵션 — 모델·profile·topK·maxRetries 까지 사용자가 동기화된 상태로 사용.
+  const [model, setModel] = useState<"gemini" | "openai">(SHARED_OPTIONS_DEFAULT.model);
+  const [profile, setProfile] = useState<"auto" | "easy" | "balanced" | "killer">(
+    SHARED_OPTIONS_DEFAULT.profile,
+  );
+  const [topK, setTopK] = useState<number>(SHARED_OPTIONS_DEFAULT.topK);
+  const [maxRetries, setMaxRetries] = useState<number>(SHARED_OPTIONS_DEFAULT.maxRetries);
   const pageContainerRef = useRef<HTMLDivElement | null>(null);
   /** 이미지 로드/리렌더 시 overlay 위치 다시 계산하도록 강제 — img 의 display 크기가 바뀌었을 때 */
   const [overlayTick, setOverlayTick] = useState(0);
@@ -93,6 +104,72 @@ export default function CropPage() {
       .filter((n) => Number.isFinite(n));
     return (used.length > 0 ? Math.max(...used) : 0) + 1;
   })();
+
+  // /inbox 에서 「크롭에서 이어서」 로 들어온 경우 — 시험명 prefill (마운트 시 1회)
+  useEffect(() => {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const fromQuery = (params.get("examName") || "").trim();
+      if (fromQuery) {
+        setExamName((prev) => (prev.trim() ? prev : fromQuery));
+        // URL 깔끔히 — 이후 새로고침에 다시 prefill 되지 않도록
+        const url = new URL(window.location.href);
+        url.searchParams.delete("examName");
+        window.history.replaceState({}, "", url.toString());
+      }
+    } catch {
+      /* best-effort */
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // 마운트 시 공유 옵션 1회 적용 — /auto 에서 가장 최근에 설정한 옵션을 그대로 사용.
+  useEffect(() => {
+    const opts = readSharedOptions();
+    if (opts) {
+      setModel(opts.model);
+      setProfile(opts.profile);
+      setTopK(opts.topK);
+      setMaxRetries(opts.maxRetries);
+    }
+    // /auto 또는 다른 탭에서 옵션이 바뀌면 즉시 반영
+    const onCustom = (e: Event) => {
+      const detail = (e as CustomEvent).detail as ReturnType<typeof readSharedOptions>;
+      if (!detail) return;
+      setModel(detail.model);
+      setProfile(detail.profile);
+      setTopK(detail.topK);
+      setMaxRetries(detail.maxRetries);
+    };
+    const onStorage = (e: StorageEvent) => {
+      if (e.key !== "highroad:explanation-options:v1") return;
+      const opts = readSharedOptions();
+      if (!opts) return;
+      setModel(opts.model);
+      setProfile(opts.profile);
+      setTopK(opts.topK);
+      setMaxRetries(opts.maxRetries);
+    };
+    window.addEventListener("highroad:options-changed", onCustom);
+    window.addEventListener("storage", onStorage);
+    return () => {
+      window.removeEventListener("highroad:options-changed", onCustom);
+      window.removeEventListener("storage", onStorage);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // 사용자가 옵션 바를 만질 때마다 공유 옵션에 즉시 반영(throttle 없음 — 옵션은 가벼움).
+  useEffect(() => {
+    writeSharedOptions({
+      model,
+      profile,
+      topK,
+      maxRetries,
+      // /crop 자체에는 explanationMode 가 없으므로 default 'full' 유지(있을 시 보존).
+      explanationMode: readSharedOptions()?.explanationMode ?? "full",
+    });
+  }, [model, profile, topK, maxRetries]);
 
   // 윈도우 리사이즈 → overlay 위치 재계산
   useEffect(() => {
@@ -339,12 +416,15 @@ export default function CropPage() {
           examName: examName || undefined,
           questionNo: entry.questionNo,
           model,
+          // /auto 와 동일 옵션 — 사용자가 「크롭만 다르고 나머지 동일」 동선을 가질 수 있게.
+          profile: profile === "auto" ? undefined : profile,
+          topK,
+          maxRetries,
           fileData: base64,
           fileName: `crop_${entry.questionNo}.png`,
           fileType: entry.imageMimeType,
+          // 크롭은 본질적으로 단일 문항 — explanationMode 는 의미 없음(서버는 단일 모드로 처리).
           explanationMode: "full",
-          topK: 3,
-          maxRetries: 1,
         }),
       });
       const data = await res.json();
@@ -457,6 +537,53 @@ export default function CropPage() {
             </select>
           </label>
         </div>
+
+        {/* 자동 해설 페이지와 공유되는 옵션 — 한쪽에서 바꾸면 다른쪽에도 즉시 적용 */}
+        <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-3">
+          <label className="block text-xs font-semibold text-slate-700">
+            난이도 라우팅 (profile)
+            <select
+              value={profile}
+              onChange={(e) =>
+                setProfile(e.target.value as "auto" | "easy" | "balanced" | "killer")
+              }
+              className="mt-1 w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm font-normal"
+              title="문항 난이도에 따라 모델·프롬프트 깊이를 다르게 — '자동' 권장"
+            >
+              <option value="auto">자동 (난이도 추정)</option>
+              <option value="easy">쉬움 (저비용)</option>
+              <option value="balanced">중간</option>
+              <option value="killer">킬러 (심층)</option>
+            </select>
+          </label>
+          <label className="block text-xs font-semibold text-slate-700">
+            참고 예시 수 (topK)
+            <input
+              type="number"
+              min={0}
+              max={10}
+              value={topK}
+              onChange={(e) => setTopK(Math.max(0, Math.min(10, Number(e.target.value) || 0)))}
+              className="mt-1 w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm font-normal"
+              title="RAG 컨텍스트로 넣을 유사 문제·해설 개수 (3 권장, 0 이면 RAG 미사용)"
+            />
+          </label>
+          <label className="block text-xs font-semibold text-slate-700">
+            재시도 한도 (maxRetries)
+            <input
+              type="number"
+              min={0}
+              max={5}
+              value={maxRetries}
+              onChange={(e) => setMaxRetries(Math.max(0, Math.min(5, Number(e.target.value) || 0)))}
+              className="mt-1 w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm font-normal"
+              title="검증 실패 시 자동 재시도 횟수 (2 권장, 한도 보호 시 0~1)"
+            />
+          </label>
+        </div>
+        <p className="mt-1 text-[11px] text-slate-500">
+          ↑ 「해설 제작」 탭과 자동 동기화되는 옵션입니다 — 한 곳에서 바꾸면 양쪽에 즉시 반영됩니다.
+        </p>
         {/* Google Drive 「시험지」 폴더 — 로컬 업로드 위에 노출 */}
         <div className="mt-3">
           <div className="flex items-center justify-between gap-2">
@@ -706,6 +833,16 @@ export default function CropPage() {
                       >
                         삭제
                       </button>
+                      {/* runId 가 있는(=Supabase 영속화 성공한) 결과는 자동 페이지 풍부 검수 UI 로 이동 가능 */}
+                      {c.parsed && c.runId && (
+                        <a
+                          href={`/auto?restoreRun=${encodeURIComponent(c.runId)}`}
+                          className="rounded border border-slate-400 bg-white px-2 py-1 text-[11px] font-semibold text-slate-700 hover:bg-slate-50"
+                          title="자동 해설 페이지에서 풍부한 검수 패널·DOCX·재시도로 이어서 작업"
+                        >
+                          ↗ 자동에서 열기
+                        </a>
+                      )}
                       {c.status === "done" && c.parsed && (
                         <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-900">
                           ✓ 풀이 완료

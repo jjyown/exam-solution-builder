@@ -14,10 +14,81 @@
  *      Drive 작업완료 자동 저장 · 분석용 자료 KB 학습
  * ────────────────────────────────────────────────────────────────────────────
  */
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { InlineMath, BlockMath } from 'react-katex';
 import 'katex/dist/katex.min.css';
 import { AnalysisStatusPanel } from '@/components/AnalysisStatusPanel';
+import { readSharedOptions, writeSharedOptions } from '@/lib/explanationOptions';
+
+// ── 새로고침 복구 (Refresh-resume) ────────────────────────────────────────
+// 사용자가 실행 중에 새로고침/탭을 닫아도 작업을 이어서 추적하고,
+// 완료된 결과는 Supabase 이력에서 자동으로 복원하기 위한 localStorage 영속화.
+//
+// 두 종류의 키를 둔다:
+//   1) DRAFT_KEY : 입력 폼(시험명·문항번호·텍스트·옵션) — 항상 자동 저장.
+//   2) ACTIVE_RUN_KEY : 「지금 돌고 있는 실행」 — run() 시작 시 set, 정상 완료 시 clear.
+//
+// 새로고침 후 마운트 시 ACTIVE_RUN_KEY 가 살아 있으면:
+//   - 서버 progress 가 processing/preparing 이면 → 폴링 재개 + running 배지 복귀
+//   - 서버 progress 가 completed/idle 이면 → 이력에서 startedAt 이후 row 들을 복원
+//   - 2시간 이상 묵은 잔재면 → 자동 폐기
+const DRAFT_KEY = 'highroad-auto-page:draft:v1';
+const ACTIVE_RUN_KEY = 'highroad-auto-page:active-run:v1';
+/** 실행 중이라고 신뢰할 수 있는 최대 잔재 시간 — 이걸 넘으면 폐기 */
+const ACTIVE_RUN_STALE_MS = 2 * 60 * 60 * 1000; // 2h
+/** 폼 draft 가 유효한 최대 시간 — 이걸 넘으면 자동 복원 안 함 */
+const DRAFT_MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24h
+
+type FormDraft = {
+  examName: string;
+  questionNo: string;
+  questionText: string;
+  model: 'gemini' | 'openai';
+  profile: 'auto' | 'easy' | 'balanced' | 'killer';
+  topK: number;
+  maxRetries: number;
+  explanationMode: 'full' | 'partial';
+  selectedQuestions: number[];
+  savedAt: number;
+};
+
+type ActiveRunRecord = {
+  startedAt: number;
+  examName: string;
+  /** 실행을 식별하기 위한 처리 대상 — 다중 모드면 [선택된 번호들], 단일이면 questionNo */
+  expectedQuestions: number[] | string;
+  /** 「전체 모드」 등 미리 알 수 없는 경우 명시. 이력에서 startedAt 이후 모든 row 를 모은다. */
+  expectedTotal: number | null;
+};
+
+function readJsonFromStorage<T>(key: string): T | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (!raw) return null;
+    return JSON.parse(raw) as T;
+  } catch {
+    return null;
+  }
+}
+
+function writeJsonToStorage(key: string, value: unknown): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    /* QuotaExceeded 등 — 조용히 무시 (draft 는 best-effort) */
+  }
+}
+
+function clearStorage(key: string): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.removeItem(key);
+  } catch {
+    /* noop */
+  }
+}
 
 type ParsedExplanation = {
   answer: string;
@@ -695,15 +766,298 @@ export default function AutoPipelinePage() {
     };
   }, [running]);
 
+  // ── 새로고침 복구 (Refresh-resume) ───────────────────────────────────────
+  /**
+   * 마운트 시 / 새로고침 후의 복구 상태.
+   *  - 'idle'         : 복구할 게 없음 (기본)
+   *  - 'reattaching'  : 서버에서 아직 돌고 있음 — 자동으로 폴링 재개됨
+   *  - 'restorable'   : 서버는 끝났고 이력에 결과가 있음 — 사용자가 「복원」 클릭하면 result 복귀
+   *  - 'stale'        : 너무 묵었거나 실패 — 사용자가 「닫기」 누르면 사라짐
+   */
+  type ResumeState =
+    | { kind: 'idle' }
+    | {
+        kind: 'reattaching';
+        startedAt: number;
+        examName: string;
+        expectedTotal: number | null;
+      }
+    | {
+        kind: 'restorable';
+        startedAt: number;
+        examName: string;
+        rows: RunHistoryRow[];
+      }
+    | { kind: 'stale'; reason: string; startedAt: number };
+  const [resume, setResume] = useState<ResumeState>({ kind: 'idle' });
+  /** activeRun 을 한 번만 평가하기 위한 마운트 가드 */
+  const resumeCheckedRef = useRef(false);
+
+  /** 현재 입력 폼 → localStorage draft 저장 (1초 throttle) */
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const t = setTimeout(() => {
+      const draft: FormDraft = {
+        examName,
+        questionNo,
+        questionText,
+        model,
+        profile,
+        topK,
+        maxRetries,
+        explanationMode,
+        selectedQuestions,
+        savedAt: Date.now(),
+      };
+      writeJsonToStorage(DRAFT_KEY, draft);
+      // /crop 와 옵션 공유 — 모델·profile 등을 한 페이지에서 바꾸면 다른 페이지도 즉시 적용.
+      writeSharedOptions({ model, profile, topK, maxRetries, explanationMode });
+    }, 1000);
+    return () => clearTimeout(t);
+  }, [
+    examName,
+    questionNo,
+    questionText,
+    model,
+    profile,
+    topK,
+    maxRetries,
+    explanationMode,
+    selectedQuestions,
+  ]);
+
+  /** 마운트 시 1회: draft 복원 + activeRun 평가 */
+  useEffect(() => {
+    if (resumeCheckedRef.current) return;
+    resumeCheckedRef.current = true;
+
+    // 0) /inbox 에서 「자동에서 열기」 로 들어온 경우 — 해당 run 만 즉시 복원하고 다른 복원은 건너뜀.
+    //    URL: /auto?restoreRun=<id>
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const restoreRun = params.get('restoreRun');
+      if (restoreRun) {
+        void (async () => {
+          try {
+            const res = await fetch(`/api/auto-pipeline/feedback?limit=200`, { cache: 'no-store' });
+            const d = await res.json();
+            const allRows: RunHistoryRow[] = Array.isArray(d.runs) ? d.runs : [];
+            const target = allRows.find((r) => r.id === restoreRun);
+            if (target) {
+              restoreFromHistory([target], target.exam_name ?? '');
+            } else {
+              setResume({
+                kind: 'stale',
+                reason: `요청한 run(${restoreRun.slice(0, 8)}…)을 이력에서 찾지 못했습니다.`,
+                startedAt: Date.now(),
+              });
+            }
+          } catch {
+            /* best-effort */
+          } finally {
+            // 다음 새로고침 시 같은 run 을 또 불러오지 않도록 쿼리 제거
+            const url = new URL(window.location.href);
+            url.searchParams.delete('restoreRun');
+            window.history.replaceState({}, '', url.toString());
+          }
+        })();
+        return; // draft / activeRun 복원은 건너뛴다 — 사용자 의도가 명확함
+      }
+    } catch {
+      /* best-effort */
+    }
+
+    // 1) 폼 draft 복원 (24h 내, 그리고 현재 화면이 비어 있을 때만 — 무조건 덮어쓰기 X)
+    const draft = readJsonFromStorage<FormDraft>(DRAFT_KEY);
+    if (draft && Date.now() - draft.savedAt < DRAFT_MAX_AGE_MS) {
+      // 입력이 비어 있는 경우에만 자동 복원 — 사용자가 새 입력 시작했으면 건드리지 않음
+      // (이 시점은 마운트 직후이므로 state 가 모두 초기값과 동일)
+      if (typeof draft.examName === 'string') setExamName(draft.examName);
+      if (typeof draft.questionNo === 'string') setQuestionNo(draft.questionNo);
+      if (typeof draft.questionText === 'string') setQuestionText(draft.questionText);
+      if (draft.model === 'gemini' || draft.model === 'openai') setModel(draft.model);
+      if (
+        draft.profile === 'auto' ||
+        draft.profile === 'easy' ||
+        draft.profile === 'balanced' ||
+        draft.profile === 'killer'
+      ) {
+        setProfile(draft.profile);
+      }
+      if (typeof draft.topK === 'number' && draft.topK > 0) setTopK(draft.topK);
+      if (typeof draft.maxRetries === 'number' && draft.maxRetries >= 0) {
+        setMaxRetries(draft.maxRetries);
+      }
+      if (draft.explanationMode === 'full' || draft.explanationMode === 'partial') {
+        setExplanationMode(draft.explanationMode);
+      }
+      if (Array.isArray(draft.selectedQuestions)) {
+        setSelectedQuestions(draft.selectedQuestions.filter((n) => Number.isFinite(n)));
+      }
+    }
+
+    // 1-b) /crop 와 공유되는 옵션 — draft 보다 더 최근이면 우선 적용.
+    //      두 페이지 모두 공유 옵션 키에 쓰므로 「가장 최근에 바꾼 옵션」이 항상 따라옴.
+    const sharedOpts = readSharedOptions();
+    if (sharedOpts) {
+      const draftSavedAt = draft?.savedAt ?? 0;
+      if (sharedOpts.savedAt >= draftSavedAt) {
+        setModel(sharedOpts.model);
+        setProfile(sharedOpts.profile);
+        setTopK(sharedOpts.topK);
+        setMaxRetries(sharedOpts.maxRetries);
+        setExplanationMode(sharedOpts.explanationMode);
+      }
+    }
+
+    // 2) activeRun 평가 — 서버 progress 와 이력을 같이 본다
+    const active = readJsonFromStorage<ActiveRunRecord>(ACTIVE_RUN_KEY);
+    if (!active) return;
+    const age = Date.now() - active.startedAt;
+    if (age > ACTIVE_RUN_STALE_MS) {
+      clearStorage(ACTIVE_RUN_KEY);
+      setResume({
+        kind: 'stale',
+        reason: '이전 실행이 2시간 이상 응답 없음 — 자동 폐기됐습니다',
+        startedAt: active.startedAt,
+      });
+      return;
+    }
+
+    void (async () => {
+      // 서버 progress 먼저 — 실행 중이면 곧장 폴링 재개
+      try {
+        const res = await fetch('/api/auto-pipeline/progress', { cache: 'no-store' });
+        const d = await res.json();
+        if (d.stage === 'preparing' || d.stage === 'processing') {
+          // 같은 실행인지 검증: 서버 startedAt 이 우리 active.startedAt 과 거의 같아야 함
+          // (다른 사용자가 새로 실행했다면 덮어써졌을 수 있음 → 그래도 「뭔가 돌고 있다」 정보는 보여줌)
+          setResume({
+            kind: 'reattaching',
+            startedAt: active.startedAt,
+            examName: active.examName,
+            expectedTotal: active.expectedTotal,
+          });
+          setRunning(true); // 폴링 재개 — 기존 [running] effect 가 progress 를 채움
+          return;
+        }
+      } catch {
+        /* 네트워크 실패 → 이력 복원으로 폴백 */
+      }
+
+      // 서버에서 안 돌고 있음 → 이력에서 startedAt 이후 row 복원 시도
+      try {
+        const res = await fetch('/api/auto-pipeline/feedback?limit=50');
+        const d = await res.json();
+        const allRows: RunHistoryRow[] = Array.isArray(d.runs) ? d.runs : [];
+        // startedAt 이후 + (가능하면) examName 일치하는 row 만 복원 후보
+        const cutoffIso = new Date(active.startedAt - 5_000).toISOString();
+        const matching = allRows
+          .filter((r) => r.created_at >= cutoffIso)
+          .filter((r) => {
+            if (!active.examName) return true;
+            return (r.exam_name ?? '') === active.examName;
+          });
+        if (matching.length === 0) {
+          clearStorage(ACTIVE_RUN_KEY);
+          setResume({
+            kind: 'stale',
+            reason:
+              '이전 실행 기록이 이력에 없음 — 영속화 비활성이었거나 서버 재시작으로 결과가 유실됐을 수 있습니다',
+            startedAt: active.startedAt,
+          });
+          return;
+        }
+        // 이력은 created_at desc 정렬 → 복원할 때는 asc 로 뒤집어 questionNo 순서 유지
+        const orderedRows = [...matching].reverse();
+        setResume({
+          kind: 'restorable',
+          startedAt: active.startedAt,
+          examName: active.examName,
+          rows: orderedRows,
+        });
+      } catch {
+        clearStorage(ACTIVE_RUN_KEY);
+      }
+    })();
+  }, []);
+
+  /** activeRun 의 결과 row 들을 result 패널로 복원 */
+  const restoreFromHistory = useCallback((rows: RunHistoryRow[], examNameHint: string) => {
+    if (rows.length === 0) return;
+    const restoredRuns: RunRow[] = rows.map((row) => ({
+      questionNo: row.question_no ?? '?',
+      questionText: row.question_text,
+      parsed: row.parsed ?? null,
+      attempts: row.attempts,
+      errors: row.errors ?? [],
+      trace: row.trace ?? [],
+      manualReviewChecklist: row.manual_review_checklist ?? [],
+      runId: row.id,
+    }));
+    const allOk = restoredRuns.every((r) => !!r.parsed);
+    setResult({
+      ok: allOk,
+      parsed: restoredRuns[0]?.parsed ?? null,
+      attempts: restoredRuns[0]?.attempts ?? 0,
+      errors: restoredRuns[0]?.errors ?? [],
+      trace: restoredRuns[0]?.trace ?? [],
+      manualReviewChecklist: restoredRuns[0]?.manualReviewChecklist ?? [],
+      runId: restoredRuns[0]?.runId ?? null,
+      runs: restoredRuns,
+      partialFailures: restoredRuns.filter((r) => !r.parsed).length,
+    });
+    setActiveIdx(0);
+    if (examNameHint && !examName.trim()) setExamName(examNameHint);
+    clearStorage(ACTIVE_RUN_KEY);
+    setResume({ kind: 'idle' });
+  }, [examName]);
+
+  /** 실행 중 새로고침/탭 닫기 경고 — 서버는 계속 돌지만 UI 추적이 끊김을 알림 */
+  useEffect(() => {
+    if (!running) return;
+    const handler = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      // Chrome 등은 returnValue 가 truthy 면 기본 메시지로 다이얼로그 노출 (커스텀 문구는 무시됨)
+      e.returnValue = '해설 생성이 진행 중입니다. 페이지를 떠나면 진행률 추적이 끊깁니다 (서버는 계속 처리). 정말 떠나시겠어요?';
+      return e.returnValue;
+    };
+    window.addEventListener('beforeunload', handler);
+    return () => window.removeEventListener('beforeunload', handler);
+  }, [running]);
+
   async function run() {
     if (!questionText.trim() && !uploadedFile) return;
     setRunning(true);
+    setResume({ kind: 'idle' }); // 새 실행이 시작되면 이전 resume 배너는 닫음
     setResult(null);
     setRating(null);
     setFeedbackNote('');
     setFeedbackSaved(false);
     setActiveIdx(0);
     const t0 = performance.now();
+    const startedAt = Date.now();
+    // 새로고침 후 이력에서 「이번 실행」을 식별하기 위해 activeRun 기록
+    {
+      const isPartial = !!uploadedFile && explanationMode === 'partial';
+      const expectedQuestions: number[] | string = uploadedFile
+        ? isPartial
+          ? selectedQuestions
+          : []
+        : (questionNo || '?');
+      const expectedTotal = uploadedFile
+        ? isPartial
+          ? selectedQuestions.length || null
+          : null
+        : 1;
+      const record: ActiveRunRecord = {
+        startedAt,
+        examName,
+        expectedQuestions,
+        expectedTotal,
+      };
+      writeJsonToStorage(ACTIVE_RUN_KEY, record);
+    }
 
     try {
       let requestBody: any = {
@@ -764,6 +1118,8 @@ export default function AutoPipelinePage() {
     } finally {
       setElapsed(Math.round(performance.now() - t0));
       setRunning(false);
+      // 정상 응답이든 네트워크 실패든 — 이번 실행은 종료. activeRun 잔재 제거.
+      clearStorage(ACTIVE_RUN_KEY);
       loadHistory();
     }
   }
@@ -784,6 +1140,16 @@ export default function AutoPipelinePage() {
     const t0 = performance.now();
     const previousRuns = result?.runs ?? [];
     const previousExtracted = result?.extracted;
+    // batch 도 새로고침 복구 대상 — 이번 batch 식별용 activeRun 기록
+    {
+      const record: ActiveRunRecord = {
+        startedAt: Date.now(),
+        examName,
+        expectedQuestions: nextNumbers,
+        expectedTotal: nextNumbers.length,
+      };
+      writeJsonToStorage(ACTIVE_RUN_KEY, record);
+    }
 
     try {
       const fileData = await convertFileToBase64(uploadedFile);
@@ -852,6 +1218,7 @@ export default function AutoPipelinePage() {
     } finally {
       setElapsed(Math.round(performance.now() - t0));
       setRunning(false);
+      clearStorage(ACTIVE_RUN_KEY);
       loadHistory();
     }
   }
@@ -1405,6 +1772,89 @@ export default function AutoPipelinePage() {
             setActiveIdx(0);
           }}
         />
+      )}
+
+      {/*
+        새로고침 복구 배너 — 사용자가 실행 중에 새로고침하거나 탭을 닫고 돌아왔을 때
+        이전 작업 상태를 알리고 한 번의 클릭으로 이어서 작업할 수 있게 한다.
+        - reattaching: 서버가 아직 처리 중 → 자동으로 진행률 폴링 재개됨
+        - restorable: 서버는 끝났고 이력에 결과가 있음 → 「복원」 클릭 시 result 복귀
+        - stale: 너무 묵었거나 결과 유실 → 「닫기」로 정리
+      */}
+      {resume.kind === 'reattaching' && (
+        <div className="mb-4 rounded-lg border border-blue-300 bg-blue-50 p-3 text-xs text-blue-950">
+          <p className="font-semibold">
+            ↻ 이전 실행 이어서 추적 중 — 서버에서 해설 생성이 계속 진행되고 있습니다
+          </p>
+          <p className="mt-1 leading-relaxed text-blue-900">
+            {resume.examName ? <>「{resume.examName}」 · </> : null}
+            {new Date(resume.startedAt).toLocaleTimeString('ko-KR')} 시작
+            {resume.expectedTotal ? ` · 총 ${resume.expectedTotal}문항 예정` : ''}.
+            진행률은 아래 「라이브 진행 상황」 패널에서 확인하세요. 완료되면 결과가 자동으로 표시됩니다.
+          </p>
+          <button
+            type="button"
+            onClick={() => {
+              clearStorage(ACTIVE_RUN_KEY);
+              setRunning(false);
+              setResume({ kind: 'idle' });
+            }}
+            className="mt-2 rounded border border-blue-400 bg-white px-2 py-0.5 font-semibold text-blue-800 hover:bg-blue-100"
+            title="추적을 그만두고 배너를 닫습니다 (서버 작업 자체를 취소하지는 않음)"
+          >
+            추적 그만두기
+          </button>
+        </div>
+      )}
+      {resume.kind === 'restorable' && (
+        <div className="mb-4 rounded-lg border border-emerald-300 bg-emerald-50 p-3 text-xs text-emerald-950">
+          <p className="font-semibold">
+            ✓ 이전 작업 완료 — {resume.rows.length}개 문항 결과를 이력에서 발견했습니다
+          </p>
+          <p className="mt-1 leading-relaxed text-emerald-900">
+            {resume.examName ? <>「{resume.examName}」 · </> : null}
+            {new Date(resume.startedAt).toLocaleString('ko-KR')} 시작 ·
+            성공 {resume.rows.filter((r) => r.ok).length}건
+            {resume.rows.filter((r) => !r.ok).length > 0
+              ? ` · 실패 ${resume.rows.filter((r) => !r.ok).length}건`
+              : ''}.
+            새로고침 직전의 결과 패널을 그대로 복원할 수 있습니다.
+          </p>
+          <div className="mt-2 flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => restoreFromHistory(resume.rows, resume.examName)}
+              className="rounded border border-emerald-700 bg-emerald-700 px-2 py-0.5 font-semibold text-white hover:bg-emerald-800"
+            >
+              결과 복원
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                clearStorage(ACTIVE_RUN_KEY);
+                setResume({ kind: 'idle' });
+              }}
+              className="rounded border border-emerald-400 bg-white px-2 py-0.5 font-semibold text-emerald-800 hover:bg-emerald-100"
+            >
+              닫기
+            </button>
+          </div>
+        </div>
+      )}
+      {resume.kind === 'stale' && (
+        <div className="mb-4 rounded-lg border border-amber-300 bg-amber-50 p-3 text-xs text-amber-950">
+          <p className="font-semibold">⚠ 이전 실행 정리 — {resume.reason}</p>
+          <p className="mt-1 leading-relaxed text-amber-900">
+            {new Date(resume.startedAt).toLocaleString('ko-KR')}에 시작된 작업입니다. 입력은 그대로 유지됐으니 다시 「자동 풀이 실행」 을 눌러 재시도하세요.
+          </p>
+          <button
+            type="button"
+            onClick={() => setResume({ kind: 'idle' })}
+            className="mt-2 rounded border border-amber-400 bg-white px-2 py-0.5 font-semibold text-amber-800 hover:bg-amber-100"
+          >
+            닫기
+          </button>
+        </div>
       )}
 
       <section className="grid grid-cols-1 gap-4 lg:grid-cols-[1fr_320px]">

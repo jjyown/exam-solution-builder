@@ -17,6 +17,11 @@ const TABS: Array<{ href: string; label: string; hint: string; comingSoon?: bool
     label: "시험지 편집",
     hint: "원안 사진 → AI/수동 자르기 → 학교명 자동 → Drive 「시험지」 저장",
   },
+  {
+    href: "/inbox",
+    label: "이어서 작업",
+    hint: "이전 풀이 이력에서 자동/크롭 모두 이어서 진행 (DOCX·복원·검수)",
+  },
 ];
 
 export default function TopTabs() {
