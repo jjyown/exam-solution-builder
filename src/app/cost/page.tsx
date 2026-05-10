@@ -214,20 +214,21 @@ export default function CostPage() {
       const res = await fetch(`/api/cost-tracker?days=${d}`);
       // 본문이 비어있는 500(=Unexpected end of JSON input)도 잡기 위해 text 먼저 읽음
       const raw = await res.text();
-      let j: CostResponse | { ok: false; error?: string; stack?: string } | null = null;
+      // 어떤 모양으로 오든 정적 검사 우회 — 실제 모양은 런타임에 검사.
+      let j: Record<string, unknown> | null = null;
       try {
-        j = raw ? (JSON.parse(raw) as typeof j) : null;
+        j = raw ? (JSON.parse(raw) as Record<string, unknown>) : null;
       } catch {
         // JSON 파싱 실패 — 빈 본문 또는 비-JSON 응답
       }
-      if (!res.ok || !j || !("ok" in j) || !j.ok) {
+      if (!res.ok || !j || j.ok !== true) {
         const errMsg =
-          (j && "error" in j && j.error) ||
+          (j && typeof j.error === "string" && j.error) ||
           `HTTP ${res.status}${raw ? ` — ${raw.slice(0, 300)}` : ""}`;
-        const stack = j && "stack" in j && typeof j.stack === "string" ? j.stack : null;
+        const stack = j && typeof j.stack === "string" ? j.stack : null;
         throw new Error(stack ? `${errMsg}\n\n${stack}` : errMsg);
       }
-      setData(j as CostResponse);
+      setData(j as unknown as CostResponse);
     } catch (e) {
       setError((e as Error).message);
     } finally {
