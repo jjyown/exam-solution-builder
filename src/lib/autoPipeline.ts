@@ -17,6 +17,11 @@ import {
   validateExplanation,
   type ParsedExplanation,
 } from './explanationValidator';
+import {
+  buildSolverRetryHint,
+  isSolverVerifyEnabled,
+  verifyExplanationWithSolver,
+} from './explanationSolverVerify';
 
 export interface PipelineConfig {
   retriever: ReferenceRetriever;
@@ -37,8 +42,23 @@ export type TraceEvent =
   | { stage: 'retrieve'; refIds: string[] }
   | { stage: 'llm_call'; attempt: number; promptChars: number }
   | { stage: 'validate'; attempt: number; ok: boolean; errors: string[] }
+  | { stage: 'solver_verify'; attempt: number; ok: boolean; skipped?: string; mismatch?: boolean }
   | { stage: 'success'; attempts: number }
   | { stage: 'give_up'; attempts: number; lastErrors: string[] };
+
+/**
+ * RAG 검색에서 매칭된 참고 예시 — 사용자에게 「유사 기출」 추천으로 노출.
+ * 풀이 결과 옆에 표시해 학원에서 「이 문제 풀고 나면 비슷한 이것도 풀어봐」 큐레이션 가능.
+ */
+export type SimilarReference = {
+  id: string;
+  source: string;
+  problem_hint: string;
+  snippet: string;
+  problem_no?: number;
+  pair_series?: string;
+  hasSolution: boolean;
+};
 
 export interface PipelineResult {
   ok: boolean;
@@ -46,6 +66,8 @@ export interface PipelineResult {
   parsed: ParsedExplanation | null;
   errors: string[];
   trace: TraceEvent[];
+  /** RAG 가 매칭한 비슷한 기출/예제 — UI 「유사 기출 N개」 카드용 */
+  similarReferences?: SimilarReference[];
 }
 
 export async function runAutoPipeline(
@@ -63,6 +85,17 @@ export async function runAutoPipeline(
   // 1) 참고 예시 검색
   const refs = cfg.retriever.search(questionText, topK);
   emit({ stage: 'retrieve', refIds: refs.map((r) => r.id) });
+
+  // 검색 결과를 「유사 기출」로 사용자에게 노출 — UI 추천 카드용
+  const similarReferences: SimilarReference[] = refs.map((r) => ({
+    id: r.id,
+    source: r.source,
+    problem_hint: r.problem_hint,
+    snippet: ((r.solution_text || r.content) || '').replace(/\s+/g, ' ').slice(0, 200),
+    problem_no: r.problem_no,
+    pair_series: r.pair_series,
+    hasSolution: !!(r.solution_text && r.solution_text.trim()),
+  }));
 
   let lastErrors: string[] = [];
   let lastHint: string | undefined;
@@ -91,6 +124,31 @@ export async function runAutoPipeline(
     emit({ stage: 'validate', attempt, ok: v.ok, errors: v.errors });
 
     if (v.ok && v.parsed) {
+      // V7: SymPy 정답 검증 (env 게이트 — SYMPY_VERIFY_ENABLED=true)
+      // 형식은 통과했지만 답 자체가 풀이 마지막 결과식과 다른 경우 자동 재시도.
+      if (isSolverVerifyEnabled()) {
+        const solverResult = await verifyExplanationWithSolver(v.parsed);
+        if (solverResult?.mismatch) {
+          emit({
+            stage: 'solver_verify',
+            attempt,
+            ok: false,
+            mismatch: true,
+          });
+          lastErrors = [
+            `정답 ${solverResult.normalizedAnswer ?? solverResult.rawAnswer ?? '(?)'}와 ` +
+              `풀이 마지막 결과 ${solverResult.normalizedLast ?? solverResult.rawLast ?? '(?)'}가 다름`,
+          ];
+          lastHint = buildSolverRetryHint(solverResult);
+          continue;
+        }
+        emit({
+          stage: 'solver_verify',
+          attempt,
+          ok: true,
+          skipped: solverResult?.skipped,
+        });
+      }
       emit({ stage: 'success', attempts: attempt });
       return {
         ok: true,
@@ -98,6 +156,7 @@ export async function runAutoPipeline(
         parsed: v.parsed,
         errors: [],
         trace,
+        similarReferences,
       };
     }
     lastErrors = v.errors;
@@ -111,5 +170,6 @@ export async function runAutoPipeline(
     parsed: null,
     errors: lastErrors,
     trace,
+    similarReferences,
   };
 }

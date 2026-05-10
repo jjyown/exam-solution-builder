@@ -337,6 +337,8 @@ type RunRow = {
   usedModel?: string;
   usedVendor?: 'gemini' | 'openai';
   approxCostCents?: number;
+  /** RAG 가 매칭한 비슷한 기출/예제 — UI 「유사 기출 N개」 카드 */
+  similarReferences?: PipelineResult['similarReferences'];
 };
 
 async function executeOne(params: {
@@ -427,6 +429,7 @@ async function executeOne(params: {
     usedModel,
     usedVendor,
     approxCostCents: cost,
+    similarReferences: result.similarReferences,
   };
 }
 

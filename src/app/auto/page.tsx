@@ -27,6 +27,16 @@ type ParsedExplanation = {
 
 type TraceEvent = { stage: string; [k: string]: unknown };
 
+type SimilarReference = {
+  id: string;
+  source: string;
+  problem_hint: string;
+  snippet: string;
+  problem_no?: number;
+  pair_series?: string;
+  hasSolution: boolean;
+};
+
 type RunRow = {
   questionNo: string;
   questionText: string;
@@ -42,6 +52,7 @@ type RunRow = {
   usedModel?: string;
   usedVendor?: 'gemini' | 'openai';
   approxCostCents?: number;
+  similarReferences?: SimilarReference[];
 };
 
 type ExtractedMeta = {
@@ -1630,6 +1641,52 @@ function ResultsSection(props: {
               <ul className="mt-1 list-disc space-y-0.5 pl-4">
                 {active.manualReviewChecklist.map((c, i) => (
                   <li key={i}>{c}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {/* 💡 유사 기출 — RAG 가 매칭한 비슷한 문제 추천 카드 */}
+          {active.similarReferences && active.similarReferences.length > 0 && (
+            <div className="mt-3 rounded-md border border-blue-200 bg-blue-50/50 p-3 text-xs">
+              <div className="flex items-center justify-between">
+                <p className="font-semibold text-blue-900">
+                  💡 비슷한 기출/예제 ({active.similarReferences.length}건)
+                </p>
+                <a
+                  href={`/api/drive/analysis/search?q=${encodeURIComponent(active.questionText.slice(0, 80))}&limit=20`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-[10px] text-blue-700 hover:underline"
+                >
+                  더 보기 →
+                </a>
+              </div>
+              <p className="mt-0.5 text-[10px] text-blue-700">
+                이 문제와 가장 유사한 분석자료(KB·시중교재) 매칭. 학원 큐레이션·심화 학습용.
+              </p>
+              <ul className="mt-2 space-y-1.5">
+                {active.similarReferences.map((r) => (
+                  <li
+                    key={r.id}
+                    className="rounded border border-blue-200 bg-white p-2"
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <p className="font-semibold text-slate-800">
+                        {r.problem_hint || r.source}
+                        {typeof r.problem_no === 'number' && (
+                          <span className="ml-1 rounded bg-slate-100 px-1 text-[10px] text-slate-600">
+                            {r.problem_no}번
+                          </span>
+                        )}
+                        {r.hasSolution && (
+                          <span className="ml-1 rounded bg-amber-100 px-1 text-[10px] text-amber-800">풀이 ✓</span>
+                        )}
+                      </p>
+                    </div>
+                    <p className="mt-0.5 text-[10px] text-slate-500">{r.source}</p>
+                    <p className="mt-1 text-slate-700">{r.snippet}{r.snippet.length >= 200 ? '…' : ''}</p>
+                  </li>
                 ))}
               </ul>
             </div>
