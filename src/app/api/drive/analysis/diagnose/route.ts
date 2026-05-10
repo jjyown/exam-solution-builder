@@ -36,6 +36,18 @@ import { checkIntegrity } from "@/lib/analysisIntegrityCheck";
 
 const ALLOWED_EXTS = new Set([".pdf", ".png", ".jpg", ".jpeg", ".webp"]);
 
+/**
+ * 시스템 폴더 — 학습 대상이 아니라 시험지 편집 워크플로 용 입력/출력/휴지통.
+ * 화이트리스트에 안 들어가는 게 정상이므로 추천 액션에서 「화이트리스트 추가」 권유 X.
+ */
+const SYSTEM_FOLDERS = new Set([
+  "시험지 편집",
+  "시험지 편집 전",
+  "시험지 편집 후",
+  "휴지통",
+  "_archive",
+]);
+
 function bucket(sizeBytes: number | null): string {
   if (sizeBytes === null) return "size-unknown";
   if (sizeBytes < 30 * 1024) return "0-30KB";
@@ -77,6 +89,7 @@ export async function GET() {
     type FolderStat = {
       totalFiles: number;
       whitelisted: boolean;
+      isSystem: boolean;            // 시험지 편집/휴지통 등 시스템 폴더(학습 대상 X)
       sizeBuckets: Record<string, number>;
       sizeSkipExpected: number;     // > sizeLimit 초과로 OCR skip 예상
       tooSmallExpected: number;     // < minKb 미만으로 skip 예상
@@ -96,6 +109,7 @@ export async function GET() {
       byRoot[root] ??= {
         totalFiles: 0,
         whitelisted: allowedSet.has(root),
+        isSystem: SYSTEM_FOLDERS.has(root),
         sizeBuckets: { "0-30KB": 0, "30KB-1MB": 0, "1-35MB": 0, "35MB+": 0, "size-unknown": 0 },
         sizeSkipExpected: 0,
         tooSmallExpected: 0,
@@ -207,14 +221,16 @@ export async function GET() {
       detail: string;
     }> = [];
 
-    // 화이트리스트 미매칭 폴더
+    // 화이트리스트 미매칭 폴더 — 시스템 폴더는 자동 제외 (시험지 편집·휴지통 등은 학습 대상 X)
     for (const root of Object.keys(byRoot)) {
+      if (SYSTEM_FOLDERS.has(root)) continue;  // 시스템 폴더는 추천 안 함
       if (!byRoot[root].whitelisted && byRoot[root].totalFiles > 0) {
         recommendations.push({
           priority: "high",
           action: `폴더 「${root}」 화이트리스트 추가`,
           detail: `${byRoot[root].totalFiles}개 파일이 화이트리스트(${allowedRoots.join(", ")})에 없어 학습 안 됨. ` +
-            `Railway Variables 에 DRIVE_ANALYSIS_ALLOWED_ROOT_FOLDERS=${[...allowedRoots, root].join(",")} 추가.`,
+            `Railway Variables 에 DRIVE_ANALYSIS_ALLOWED_ROOT_FOLDERS=${[...allowedRoots, root].join(",")} 추가. ` +
+            `학습 대상이 아니라면 그대로 두어도 무방.`,
         });
       }
     }
@@ -275,6 +291,124 @@ export async function GET() {
       }
     }
 
+    // 화이트리스트 폴더의 파일별 처리 상태 — DB record 와 join 해서
+    // 사용자가 「시중교재 8개 PDF 중 5개는 사이즈 초과, 2개는 처리 진행 중, 1개는 캐시 됨」 식으로 즉시 파악 가능.
+    type FileStatus = {
+      name: string;
+      sizeMB: string;
+      mimeType: string;
+      modifiedTime: string | null;
+      hasDbRecord: boolean;       // analysis_records 에 source 매칭 row 있음
+      recordCount: number;
+      status:
+        | "processed"             // OCR + DB 저장 완료
+        | "size-skipped-image"    // 이미지 한도 초과로 skip
+        | "size-skipped-pdf"      // PDF 한도 초과로 skip
+        | "too-small"             // 30KB 미만 — 의미 없는 파일
+        | "pending";              // 학습 안 됐지만 사이즈 OK (다음 동기화 대기)
+      reason: string;
+    };
+    const filesPerWhitelist: Record<string, FileStatus[]> = {};
+    if (integritySummary) {
+      // source path 끝의 파일명을 기준으로 record 카운트 매핑
+      const recordCountByFile = new Map<string, number>();
+      for (const [, count] of Object.entries(integritySummary.perRootRecordCounts)) {
+        // perRootRecordCounts 는 폴더 단위 — 파일 단위는 seriesStats 에 있음
+        void count;
+      }
+      for (const stat of integritySummary.seriesStats) {
+        recordCountByFile.set(stat.sourceFile, stat.totalRecords);
+      }
+      // 화이트리스트 폴더만 자세히
+      for (const f of all) {
+        const root = f.pathSegments[0];
+        if (!root || !allowedSet.has(root)) continue;
+        const sizeBytes = typeof f.size === "number" ? f.size : 0;
+        const sizeMB = (sizeBytes / (1024 * 1024)).toFixed(1);
+        const ext = (f.name.match(/\.[^.]+$/)?.[0] || "").toLowerCase();
+        const isPdf = ext === ".pdf";
+        const recordCount = recordCountByFile.get(f.name) ?? 0;
+        const hasDbRecord = recordCount > 0;
+        const pdfMax = (Number(process.env.ANALYSIS_PDF_MAX_MB) || 200) * 1024 * 1024;
+        let status: FileStatus["status"];
+        let reason: string;
+        if (hasDbRecord) {
+          status = "processed";
+          reason = `DB 안 ${recordCount}개 record`;
+        } else if (sizeBytes < minBytes) {
+          status = "too-small";
+          reason = `${minKb}KB 미만 — 자동 skip`;
+        } else if (isPdf && sizeBytes > pdfMax) {
+          status = "size-skipped-pdf";
+          reason = `${sizeMB}MB > PDF 한도 ${(pdfMax / 1024 / 1024) | 0}MB`;
+        } else if (!isPdf && sizeBytes > sizeLimitBytes) {
+          status = "size-skipped-image";
+          reason = `${sizeMB}MB > 이미지 한도 ${sizeLimitMb}MB`;
+        } else {
+          status = "pending";
+          reason = isPdf && sizeBytes > sizeLimitBytes
+            ? `다음 동기화 대기 — 큰 PDF (${sizeMB}MB) Mathpix /v3/pdf 라우트로 처리 예정`
+            : `다음 동기화 대기 — 백그라운드 4시간 주기 또는 「분석자료 새로 학습」 버튼으로 즉시`;
+        }
+        filesPerWhitelist[root] ??= [];
+        filesPerWhitelist[root].push({
+          name: f.name,
+          sizeMB,
+          mimeType: f.mimeType,
+          modifiedTime: f.modifiedTime,
+          hasDbRecord,
+          recordCount,
+          status,
+          reason,
+        });
+      }
+      // 각 폴더별 status desc 순으로 정렬 (pending 먼저 — 사용자 관심사)
+      const order = ["pending", "size-skipped-pdf", "size-skipped-image", "too-small", "processed"];
+      for (const root of Object.keys(filesPerWhitelist)) {
+        filesPerWhitelist[root].sort((a, b) => {
+          const ai = order.indexOf(a.status);
+          const bi = order.indexOf(b.status);
+          if (ai !== bi) return ai - bi;
+          return a.name.localeCompare(b.name);
+        });
+      }
+    }
+
+    // Mathpix 잔여·상태 정보
+    let mathpixStatus: {
+      configured: boolean;
+      exhausted: boolean;
+      exhaustedUntilMs: number;
+      callsRemaining: number | null;
+      lowThreshold: number;
+      primary: "gemini" | "mathpix";
+    } | null = null;
+    try {
+      const {
+        getMathpixAccountUsage,
+        isMathpixExhausted,
+        getMathpixExhaustedUntilMs,
+        resolveMathpixCredentials,
+      } = await import("@/lib/mathpixV3Text");
+      const mxConfigured = !!resolveMathpixCredentials();
+      const usage = mxConfigured ? await getMathpixAccountUsage({}) : null;
+      const lowThreshold = Number(process.env.MATHPIX_LOW_THRESHOLD) || 50;
+      const primary = (() => {
+        const v = (process.env.EXTRACTION_PRIMARY || "").trim().toLowerCase();
+        return v === "mathpix" ? ("mathpix" as const) : ("gemini" as const);
+      })();
+      mathpixStatus = {
+        configured: mxConfigured,
+        exhausted: isMathpixExhausted(),
+        exhaustedUntilMs: getMathpixExhaustedUntilMs(),
+        callsRemaining: usage?.callsRemaining ?? null,
+        lowThreshold,
+        primary,
+      };
+    } catch {
+      mathpixStatus = null;
+    }
+
     return NextResponse.json({
       ok: true,
       driveAnalysisFolderId: folderId,
@@ -285,6 +419,8 @@ export async function GET() {
       minKb,
       config: { allowedRoots, sizeLimitMb, minKb },
       integrity: integritySummary,
+      filesPerWhitelist,
+      mathpixStatus,
       recommendations,
     });
   } catch (e) {

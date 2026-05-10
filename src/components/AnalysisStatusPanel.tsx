@@ -20,11 +20,32 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 type RootFolderStat = {
   totalFiles: number;
   whitelisted: boolean;
+  isSystem?: boolean;
   sizeBuckets: Record<string, number>;
   sizeSkipExpected: number;
   tooSmallExpected: number;
   sampleSkips: Array<{ name: string; sizeMB: string }>;
   sampleEligible: Array<{ name: string; sizeMB: string }>;
+};
+
+type FileStatus = {
+  name: string;
+  sizeMB: string;
+  mimeType: string;
+  modifiedTime: string | null;
+  hasDbRecord: boolean;
+  recordCount: number;
+  status: 'processed' | 'size-skipped-image' | 'size-skipped-pdf' | 'too-small' | 'pending';
+  reason: string;
+};
+
+type MathpixStatus = {
+  configured: boolean;
+  exhausted: boolean;
+  exhaustedUntilMs: number;
+  callsRemaining: number | null;
+  lowThreshold: number;
+  primary: 'gemini' | 'mathpix';
 };
 
 type IntegrityIssue =
@@ -91,6 +112,8 @@ type DiagnoseResponse = {
     perRootRecordCounts: Record<string, number>;
   } | null;
   recommendations?: Array<{ priority: 'high' | 'medium' | 'low'; action: string; detail: string }>;
+  filesPerWhitelist?: Record<string, FileStatus[]>;
+  mathpixStatus?: MathpixStatus | null;
   error?: string;
 };
 
@@ -239,6 +262,18 @@ export function AnalysisStatusPanel() {
         </button>
       </div>
 
+      {/* ─── Mathpix 상태 미니 배너 ─────────────────────────────────── */}
+      {data.mathpixStatus && (
+        <MathpixStatusBanner status={data.mathpixStatus} />
+      )}
+
+      {/* ─── 타이핑본/원안 자동 라우팅 안내 ─────────────────────────── */}
+      <div className="mb-3 rounded border border-blue-200 bg-blue-50/40 p-2 text-[11px] text-blue-900">
+        💡 <b>타이핑본·원안 PDF 가 섞여 있어도 자동 라우팅</b> — 텍스트 추출 가능한 타이핑본은 pdfjs(무료) 로,
+        스캔 원안은 텍스트 손상 자동 감지(<code>looksLikeBrokenKoreanExamText</code>) → Mathpix /v3/pdf 로 라우팅됩니다.
+        사용자가 별도 분류·설정할 필요 없습니다.
+      </div>
+
       {/* ─── 4분할 KPI 카드 ─────────────────────────────────────────── */}
       <div className="mb-4 grid grid-cols-2 gap-2 md:grid-cols-4">
         <KpiCard label="Drive 파일" value={totalFiles} hint={`${Object.keys(data.rootFolders || {}).length}개 폴더`} />
@@ -286,6 +321,7 @@ export function AnalysisStatusPanel() {
             {folders.map(([name, stat]) => {
               const dbCount = integrity?.perRootRecordCounts?.[name] ?? 0;
               const opened = expandedFolder === name;
+              const fileStatuses = data.filesPerWhitelist?.[name] || [];
               return (
                 <FolderCard
                   key={name}
@@ -294,6 +330,7 @@ export function AnalysisStatusPanel() {
                   dbRecordCount={dbCount}
                   expanded={opened}
                   onToggle={() => setExpandedFolder(opened ? null : name)}
+                  fileStatuses={fileStatuses}
                 />
               );
             })}
@@ -653,24 +690,35 @@ function FolderCard({
   dbRecordCount,
   expanded,
   onToggle,
+  fileStatuses,
 }: {
   name: string;
   stat: RootFolderStat;
   dbRecordCount: number;
   expanded: boolean;
   onToggle: () => void;
+  fileStatuses: FileStatus[];
 }) {
   const buckets = stat.sizeBuckets || {};
   const labels = ['0-30KB', '30KB-1MB', '1-35MB', '35MB+', 'size-unknown'];
   const max = Math.max(...labels.map((l) => buckets[l] ?? 0), 1);
 
+  // 카드 색상: 시스템 폴더(slate) > 화이트리스트(emerald) > 미매칭(amber)
+  const cardClass = stat.isSystem
+    ? 'border-slate-300 bg-slate-50'
+    : stat.whitelisted
+      ? 'border-emerald-200 bg-emerald-50/30'
+      : 'border-amber-300 bg-amber-50';
+
   return (
-    <div className={`rounded-lg border p-3 ${stat.whitelisted ? 'border-emerald-200 bg-emerald-50/30' : 'border-amber-300 bg-amber-50'}`}>
+    <div className={`rounded-lg border p-3 ${cardClass}`}>
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
           <div className="flex items-center gap-1.5">
             <span className="font-semibold text-slate-900">{name}</span>
-            {stat.whitelisted ? (
+            {stat.isSystem ? (
+              <span className="rounded bg-slate-300 px-1 text-[9px] font-semibold text-slate-800">시스템 (학습 X)</span>
+            ) : stat.whitelisted ? (
               <span className="rounded bg-emerald-200 px-1 text-[9px] font-semibold text-emerald-900">화이트리스트 ✓</span>
             ) : (
               <span className="rounded bg-amber-300 px-1 text-[9px] font-semibold text-amber-900">미매칭 ⚠</span>
@@ -715,32 +763,117 @@ function FolderCard({
 
       {expanded && (
         <div className="mt-3 space-y-2 border-t border-slate-200 pt-2">
-          {stat.sampleSkips.length > 0 && (
+          {/* 파일별 처리 상태 표 — 화이트리스트 폴더에서만 채워짐 */}
+          {fileStatuses.length > 0 && (
+            <div>
+              <div className="mb-1 text-[10px] font-semibold text-slate-700">파일별 처리 상태 ({fileStatuses.length})</div>
+              <div className="max-h-64 overflow-y-auto rounded border border-slate-200 bg-white">
+                <table className="w-full text-[10px]">
+                  <thead className="sticky top-0 bg-slate-50 text-slate-600">
+                    <tr>
+                      <th className="border-b px-1.5 py-1 text-left">파일</th>
+                      <th className="border-b px-1.5 py-1 text-right">크기</th>
+                      <th className="border-b px-1.5 py-1 text-left">상태</th>
+                      <th className="border-b px-1.5 py-1 text-right">DB</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {fileStatuses.map((f) => (
+                      <tr key={f.name} className="hover:bg-slate-50">
+                        <td className="border-b border-slate-100 px-1.5 py-0.5 font-mono text-slate-800" title={f.name}>
+                          {truncate(f.name, 32)}
+                        </td>
+                        <td className="border-b border-slate-100 px-1.5 py-0.5 text-right text-slate-600">{f.sizeMB}MB</td>
+                        <td className="border-b border-slate-100 px-1.5 py-0.5">
+                          <FileStatusBadge status={f.status} />
+                          <div className="text-[9px] text-slate-500" title={f.reason}>{truncate(f.reason, 38)}</div>
+                        </td>
+                        <td className="border-b border-slate-100 px-1.5 py-0.5 text-right">
+                          {f.hasDbRecord ? (
+                            <span className="text-emerald-700">{f.recordCount}</span>
+                          ) : (
+                            <span className="text-slate-400">—</span>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+          {fileStatuses.length === 0 && stat.sampleSkips.length > 0 && (
             <div>
               <div className="text-[10px] font-semibold text-rose-700">사이즈 초과 sample (skip)</div>
               <ul className="mt-0.5 space-y-0.5 text-[10px] text-slate-600">
                 {stat.sampleSkips.map((f, i) => (
-                  <li key={i} className="font-mono">
-                    · {f.name} <span className="text-rose-600">({f.sizeMB}MB)</span>
-                  </li>
+                  <li key={i} className="font-mono">· {f.name} <span className="text-rose-600">({f.sizeMB}MB)</span></li>
                 ))}
               </ul>
             </div>
           )}
-          {stat.sampleEligible.length > 0 && (
+          {fileStatuses.length === 0 && stat.sampleEligible.length > 0 && (
             <div>
               <div className="text-[10px] font-semibold text-emerald-700">처리 대상 sample</div>
               <ul className="mt-0.5 space-y-0.5 text-[10px] text-slate-600">
                 {stat.sampleEligible.map((f, i) => (
-                  <li key={i} className="font-mono">
-                    · {f.name} <span className="text-emerald-600">({f.sizeMB}MB)</span>
-                  </li>
+                  <li key={i} className="font-mono">· {f.name} <span className="text-emerald-600">({f.sizeMB}MB)</span></li>
                 ))}
               </ul>
             </div>
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+function FileStatusBadge({ status }: { status: FileStatus['status'] }) {
+  const map = {
+    processed: { label: '✓ 처리됨', cls: 'bg-emerald-100 text-emerald-800' },
+    pending: { label: '⏳ 대기', cls: 'bg-blue-100 text-blue-800' },
+    'size-skipped-pdf': { label: '⛔ PDF 한도 초과', cls: 'bg-rose-100 text-rose-800' },
+    'size-skipped-image': { label: '⛔ 이미지 한도 초과', cls: 'bg-rose-100 text-rose-800' },
+    'too-small': { label: '· 너무 작음', cls: 'bg-slate-100 text-slate-500' },
+  };
+  const m = map[status];
+  return <span className={`inline-block rounded px-1 text-[9px] font-semibold ${m.cls}`}>{m.label}</span>;
+}
+
+function MathpixStatusBanner({ status }: { status: MathpixStatus }) {
+  if (!status.configured) {
+    return (
+      <div className="mb-3 rounded border border-slate-300 bg-slate-50 p-2 text-[11px] text-slate-700">
+        Mathpix 미설정 — Gemini Vision 단독 동작. 큰 PDF 처리는 MATHPIX_APP_ID/KEY 필요.
+      </div>
+    );
+  }
+  const isLow = status.callsRemaining !== null && status.callsRemaining <= status.lowThreshold;
+  const cls = status.exhausted
+    ? 'border-rose-300 bg-rose-50 text-rose-900'
+    : isLow
+      ? 'border-amber-300 bg-amber-50 text-amber-900'
+      : 'border-emerald-200 bg-emerald-50 text-emerald-900';
+  const tag = status.exhausted ? '🔴 백오프 중' : isLow ? '🟡 잔여 부족' : '🟢 정상';
+  const remain = status.callsRemaining !== null ? `${status.callsRemaining.toLocaleString()} 페이지` : '잔여 미상';
+  return (
+    <div className={`mb-3 rounded border p-2 text-[11px] ${cls}`}>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <span className="font-semibold">Mathpix 상태:</span> {tag} · 잔여 {remain} · 우선순위 <code className="rounded bg-white px-1 text-slate-700">{status.primary}</code>
+        </div>
+        {status.exhausted && (
+          <a
+            href="/api/mathpix-status?resetExhaustion=1"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="rounded border border-rose-400 bg-white px-2 py-0.5 text-rose-800 hover:bg-rose-50"
+            title="충전 후 다시 활성화 (1시간 백오프 즉시 해제)"
+          >
+            백오프 해제
+          </a>
+        )}
+      </div>
     </div>
   );
 }
