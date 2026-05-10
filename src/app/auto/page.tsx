@@ -17,6 +17,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { InlineMath, BlockMath } from 'react-katex';
 import 'katex/dist/katex.min.css';
+import { AnalysisStatusPanel } from '@/components/AnalysisStatusPanel';
 
 type ParsedExplanation = {
   answer: string;
@@ -187,6 +188,9 @@ export default function AutoPipelinePage() {
     } | null;
   };
   const [health, setHealth] = useState<HealthSnapshot | null>(null);
+
+  // 분석 현황 탭 (시중교재/시험지 원안 진행 상태)
+  const [analysisStatusOpen, setAnalysisStatusOpen] = useState(false);
 
   // 분석자료 검색
   const [analysisSearchOpen, setAnalysisSearchOpen] = useState(false);
@@ -789,6 +793,14 @@ export default function AutoPipelinePage() {
         <div className="flex items-center gap-2">
           <button
             type="button"
+            onClick={() => setAnalysisStatusOpen((v) => !v)}
+            className="rounded-md border border-indigo-300 bg-white px-3 py-1.5 text-xs font-semibold text-indigo-800 hover:bg-indigo-50"
+            title="시중교재/시험지 원안 폴더별 학습 진행 상태, DB record 통계, 무결성 이슈, 자동 추천 액션을 한눈에"
+          >
+            분석 현황 {analysisStatusOpen ? '닫기' : '열기'}
+          </button>
+          <button
+            type="button"
             onClick={() => setAnalysisSearchOpen((v) => !v)}
             className="rounded-md border border-emerald-300 bg-white px-3 py-1.5 text-xs font-semibold text-emerald-800 hover:bg-emerald-50"
             title="분석용 자료 (Supabase 영구 저장된 OCR 결과) 안에서 키워드 검색"
@@ -812,6 +824,12 @@ export default function AutoPipelinePage() {
           </button>
         </div>
       </header>
+
+      {analysisStatusOpen && (
+        <div className="mb-4">
+          <AnalysisStatusPanel />
+        </div>
+      )}
 
       {analysisSearchOpen && (
         <div className="mb-4 rounded-lg border border-emerald-200 bg-emerald-50/40 p-3">

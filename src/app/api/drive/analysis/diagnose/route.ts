@@ -119,23 +119,81 @@ export async function GET() {
       }
     }
 
-    // Supabase 의 모든 analysis_records 를 한번에 받아 무결성 검사 — 비용 0.
-    // 누락/중복/페어 깨짐을 한 응답에 같이 담아 사용자가 한 페이지에서 진단 가능.
+    // Supabase 의 모든 analysis_records 를 한번에 받아 무결성 검사 + series 별 통계.
+    // 누락/중복/페어 깨짐 + 폴더별 record 수를 한 응답에 같이 담아 한 페이지 진단.
+    type SeriesStat = {
+      series: string;
+      rootFolder: string;          // "시중교재" / "시험지 원안" / 기타
+      sourceFile: string;          // 마지막 source 파일명
+      totalRecords: number;
+      withProblemNo: number;
+      paired: number;              // problem_no + solution_text 둘 다 있음
+      pairingRate: number;
+      problemNos: { min: number | null; max: number | null; count: number };
+    };
     let integritySummary: {
       totalRecords: number;
       totalSeries: number;
       counts: { missing: number; duplicate: number; unpaired: number };
       issues: ReturnType<typeof checkIntegrity>["issues"];
+      seriesStats: SeriesStat[];
+      perRootRecordCounts: Record<string, number>;
     } | null = null;
     try {
       const allRecords = await fetchAllRecords();
       const ig = checkIntegrity(allRecords);
+
+      // series 별 통계 집계
+      const seriesMap = new Map<string, SeriesStat>();
+      const perRoot: Record<string, number> = {};
+      for (const r of allRecords) {
+        const src = r.source || "";
+        // "drive/분석용자료/시중교재/EBS_2024.pdf" → root="시중교재", file="EBS_2024.pdf"
+        const segs = src.split("/").filter(Boolean);
+        const rootFolder = segs.length >= 3 ? segs[2] : "(기타)";
+        const sourceFile = segs[segs.length - 1] || src;
+        perRoot[rootFolder] = (perRoot[rootFolder] ?? 0) + 1;
+
+        const seriesKey = (r.pair_series && r.pair_series.trim()) || sourceFile;
+        const stat = seriesMap.get(seriesKey) ?? {
+          series: seriesKey,
+          rootFolder,
+          sourceFile,
+          totalRecords: 0,
+          withProblemNo: 0,
+          paired: 0,
+          pairingRate: 0,
+          problemNos: { min: null as number | null, max: null as number | null, count: 0 },
+        };
+        stat.totalRecords += 1;
+        if (typeof r.problem_no === "number") {
+          stat.withProblemNo += 1;
+          stat.problemNos.count += 1;
+          if (stat.problemNos.min === null || r.problem_no < stat.problemNos.min) {
+            stat.problemNos.min = r.problem_no;
+          }
+          if (stat.problemNos.max === null || r.problem_no > stat.problemNos.max) {
+            stat.problemNos.max = r.problem_no;
+          }
+          if (r.solution_text && r.solution_text.trim()) {
+            stat.paired += 1;
+          }
+        }
+        seriesMap.set(seriesKey, stat);
+      }
+      // 페어링률 계산
+      for (const stat of seriesMap.values()) {
+        stat.pairingRate = stat.withProblemNo > 0 ? stat.paired / stat.withProblemNo : 0;
+      }
+      const seriesStats = Array.from(seriesMap.values()).sort((a, b) => b.totalRecords - a.totalRecords);
+
       integritySummary = {
         totalRecords: ig.totalRecords,
         totalSeries: ig.totalSeries,
         counts: ig.counts,
-        // 응답 비대 방지 — 100건만
         issues: ig.issues.slice(0, 100),
+        seriesStats: seriesStats.slice(0, 200),  // 응답 비대 방지
+        perRootRecordCounts: perRoot,
       };
     } catch (e) {
       integritySummary = null;
