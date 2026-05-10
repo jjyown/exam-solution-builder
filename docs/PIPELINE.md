@@ -200,3 +200,22 @@ npm run batch:crops-to-docx -- --delay-ms 1200 --generation-mode final --solver-
 ## 환경변수
 
 - `.env.local.example` — Drive OAuth(선택), **`GOOGLE_DRIVE_EXAMS_FOLDER_ID`**(Railway 묶음 **읽기 전용**)
+
+## bbox 폴백 활성화 — 페어링률 회복 (2026-05-10 추가)
+
+**무엇**: 페어링률 <40% PDF 를 Mathpix `lines.json` (좌표/bbox) 응답으로 segment 재분할 → 표준 헤더 텍스트 재구성 → 5%p 이상 향상 시 records 갱신.
+
+**왜 단계별 활성화**: Mathpix /v3/pdf 1회 추가 호출이 들어가므로, 효과 검증 전에 무차별 자동화하면 비용 폭증.
+
+| 단계 | 환경변수 | 동작 |
+|------|----------|------|
+| **1. 수동만** | `BBOX_FALLBACK_ENABLED=true` | UI 「⊕ bbox 재처리」 버튼 클릭 시에만 호출. 결과(전 vs 후 페어링률) 직접 확인. |
+| **2. 자동 (보수)** | + `BBOX_FALLBACK_AUTO=true` <br> + `BBOX_FALLBACK_MAX_PER_SYNC=1` | sync 직후 가장 깨진 PDF 1개 자동 재처리. 며칠 운영 후 결과 점검. |
+| **3. 자동 (정상)** | `BBOX_FALLBACK_MAX_PER_SYNC=3~5` | 일반 운영 모드. 회당 N개 PDF 처리. |
+
+**확인 위치**:
+- UI 헤더 「⊕ bbox 재처리 N건」 칩 → 클릭 시 PDF별 페어링률 표 + 자동 폴백 상태 배너
+- Railway 로그: `[driveAnalysisAutoSync] auto-fallback <source>: 30% → 87% ✓ 적용`
+- POST `/api/drive/analysis/bbox-fallback` body=`{fileId}` 로 단일 호출도 가능
+
+**롤백 안전**: 향상 5%p 미만이면 records 그대로 보존. AUTO=false 로 되돌리면 즉시 자동 트리거 정지.
