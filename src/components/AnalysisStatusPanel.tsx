@@ -70,9 +70,36 @@ type RefineStatus = {
   killSwitch: boolean;
   hasGeminiKey: boolean;
   unpairedCount: number;
+  withProblemNoCount?: number;
+  totalRecords?: number;
+  zeroReason?: string;
   model: string;
   canRun: boolean;
   blockers: string[];
+};
+
+type CostTrackerResponse = {
+  ok: boolean;
+  periodDays: number;
+  configured: boolean;
+  autoPipeline: {
+    byModel: Record<string, { calls: number; attempts: number; estUsd: number }>;
+    totalCalls: number;
+    totalAttempts?: number;
+    estUsd: number;
+    estKrw: number;
+  };
+  driveLearning: {
+    byDay: Record<string, number>;
+    totalRecords: number;
+    visionCallsEst?: number;
+    ocrEstUsd: number;
+    ocrEstKrw: number;
+  };
+  total: { estUsd: number; estKrw: number };
+  diagnoses: Array<{ level: 'info' | 'warn' | 'high'; message: string }>;
+  hint?: string;
+  assistedPairingEnabled?: boolean;
 };
 
 type RefinePlanResponse = {
@@ -131,6 +158,19 @@ export function AnalysisStatusPanel() {
   const [refineBusy, setRefineBusy] = useState<null | 'dry' | 'apply'>(null);
   const [refineExpanded, setRefineExpanded] = useState(false);
 
+  // 비용 추적 — 최근 N일 호출 수 + 추정 USD/KRW
+  const [costData, setCostData] = useState<CostTrackerResponse | null>(null);
+  const [costDays, setCostDays] = useState(7);
+  const fetchCost = useCallback(async () => {
+    try {
+      const r = await fetch(`/api/cost-tracker?days=${costDays}`);
+      const json: CostTrackerResponse = await r.json();
+      if (json.ok) setCostData(json);
+    } catch {
+      // best-effort
+    }
+  }, [costDays]);
+
   const fetchRefineStatus = useCallback(async () => {
     try {
       const r = await fetch('/api/drive/analysis/refine-pairing');
@@ -185,15 +225,18 @@ export function AnalysisStatusPanel() {
   useEffect(() => {
     void fetchData();
     void fetchRefineStatus();
+    void fetchCost();
     const t = setInterval(() => {
       void fetchData();
       void fetchRefineStatus();
+      void fetchCost();
     }, 60_000);  // 60초 자동 갱신
 
     // 다른 영역에서 학습 완료 신호 전파 — 패널 즉시 갱신
     const onSync = () => {
       void fetchData();
       void fetchRefineStatus();
+      void fetchCost();
     };
     window.addEventListener('analysis-sync-completed', onSync);
 
@@ -201,7 +244,7 @@ export function AnalysisStatusPanel() {
       clearInterval(t);
       window.removeEventListener('analysis-sync-completed', onSync);
     };
-  }, [fetchData, fetchRefineStatus]);
+  }, [fetchData, fetchRefineStatus, fetchCost]);
 
   const folders = useMemo(() => {
     if (!data?.rootFolders) return [];
@@ -265,6 +308,11 @@ export function AnalysisStatusPanel() {
       {/* ─── Mathpix 상태 미니 배너 ─────────────────────────────────── */}
       {data.mathpixStatus && (
         <MathpixStatusBanner status={data.mathpixStatus} />
+      )}
+
+      {/* ─── 비용 추적 카드 ──────────────────────────────────────────── */}
+      {costData && (
+        <CostTrackerCard data={costData} days={costDays} onChangeDays={setCostDays} />
       )}
 
       {/* ─── 타이핑본/원안 자동 라우팅 안내 ─────────────────────────── */}
@@ -480,7 +528,13 @@ export function AnalysisStatusPanel() {
                       <li key={i}>{b}</li>
                     ))}
                   </ul>
-                  {!refineStatus.enabled && (
+                  {refineStatus.unpairedCount === 0 && refineStatus.withProblemNoCount === 0 && (
+                    <p className="mt-1 rounded bg-amber-100 p-1.5 text-amber-900">
+                      ⚠ 「정제 불필요」 가 아니라 <b>학습 데이터 자체가 없음</b> — problem_no 가진 record 0건 / 전체 {refineStatus.totalRecords ?? 0}건.
+                      먼저 「분석자료 새로 학습」 으로 시중교재를 흡수하세요.
+                    </p>
+                  )}
+                  {!refineStatus.enabled && refineStatus.unpairedCount > 0 && (
                     <p className="mt-1 text-amber-800">
                       Railway Variables 에 <code className="rounded bg-white px-1">ASSISTED_PAIRING_ENABLED=true</code> 추가 후 재배포.
                     </p>
@@ -838,6 +892,159 @@ function FileStatusBadge({ status }: { status: FileStatus['status'] }) {
   };
   const m = map[status];
   return <span className={`inline-block rounded px-1 text-[9px] font-semibold ${m.cls}`}>{m.label}</span>;
+}
+
+function CostTrackerCard({
+  data,
+  days,
+  onChangeDays,
+}: {
+  data: CostTrackerResponse;
+  days: number;
+  onChangeDays: (n: number) => void;
+}) {
+  const models = Object.entries(data.autoPipeline.byModel || {}).sort((a, b) => b[1].estUsd - a[1].estUsd);
+  const heavyModel = models[0]; // 비용 1위 모델
+  return (
+    <details className="mb-3 rounded border border-purple-200 bg-purple-50/40 p-2 text-[11px]" open={data.diagnoses.some((d) => d.level !== 'info')}>
+      <summary className="cursor-pointer">
+        <span className="font-semibold text-purple-900">💰 비용 추적 (최근 {data.periodDays}일)</span>
+        <span className="ml-2 text-purple-800">
+          총 <b>${data.total.estUsd.toFixed(3)}</b> ≈ <b>₩{data.total.estKrw.toLocaleString()}</b> ·
+          {' '}자동 파이프라인 {data.autoPipeline.totalCalls}회 · Drive 학습 record {data.driveLearning.totalRecords}건
+        </span>
+      </summary>
+      <div className="mt-2 space-y-2">
+        {/* 기간 토글 */}
+        <div className="flex items-center gap-1">
+          <span className="text-[10px] text-slate-600">기간:</span>
+          {[1, 7, 30, 90].map((d) => (
+            <button
+              key={d}
+              onClick={() => onChangeDays(d)}
+              className={`rounded border px-1.5 py-0.5 text-[10px] ${
+                d === days ? 'border-purple-700 bg-purple-700 text-white' : 'border-purple-300 bg-white text-purple-800'
+              }`}
+            >
+              {d}일
+            </button>
+          ))}
+        </div>
+
+        {/* 비용 분배 */}
+        <div className="grid grid-cols-2 gap-1.5">
+          <div className="rounded border border-purple-200 bg-white p-1.5">
+            <div className="text-[9px] text-purple-700 uppercase">자동 파이프라인 (사용자 풀이)</div>
+            <div className="text-base font-bold text-purple-900">${data.autoPipeline.estUsd.toFixed(3)}</div>
+            <div className="text-[9px] text-slate-600">
+              {data.autoPipeline.totalCalls} 호출
+              {data.autoPipeline.totalAttempts && data.autoPipeline.totalAttempts > data.autoPipeline.totalCalls
+                ? ` · 평균 재시도 ${(data.autoPipeline.totalAttempts / data.autoPipeline.totalCalls).toFixed(2)}회`
+                : ''}
+            </div>
+          </div>
+          <div className="rounded border border-purple-200 bg-white p-1.5">
+            <div className="text-[9px] text-purple-700 uppercase">Drive 학습 OCR (백그라운드)</div>
+            <div className="text-base font-bold text-purple-900">${data.driveLearning.ocrEstUsd.toFixed(3)}</div>
+            <div className="text-[9px] text-slate-600">
+              {data.driveLearning.totalRecords} record (Vision 호출 ~{data.driveLearning.visionCallsEst ?? 0})
+            </div>
+          </div>
+        </div>
+
+        {/* 모델별 분포 */}
+        {models.length > 0 && (
+          <div>
+            <div className="mb-0.5 text-[10px] font-semibold text-purple-800">모델별 비용 (자동 파이프라인)</div>
+            <table className="w-full text-[10px]">
+              <thead className="bg-purple-50 text-purple-700">
+                <tr>
+                  <th className="border-b border-purple-200 px-1.5 py-0.5 text-left">모델</th>
+                  <th className="border-b border-purple-200 px-1.5 py-0.5 text-right">호출</th>
+                  <th className="border-b border-purple-200 px-1.5 py-0.5 text-right">시도</th>
+                  <th className="border-b border-purple-200 px-1.5 py-0.5 text-right">USD</th>
+                  <th className="border-b border-purple-200 px-1.5 py-0.5 text-right">비중</th>
+                </tr>
+              </thead>
+              <tbody>
+                {models.map(([m, b]) => {
+                  const pct = data.autoPipeline.estUsd > 0 ? (b.estUsd / data.autoPipeline.estUsd) * 100 : 0;
+                  const isHeavy = /2\.5-pro|gpt-4o(?!-mini)/i.test(m);
+                  return (
+                    <tr key={m} className="hover:bg-purple-50/50">
+                      <td className="border-b border-purple-100 px-1.5 py-0.5 font-mono">
+                        {m} {isHeavy && <span className="text-rose-700">⚡</span>}
+                      </td>
+                      <td className="border-b border-purple-100 px-1.5 py-0.5 text-right">{b.calls}</td>
+                      <td className="border-b border-purple-100 px-1.5 py-0.5 text-right text-slate-600">{b.attempts}</td>
+                      <td className="border-b border-purple-100 px-1.5 py-0.5 text-right font-semibold">${b.estUsd.toFixed(3)}</td>
+                      <td className="border-b border-purple-100 px-1.5 py-0.5 text-right">{pct.toFixed(0)}%</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+            {heavyModel && /2\.5-pro|gpt-4o(?!-mini)/i.test(heavyModel[0]) && (
+              <p className="mt-0.5 text-[10px] text-rose-700">
+                ⚡ 킬러 모델 1위: <b>{heavyModel[0]}</b> — 비용 절감하려면 inferDifficulty 임계 조정 또는 사용자 「balanced」 프로파일 강제 검토.
+              </p>
+            )}
+          </div>
+        )}
+
+        {/* Drive 일별 추이 */}
+        {Object.keys(data.driveLearning.byDay).length > 0 && (
+          <div>
+            <div className="mb-0.5 text-[10px] font-semibold text-purple-800">Drive 학습 일별 record 수</div>
+            <div className="flex items-end gap-0.5">
+              {Object.entries(data.driveLearning.byDay)
+                .sort(([a], [b]) => a.localeCompare(b))
+                .slice(-30)
+                .map(([day, n]) => {
+                  const max = Math.max(...Object.values(data.driveLearning.byDay), 1);
+                  return (
+                    <div key={day} className="flex flex-col items-center" title={`${day}: ${n}건`}>
+                      <div
+                        className="w-2 rounded-t bg-purple-500"
+                        style={{ height: `${(n / max) * 32 + 2}px` }}
+                      />
+                      <div className="text-[8px] text-slate-500">{day.slice(5)}</div>
+                    </div>
+                  );
+                })}
+            </div>
+          </div>
+        )}
+
+        {/* 진단 메시지 */}
+        {data.diagnoses.length > 0 && (
+          <div>
+            <div className="mb-0.5 text-[10px] font-semibold text-purple-800">자동 진단</div>
+            <ul className="space-y-1">
+              {data.diagnoses.map((d, i) => {
+                const cls =
+                  d.level === 'high'
+                    ? 'border-rose-300 bg-rose-50 text-rose-900'
+                    : d.level === 'warn'
+                      ? 'border-amber-300 bg-amber-50 text-amber-900'
+                      : 'border-slate-200 bg-white text-slate-700';
+                const icon = d.level === 'high' ? '🔴' : d.level === 'warn' ? '🟡' : '·';
+                return (
+                  <li key={i} className={`rounded border px-1.5 py-1 ${cls}`}>
+                    {icon} {d.message}
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
+        )}
+
+        <p className="mt-1 text-[9px] text-slate-500">
+          ⚠ 추정값입니다 (모델별 평균 단가 ±50% 오차). 정확한 청구액은 Google AI Studio billing 대시보드 확인.
+        </p>
+      </div>
+    </details>
+  );
 }
 
 function MathpixStatusBanner({ status }: { status: MathpixStatus }) {

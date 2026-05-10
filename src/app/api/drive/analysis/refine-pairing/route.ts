@@ -34,8 +34,12 @@ export async function GET() {
   const hasGeminiKey = !!(process.env.GEMINI_API_KEY?.trim());
 
   let unpairedCount = 0;
+  let withProblemNoCount = 0;
+  let totalRecords = 0;
   try {
     const all = await fetchAllRecords();
+    totalRecords = all.length;
+    withProblemNoCount = all.filter((r) => typeof r.problem_no === "number").length;
     unpairedCount = all.filter((r) => {
       if (typeof r.problem_no !== "number") return false;
       const hasSolution = !!(r.solution_text && r.solution_text.trim());
@@ -46,19 +50,35 @@ export async function GET() {
     // best-effort
   }
 
+  // 「unpaired 0건」 메시지의 두 가지 케이스 구분 — 사용자 혼란 방지
+  let zeroReason = "";
+  if (unpairedCount === 0) {
+    if (withProblemNoCount === 0) {
+      zeroReason =
+        `problem_no 가진 record 자체가 0건 (전체 ${totalRecords} 건). ` +
+        `시중교재가 아직 학습 안 됐거나, OCR 결과에서 문항 번호 인식 실패. ` +
+        `먼저 「분석자료 새로 학습」 + analysisTextNormalizer 패턴 보강 필요.`;
+    } else {
+      zeroReason = `problem_no 가진 record ${withProblemNoCount} 건이 모두 페어 완성 — 정제 불필요 (정상).`;
+    }
+  }
+
   return NextResponse.json({
     ok: true,
     enabled,
     killSwitch,
     hasGeminiKey,
     unpairedCount,
+    withProblemNoCount,
+    totalRecords,
+    zeroReason,
     model: process.env.ASSISTED_PAIRING_MODEL || "gemini-2.0-flash",
     canRun: enabled && !killSwitch && hasGeminiKey && unpairedCount > 0,
     blockers: [
       ...(enabled ? [] : ["ASSISTED_PAIRING_ENABLED=true 환경변수 필요"]),
       ...(killSwitch ? ["GEMINI_OCR_DISABLED 킬스위치 활성"] : []),
       ...(hasGeminiKey ? [] : ["GEMINI_API_KEY 미설정"]),
-      ...(unpairedCount === 0 ? ["페어 깨진 record 가 없음 (정제 불필요)"] : []),
+      ...(unpairedCount === 0 ? [zeroReason] : []),
     ],
   });
 }
