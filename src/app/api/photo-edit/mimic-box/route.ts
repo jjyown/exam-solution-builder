@@ -5,6 +5,7 @@
  */
 import { NextResponse } from "next/server";
 import { geminiMimicCropBox } from "@/lib/photoEditGemini";
+import { logApiCall } from "@/lib/apiCallLogger";
 
 export async function POST(req: Request) {
   let body: {
@@ -34,6 +35,13 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, error: "referenceBox 좌표 오류" }, { status: 400 });
   }
   const r = await geminiMimicCropBox(body.referenceImage, refBox, body.targetImage);
+  void logApiCall({
+    route: "/api/photo-edit/mimic-box",
+    purpose: "사진 편집기 — 박스 다른 페이지로 복제",
+    vendor: "gemini",
+    model: (r.ok && r.model) || "gemini-2.5-flash-lite",
+    ok: r.ok,
+  });
   if (!r.ok) return NextResponse.json(r, { status: 502 });
   return NextResponse.json(r);
 }

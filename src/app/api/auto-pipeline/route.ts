@@ -26,6 +26,7 @@ import { runAutoPipeline, type PipelineResult } from '@/lib/autoPipeline';
 import { buildAutoChecklist } from '@/lib/autoPipelineChecklist';
 import { findRelevantCautions, recordAutoPipelineRun } from '@/lib/autoPipelineLog';
 import { extractTextFromUploadedFile } from '@/lib/fileExtraction';
+import { logApiCall as apiCallLog } from '@/lib/apiCallLogger';
 import { extractQuestionsFromText, type ExtractedQuestion } from '@/lib/questionSplit';
 import {
   approxCostCents,
@@ -258,6 +259,23 @@ async function resolveItems(body: InputBody): Promise<Resolved> {
       fileName: body.fileName,
       fileType: body.fileType,
     });
+    // OCR 호출 단가는 LLM 풀이와 별개라 auto_pipeline_runs.model(LLM)에는 안 잡힘 →
+    // api_call_logs 에 별도 라우트("/api/auto-pipeline:ocr")로 기록.
+    // pdf-text 는 pdfjs(무료) 라 외부호출 X — 로깅 생략.
+    if (extracted.ok && extracted.source !== 'pdf-text') {
+      const isMathpix = extracted.source === 'image-ocr' || extracted.source === 'pdf-mathpix';
+      void apiCallLog({
+        route: '/api/auto-pipeline:ocr',
+        purpose: '해설 자동 제작 — 업로드 파일 OCR (풀이 생성 사전단계)',
+        vendor: isMathpix ? 'mathpix' : 'gemini',
+        model: isMathpix
+          ? extracted.source === 'pdf-mathpix' ? 'mathpix-v3-pdf' : 'mathpix-v3-text'
+          : extracted.model || 'unknown',
+        ok: true,
+        units: extracted.pages && extracted.pages > 0 ? extracted.pages : 1,
+        meta: { fileName: body.fileName, source: extracted.source },
+      });
+    }
     if (!extracted.ok) return { ok: false, error: extracted.error };
 
     const questions = extractQuestionsFromText(extracted.text);

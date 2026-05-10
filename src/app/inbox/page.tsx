@@ -57,6 +57,13 @@ function questionPreview(text: string, max = 80) {
   return t.length > max ? t.slice(0, max) + "…" : t;
 }
 
+/**
+ * 그룹 자동 접힘 임계값 — 한 시험명에 이만큼 이상 모이면 기본 접힘 상태로.
+ * 사용자가 개별 토글한 그룹은 expandedOverrides Map 으로 우선 적용된다.
+ */
+const AUTO_COLLAPSE_THRESHOLD = 8;
+const EXPANDED_STORAGE_KEY = "highroad-inbox:expanded-overrides:v1";
+
 export default function InboxPage() {
   const [rows, setRows] = useState<RunRow[]>([]);
   const [supaStatus, setSupaStatus] = useState<SupabaseStatus | null>(null);
@@ -66,6 +73,70 @@ export default function InboxPage() {
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<Filter>("all");
   const [busyDocxId, setBusyDocxId] = useState<string | null>(null);
+  /**
+   * 사용자가 명시적으로 토글한 그룹 — examName → true(펼침) | false(접힘).
+   * 명시 안 된 그룹은 AUTO_COLLAPSE_THRESHOLD 규칙으로 결정.
+   * localStorage 영속화 — 새로고침 후에도 유지.
+   */
+  const [expandedOverrides, setExpandedOverrides] = useState<Record<string, boolean>>({});
+
+  // 마운트 시 localStorage 에서 복원
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      const raw = window.localStorage.getItem(EXPANDED_STORAGE_KEY);
+      if (raw) setExpandedOverrides(JSON.parse(raw));
+    } catch {
+      /* best-effort */
+    }
+  }, []);
+
+  // overrides 바뀌면 즉시 저장
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      window.localStorage.setItem(EXPANDED_STORAGE_KEY, JSON.stringify(expandedOverrides));
+    } catch {
+      /* QuotaExceeded 등 — 조용히 무시 */
+    }
+  }, [expandedOverrides]);
+
+  /**
+   * 그룹 확장 여부 판단:
+   *  1) override 있으면 그 값 우선
+   *  2) 없으면 AUTO_COLLAPSE_THRESHOLD 미만일 때만 기본 펼침
+   */
+  function isExpanded(examName: string, count: number): boolean {
+    if (Object.prototype.hasOwnProperty.call(expandedOverrides, examName)) {
+      return expandedOverrides[examName];
+    }
+    return count < AUTO_COLLAPSE_THRESHOLD;
+  }
+
+  function toggleGroup(examName: string, currentCount: number) {
+    const wasExpanded = isExpanded(examName, currentCount);
+    setExpandedOverrides((prev) => ({ ...prev, [examName]: !wasExpanded }));
+  }
+
+  function expandAll(names: string[]) {
+    setExpandedOverrides((prev) => {
+      const next = { ...prev };
+      for (const n of names) next[n] = true;
+      return next;
+    });
+  }
+
+  function collapseAll(names: string[]) {
+    setExpandedOverrides((prev) => {
+      const next = { ...prev };
+      for (const n of names) next[n] = false;
+      return next;
+    });
+  }
+
+  function resetGroupOverrides() {
+    setExpandedOverrides({});
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -286,6 +357,34 @@ export default function InboxPage() {
             </button>
           ))}
         </div>
+        {/* 그룹 일괄 펼침/접힘 — 그룹이 2개 이상일 때만 의미 있음 */}
+        {grouped.length > 1 && (
+          <div className="flex items-center gap-1 text-[11px]">
+            <button
+              onClick={() => expandAll(grouped.map(([n]) => n))}
+              className="rounded border border-slate-300 bg-white px-2 py-1 font-semibold text-slate-700 hover:bg-slate-50"
+              title="모든 시험명 그룹을 펼칩니다"
+            >
+              ⤓ 모두 펴기
+            </button>
+            <button
+              onClick={() => collapseAll(grouped.map(([n]) => n))}
+              className="rounded border border-slate-300 bg-white px-2 py-1 font-semibold text-slate-700 hover:bg-slate-50"
+              title="모든 시험명 그룹을 접습니다"
+            >
+              ⤒ 모두 접기
+            </button>
+            {Object.keys(expandedOverrides).length > 0 && (
+              <button
+                onClick={resetGroupOverrides}
+                className="rounded border border-slate-300 bg-white px-2 py-1 font-semibold text-slate-500 hover:bg-slate-50"
+                title={`기본 규칙(${AUTO_COLLAPSE_THRESHOLD}건 이상이면 자동 접힘) 으로 되돌립니다`}
+              >
+                ↺ 기본
+              </button>
+            )}
+          </div>
+        )}
         <div className="ml-auto text-xs text-slate-500">
           {loading ? "불러오는 중…" : `${filtered.length}건 / 총 ${rows.length}건`}
         </div>
@@ -307,19 +406,52 @@ export default function InboxPage() {
           const reviewedCount = groupRows.filter((r) => r.reviewed_at).length;
           const isUngrouped = examName === "(시험명 미지정)";
           const cropHref = isUngrouped ? "/crop" : `/crop?examName=${encodeURIComponent(examName)}`;
+          const expanded = isExpanded(examName, groupRows.length);
           return (
             <div
               key={examName}
               className="overflow-hidden rounded-lg border border-slate-200 bg-white"
             >
-              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 bg-slate-50 px-4 py-2.5">
-                <div>
-                  <div className="text-sm font-bold text-slate-800">{examName}</div>
-                  <div className="text-[11px] text-slate-500">
-                    {groupRows.length}건 · 성공 {okCount} / 검수 {reviewedCount}
+              <div
+                className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 bg-slate-50 px-4 py-2.5 hover:bg-slate-100"
+                onClick={() => toggleGroup(examName, groupRows.length)}
+                role="button"
+                tabIndex={0}
+                aria-expanded={expanded}
+                aria-controls={`inbox-group-body-${encodeURIComponent(examName)}`}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    toggleGroup(examName, groupRows.length);
+                  }
+                }}
+                style={{ cursor: "pointer" }}
+              >
+                <div className="flex items-center gap-2">
+                  {/* 펼침/접힘 화살표 — 클릭은 부모 div 가 받음 */}
+                  <span
+                    aria-hidden
+                    className={`inline-block w-3 text-[11px] text-slate-500 transition-transform ${
+                      expanded ? "rotate-90" : ""
+                    }`}
+                  >
+                    ▶
+                  </span>
+                  <div>
+                    <div className="text-sm font-bold text-slate-800">{examName}</div>
+                    <div className="text-[11px] text-slate-500">
+                      {groupRows.length}건 · 성공 {okCount} / 검수 {reviewedCount}
+                      {!expanded && (
+                        <span className="ml-2 text-slate-400">— 클릭해 펼치기</span>
+                      )}
+                    </div>
                   </div>
                 </div>
-                <div className="flex items-center gap-1.5">
+                {/* 액션 버튼들 — 헤더 토글에서 제외 (stopPropagation) */}
+                <div
+                  className="flex items-center gap-1.5"
+                  onClick={(e) => e.stopPropagation()}
+                >
                   <Link
                     href={cropHref}
                     className="rounded border border-emerald-300 bg-white px-2.5 py-1 text-[11px] font-semibold text-emerald-700 hover:bg-emerald-50"
@@ -335,7 +467,11 @@ export default function InboxPage() {
                   </button>
                 </div>
               </div>
-              <table className="w-full text-xs">
+              {expanded && (
+              <table
+                id={`inbox-group-body-${encodeURIComponent(examName)}`}
+                className="w-full text-xs"
+              >
                 <thead className="text-left text-[11px] uppercase tracking-wide text-slate-500">
                   <tr>
                     <th className="px-3 py-1.5">문항</th>
@@ -409,6 +545,7 @@ export default function InboxPage() {
                     })}
                 </tbody>
               </table>
+              )}
             </div>
           );
         })}

@@ -24,6 +24,7 @@
 import { NextResponse } from "next/server";
 import { bboxFallbackForFile } from "@/lib/driveAnalysisLearner";
 import { resolveMathpixCredentials } from "@/lib/mathpixV3Text";
+import { logApiCall } from "@/lib/apiCallLogger";
 
 function isBboxFallbackEnabled(): boolean {
   return /^(1|true|yes|on)$/i.test(process.env.BBOX_FALLBACK_ENABLED || "");
@@ -73,6 +74,18 @@ export async function POST(req: Request) {
   }
 
   const result = await bboxFallbackForFile(fileId);
+  // BBox 폴백은 Mathpix /v3/pdf 1회 추가 호출 — 페이지 수만큼 과금됨.
+  // 결과에 pageCount 가 있으면 그걸로 보정, 없으면 1로.
+  const pageCount = (result as { pageCount?: number }).pageCount;
+  void logApiCall({
+    route: "/api/drive/analysis/bbox-fallback",
+    purpose: "분석자료 — BBox 기반 PDF 재처리 (페어링률 보강)",
+    vendor: "mathpix",
+    model: "mathpix-v3-pdf",
+    ok: result.ok,
+    units: pageCount && pageCount > 0 ? pageCount : 1,
+    meta: { fileId },
+  });
   if (!result.ok) {
     return NextResponse.json(
       { ok: false, fileId, status: result.status, error: result.message },

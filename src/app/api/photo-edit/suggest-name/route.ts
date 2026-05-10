@@ -7,6 +7,7 @@
  */
 import { NextResponse } from "next/server";
 import { geminiSuggestExamName } from "@/lib/photoEditGemini";
+import { logApiCall } from "@/lib/apiCallLogger";
 
 export async function POST(req: Request) {
   let body: { image?: string; focusImage?: string };
@@ -21,6 +22,15 @@ export async function POST(req: Request) {
   const focusImage =
     typeof body.focusImage === "string" && body.focusImage ? body.focusImage : undefined;
   const r = await geminiSuggestExamName(body.image, focusImage);
+  void logApiCall({
+    route: "/api/photo-edit/suggest-name",
+    purpose: "사진 편집기 — 시험지명 자동 추천",
+    vendor: "gemini",
+    model: (r.ok && r.model) || "gemini-2.5-flash-lite",
+    ok: r.ok,
+    // focusImage 가 같이 들어오면 호출당 입력 토큰이 거의 2배 (이미지 2장)
+    units: focusImage ? 2 : 1,
+  });
   if (!r.ok) return NextResponse.json(r, { status: 502 });
   return NextResponse.json(r);
 }

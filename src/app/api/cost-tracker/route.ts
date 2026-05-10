@@ -1,22 +1,26 @@
 /**
  * GET /api/cost-tracker
  * ────────────────────────────────────────────────────────────────────────────
- *  최근 N일간 Gemini/OpenAI API 호출 트래픽과 추정 비용을 한 곳에서 보여준다.
+ *  최근 N일간 Gemini/OpenAI/Mathpix API 호출 트래픽과 추정 비용을 한 곳에서 보여준다.
  *
- *  데이터 소스:
- *   1) auto_pipeline_runs.model — 자동 파이프라인 호출 (사용자가 「풀이 생성」)
- *   2) analysis_records.created_at — Drive 분석자료 학습 OCR 호출 (백그라운드)
+ *  데이터 소스 (3종):
+ *   1) auto_pipeline_runs       — /api/auto-pipeline 메인 풀이 (LLM)
+ *   2) analysis_records         — /api/drive/analysis/sync 학습 OCR (Gemini)
+ *   3) api_call_logs            — 그 외 모든 라우트(사진편집·추출·페어정제·BBox 폴백 등)
  *
  *  추정 단가 (USD, 평균값 기반):
- *   gemini-2.5-pro     : input $1.25/MTok + output $10/MTok → 호출당 ~$0.019
- *   gemini-2.5-flash   : input $0.30/MTok + output $2.50/MTok → 호출당 ~$0.005
- *   gemini-2.0-flash   : input $0.10/MTok + output $0.40/MTok → 호출당 ~$0.001
+ *   gemini-2.5-pro       : 호출당 ~$0.019
+ *   gemini-2.5-flash     : ~$0.005
+ *   gemini-2.5-flash-lite: ~$0.0008
+ *   gemini-2.0-flash     : ~$0.001
  *   gemini-2.0-flash-lite: ~$0.0005
- *   OpenAI gpt-4o      : ~$0.030
- *   OpenAI gpt-4o-mini : ~$0.001
+ *   gpt-4o               : ~$0.030
+ *   gpt-4o-mini          : ~$0.001
+ *   mathpix-v3-text      : 페이지/이미지당 ~$0.004
+ *   mathpix-v3-pdf       : 페이지당 ~$0.005
  *
- *  ⚠️ 정확한 토큰 측정이 아닌 평균 추정. 단순 비례 계산이라 ±50% 오차 가능.
- *  진짜 정확하려면 Google AI Studio billing dashboard 직접 확인 권장.
+ *  ⚠️ 정확한 토큰 측정이 아닌 평균 추정. ±50% 오차 가능.
+ *  실제 청구액은 Google AI Studio / OpenAI / Mathpix billing dashboard 확인.
  *
  *  Query:
  *    ?days=7   — 분석 기간 (기본 7일, 최대 90)
@@ -26,13 +30,14 @@
  *      ok, periodDays, since,
  *      autoPipeline: { byModel, totalCalls, estUsd, estKrw },
  *      driveLearning: { byDay, totalRecords, ocrEstUsd, ocrEstKrw },
- *      total: { estUsd, estKrw },
+ *      byRoute: Array<{
+ *        route, purpose, vendor, models, calls, units, estUsd, estKrw,
+ *        avgPerCallUsd, source: 'auto_pipeline_runs'|'analysis_records'|'api_call_logs'
+ *      }>,
+ *      total: { estUsd, estKrw, breakdown },
  *      hint: string,
- *      assistedPairingEnabled: boolean,
- *      diagnoses: Array<{level: 'info'|'warn'|'high', message: string}>
+ *      diagnoses: Array<{level, message}>
  *    }
- *
- *  Supabase 미설정 시 빈 응답 (ok: true, but empty fields).
  * ────────────────────────────────────────────────────────────────────────────
  */
 import { NextResponse } from "next/server";
@@ -45,16 +50,62 @@ const COST_PER_CALL_USD: Record<string, number> = {
   // 자동 파이프라인 (장문 입력 + 단계별 풀이 출력)
   "gemini-2.5-pro": 0.019,
   "gemini-2.5-flash": 0.005,
+  "gemini-2.5-flash-lite": 0.0008,
   "gemini-2.0-flash": 0.001,
   "gemini-2.0-flash-lite": 0.0005,
   "gpt-4o": 0.030,
   "gpt-4o-mini": 0.001,
+  "gpt-4.1": 0.020,
+  "gpt-4.1-mini": 0.002,
+  // Mathpix — 페이지/이미지당
+  "mathpix-v3-text": 0.004,
+  "mathpix-v3-pdf": 0.005,
 };
 
 // Drive 학습 OCR — Gemini Vision 폴백 호출당 평균 (PDF 페이지·이미지 1장 기준)
 const VISION_OCR_COST_USD: Record<string, number> = {
   "gemini-2.0-flash": 0.0001,
   "gemini-2.5-flash": 0.0005,
+};
+
+// 라우트 라벨 — UI 에서 「작업 이름」으로 표시. 미등록 라우트는 라우트 경로 그대로.
+const ROUTE_LABELS: Record<string, { purpose: string; trigger: string }> = {
+  "/api/auto-pipeline": {
+    purpose: "해설 자동 제작 — 풀이 생성 (LLM)",
+    trigger: "/auto · /crop UI 「풀이 생성」 버튼",
+  },
+  "/api/auto-pipeline:ocr": {
+    purpose: "해설 자동 제작 — 업로드 파일 OCR (사전단계)",
+    trigger: "/auto 업로드 + 「풀이 생성」 흐름",
+  },
+  "/api/auto-pipeline/extract": {
+    purpose: "해설 자동 제작 — 문항 미리보기 OCR",
+    trigger: "/auto 파일 업로드 직후 (인식된 문항 표시)",
+  },
+  "/api/drive/analysis/sync": {
+    purpose: "분석자료 — Drive 「분석용 자료」 학습 OCR",
+    trigger: "백그라운드 자동 동기화 + 수동 「새로 학습」",
+  },
+  "/api/drive/analysis/refine-pairing": {
+    purpose: "분석자료 — AI 페어 정제 (unpaired 분류)",
+    trigger: "AI 페어 정제 패널 (ASSISTED_PAIRING_ENABLED=true 필요)",
+  },
+  "/api/drive/analysis/bbox-fallback": {
+    purpose: "분석자료 — BBox 기반 PDF 재처리 (페어링률 보강)",
+    trigger: "BBox 패널 (BBOX_FALLBACK_ENABLED=true 필요) + 자동 트리거",
+  },
+  "/api/photo-edit/detect-box": {
+    purpose: "사진 편집기 — 문제 박스 자동감지",
+    trigger: "사진 편집기 「박스 자동감지」 버튼",
+  },
+  "/api/photo-edit/mimic-box": {
+    purpose: "사진 편집기 — 박스 다른 페이지로 복제",
+    trigger: "사진 편집기 「박스 복제」 버튼",
+  },
+  "/api/photo-edit/suggest-name": {
+    purpose: "사진 편집기 — 시험지명 자동 추천",
+    trigger: "사진 편집기 「시험지명 추천」 버튼",
+  },
 };
 
 function clampInt(v: string | null, fallback: number, min: number, max: number): number {
@@ -90,6 +141,7 @@ export async function GET(req: Request) {
       configured: false,
       autoPipeline: { byModel: {}, totalCalls: 0, estUsd: 0, estKrw: 0 },
       driveLearning: { byDay: {}, totalRecords: 0, ocrEstUsd: 0, ocrEstKrw: 0 },
+      byRoute: [],
       total: { estUsd: 0, estKrw: 0 },
       hint: "Supabase 미설정 — 사용량 추적 불가. SUPABASE_SERVICE_ROLE_KEY 설정 필요.",
       assistedPairingEnabled: isAssistedPairingEnabled(),
@@ -201,7 +253,130 @@ export async function GET(req: Request) {
     }
   }
 
-  const total = autoEstUsd + drvOcrEstUsd + academyEstUsd;
+  // ── 3) api_call_logs — 그 외 모든 라우트(짧고 잦은 호출) ─────────────────
+  // 사진편집(detect/mimic/suggest), 추출 미리보기, 페어 정제, BBox 폴백, 자동파이프라인 OCR
+  // 등은 이 테이블에 단건 기록됨.
+  type RouteAggRow = {
+    route: string;
+    purpose: string;
+    trigger: string;
+    vendor: string;
+    models: string[];
+    calls: number;
+    units: number;
+    estUsd: number;
+    avgPerCallUsd: number;
+    source: "auto_pipeline_runs" | "analysis_records" | "api_call_logs";
+  };
+  const byRoute: RouteAggRow[] = [];
+
+  // (a) auto_pipeline_runs → /api/auto-pipeline
+  if (autoTotalCalls > 0) {
+    const vendors = new Set<string>();
+    const models = new Set<string>();
+    for (const m of Object.keys(byModel)) {
+      models.add(m);
+      vendors.add(/^gpt|openai/i.test(m) ? "openai" : "gemini");
+    }
+    byRoute.push({
+      route: "/api/auto-pipeline",
+      purpose: ROUTE_LABELS["/api/auto-pipeline"].purpose,
+      trigger: ROUTE_LABELS["/api/auto-pipeline"].trigger,
+      vendor: Array.from(vendors).sort().join("+") || "gemini",
+      models: Array.from(models).sort(),
+      calls: autoTotalCalls,
+      units: autoTotalAttempts,
+      estUsd: Number(autoEstUsd.toFixed(4)),
+      avgPerCallUsd: autoTotalCalls > 0 ? Number((autoEstUsd / autoTotalCalls).toFixed(4)) : 0,
+      source: "auto_pipeline_runs",
+    });
+  }
+
+  // (b) analysis_records → /api/drive/analysis/sync
+  if (drvTotalRecords > 0) {
+    byRoute.push({
+      route: "/api/drive/analysis/sync",
+      purpose: ROUTE_LABELS["/api/drive/analysis/sync"].purpose,
+      trigger: ROUTE_LABELS["/api/drive/analysis/sync"].trigger,
+      vendor: "gemini+mathpix",
+      models: ["gemini-2.0-flash", "mathpix-v3-pdf"],
+      calls: drvVisionCalls,
+      units: drvTotalRecords,
+      estUsd: Number(drvOcrEstUsd.toFixed(4)),
+      avgPerCallUsd: drvVisionCalls > 0 ? Number((drvOcrEstUsd / drvVisionCalls).toFixed(4)) : 0,
+      source: "analysis_records",
+    });
+  }
+
+  // (c) api_call_logs → 라우트별 GROUP BY
+  let apiLogTotalUsd = 0;
+  let apiLogTotalCalls = 0;
+  let apiLogConfigured = true;
+  let apiLogError: string | null = null;
+  try {
+    const { data: logRows, error: logErr } = await client
+      .from("api_call_logs")
+      .select("route, purpose, vendor, model, units, est_cost_usd, ok")
+      .gte("created_at", sinceIso)
+      .limit(20000);
+    if (logErr) {
+      // 테이블 미적용 시: code === '42P01' (undefined_table). UI 에는 안내만.
+      apiLogConfigured = false;
+      apiLogError = logErr.message;
+    } else if (Array.isArray(logRows)) {
+      type Bucket2 = {
+        purpose: string;
+        vendor: Set<string>;
+        models: Set<string>;
+        calls: number;
+        units: number;
+        estUsd: number;
+      };
+      const buckets: Record<string, Bucket2> = {};
+      for (const r of logRows) {
+        const route = (r.route as string) || "(unknown)";
+        const b =
+          buckets[route] ??
+          (buckets[route] = {
+            purpose: (r.purpose as string) || ROUTE_LABELS[route]?.purpose || route,
+            vendor: new Set<string>(),
+            models: new Set<string>(),
+            calls: 0,
+            units: 0,
+            estUsd: 0,
+          });
+        if (r.vendor) b.vendor.add(r.vendor as string);
+        if (r.model) b.models.add(r.model as string);
+        b.calls += 1;
+        b.units += Number(r.units) || 1;
+        b.estUsd += Number(r.est_cost_usd) || 0;
+      }
+      for (const [route, b] of Object.entries(buckets)) {
+        byRoute.push({
+          route,
+          purpose: b.purpose,
+          trigger: ROUTE_LABELS[route]?.trigger || "—",
+          vendor: Array.from(b.vendor).sort().join("+") || "unknown",
+          models: Array.from(b.models).sort(),
+          calls: b.calls,
+          units: b.units,
+          estUsd: Number(b.estUsd.toFixed(4)),
+          avgPerCallUsd: b.calls > 0 ? Number((b.estUsd / b.calls).toFixed(4)) : 0,
+          source: "api_call_logs",
+        });
+        apiLogTotalUsd += b.estUsd;
+        apiLogTotalCalls += b.calls;
+      }
+    }
+  } catch (e) {
+    apiLogConfigured = false;
+    apiLogError = (e as Error).message;
+  }
+
+  // 비싼 라우트가 위로 오게 정렬
+  byRoute.sort((a, b) => b.estUsd - a.estUsd);
+
+  const total = autoEstUsd + drvOcrEstUsd + apiLogTotalUsd + academyEstUsd;
   const totalKrw = total * KRW_PER_USD;
 
   // 진단 로직 — 사용량 폭증 원인 자동 식별
@@ -249,10 +424,20 @@ export async function GET(req: Request) {
     });
   }
   // f. 호출 0건이면 측정 불가 안내
-  if (autoTotalCalls === 0 && drvTotalRecords === 0) {
+  if (autoTotalCalls === 0 && drvTotalRecords === 0 && apiLogTotalCalls === 0) {
     diagnoses.push({
       level: "info",
-      message: "최근 호출 기록 없음 — Supabase 영속화가 막혔거나 진짜로 호출이 0건. auto_pipeline_runs 테이블 확인.",
+      message: "최근 호출 기록 없음 — Supabase 영속화가 막혔거나 진짜로 호출이 0건. auto_pipeline_runs / api_call_logs 테이블 확인.",
+    });
+  }
+  // g. api_call_logs 미적용 안내 — 사진편집·페어정제 등이 비용에 안 잡힘
+  if (!apiLogConfigured) {
+    diagnoses.push({
+      level: "info",
+      message:
+        "api_call_logs 테이블 미적용 — 사진편집·AI 페어정제·BBox 폴백 등 짧은 호출이 비용 통계에 안 잡힙니다. " +
+        "supabase/api_call_logs.sql 을 한 번 실행해 주세요." +
+        (apiLogError ? ` (${apiLogError.slice(0, 80)})` : ""),
     });
   }
 
@@ -282,6 +467,17 @@ export async function GET(req: Request) {
       estUsd: Number(academyEstUsd.toFixed(4)),
       estKrw: Math.round(academyEstUsd * KRW_PER_USD),
     },
+    apiCallLogs: {
+      configured: apiLogConfigured,
+      error: apiLogError,
+      totalCalls: apiLogTotalCalls,
+      estUsd: Number(apiLogTotalUsd.toFixed(4)),
+      estKrw: Math.round(apiLogTotalUsd * KRW_PER_USD),
+    },
+    byRoute: byRoute.map((r) => ({
+      ...r,
+      estKrw: Math.round(r.estUsd * KRW_PER_USD),
+    })),
     total: {
       estUsd: Number(total.toFixed(4)),
       estKrw: Math.round(totalKrw),
@@ -289,12 +485,13 @@ export async function GET(req: Request) {
       breakdown: {
         해설제작_자동파이프라인: Number(autoEstUsd.toFixed(4)),
         해설제작_Drive학습: Number(drvOcrEstUsd.toFixed(4)),
+        해설제작_그외라우트: Number(apiLogTotalUsd.toFixed(4)),
         학원관리: Number(academyEstUsd.toFixed(4)),
       },
     },
     assistedPairingEnabled: isAssistedPairingEnabled(),
     diagnoses,
     hint:
-      "추정 비용은 모델별 평균 단가 기준 ±50% 오차. 정확한 청구액은 Google AI Studio billing 확인.",
+      "추정 비용은 모델별 평균 단가 기준 ±50% 오차. 정확한 청구액은 Google AI Studio / OpenAI / Mathpix billing 확인.",
   });
 }

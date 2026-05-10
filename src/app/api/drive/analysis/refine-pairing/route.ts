@@ -23,6 +23,7 @@ import {
   buildAssistedPairingPlan,
   isAssistedPairingEnabled,
 } from "@/lib/pairingAssistedRefiner";
+import { logApiCall } from "@/lib/apiCallLogger";
 
 /**
  * GET — 설정 상태 + 처리 가능한 unpaired record 수.
@@ -137,11 +138,29 @@ export async function POST(req: Request) {
       dryRun: !apply,
     });
   } catch (e) {
+    void logApiCall({
+      route: "/api/drive/analysis/refine-pairing",
+      purpose: "분석자료 — AI 페어 정제(unpaired 분류)",
+      vendor: "gemini",
+      model: body.model || process.env.ASSISTED_PAIRING_MODEL || "gemini-2.0-flash",
+      ok: false,
+      meta: { error: (e as Error).message },
+    });
     return NextResponse.json(
       { ok: false, error: (e as Error).message },
       { status: 500 },
     );
   }
+  // plan.stats.callsMade = batch 호출 횟수 (각 batch ≈ 1 LLM 호출). units 로 보정 기록.
+  void logApiCall({
+    route: "/api/drive/analysis/refine-pairing",
+    purpose: "분석자료 — AI 페어 정제(unpaired 분류)",
+    vendor: "gemini",
+    model: plan.stats?.model || body.model || "gemini-2.0-flash",
+    ok: true,
+    units: Math.max(1, Number(plan.stats?.callsMade) || 1),
+    meta: { recordsProcessed: plan.stats?.recordsProcessed, dryRun: !apply },
+  });
 
   if (!apply) {
     return NextResponse.json({

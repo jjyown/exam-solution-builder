@@ -29,7 +29,7 @@ export type SharedExplanationOptions = {
 export const SHARED_OPTIONS_KEY = 'highroad:explanation-options:v1';
 
 export const SHARED_OPTIONS_DEFAULT: SharedExplanationOptions = {
-  model: 'openai', // 비용 절감 — 둘 다 기본 OpenAI (필요 시 사용자가 변경)
+  model: 'gemini', // 기본 Gemini — /auto 와 통일. OpenAI 는 보조(한도 초과 시 fallback / 사용자 선택).
   profile: 'auto',
   topK: 3,
   maxRetries: 2,
