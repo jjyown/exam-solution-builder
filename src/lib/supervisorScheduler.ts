@@ -21,8 +21,52 @@
  */
 import type { ImprovementSuggestion, RetrospectiveReport } from "./retrospective";
 
-let started = false;
-let inProgress = false;
+/**
+ * Next.js 16 + Railway 조합에서 instrumentation.ts 와 route handler 가 모듈을
+ * 별개 컨텍스트로 import 하는 경우가 관찰됨 (`Killed → restart` 직후 boot 마다
+ * 2회 발화) — 모듈 로컬 변수로 가드하면 각 컨텍스트가 자기만의 `started=false`
+ * 를 가져 setTimeout/Interval 이 중복 등록된다.
+ *
+ * 모든 스케줄러 상태를 globalThis 에 둔다 — Node 프로세스당 1개만 보장.
+ */
+type SupervisorGlobalState = {
+  started: boolean;
+  inProgress: boolean;
+  /** 직전 runOnce 가 시작된 시각 — 너무 빠른 재호출(예: 부팅 직후 2회) 차단용 */
+  lastRunStartedAt: number;
+  lastSnapshot: SupervisorSnapshot;
+  autoCautions: string[];
+};
+
+const SUPERVISOR_GLOBAL_KEY = '__highroad_supervisor_state__';
+const G = globalThis as unknown as Record<string, SupervisorGlobalState | undefined>;
+
+function getState(): SupervisorGlobalState {
+  if (!G[SUPERVISOR_GLOBAL_KEY]) {
+    G[SUPERVISOR_GLOBAL_KEY] = {
+      started: false,
+      inProgress: false,
+      lastRunStartedAt: 0,
+      lastSnapshot: {
+        ranAt: null,
+        ok: false,
+        totalRuns: 0,
+        successRate: 0,
+        avgUserRating: null,
+        highPrioritySuggestions: [],
+        suggestionsCount: 0,
+        pairingRate: null,
+        integrityIssues: { missing: 0, duplicate: 0, unpaired: 0 },
+        error: null,
+      },
+      autoCautions: [],
+    };
+  }
+  return G[SUPERVISOR_GLOBAL_KEY] as SupervisorGlobalState;
+}
+
+/** 부팅 후 또는 직전 runOnce 후 N분 내에 또 호출되면 무시 — 이중 발화 방지 */
+const MIN_RUN_INTERVAL_MS = 60_000;
 
 export type SupervisorSnapshot = {
   ranAt: number | null;
@@ -47,19 +91,6 @@ export type SupervisorSnapshot = {
   error: string | null;
 };
 
-let lastSnapshot: SupervisorSnapshot = {
-  ranAt: null,
-  ok: false,
-  totalRuns: 0,
-  successRate: 0,
-  avgUserRating: null,
-  highPrioritySuggestions: [],
-  suggestionsCount: 0,
-  pairingRate: null,
-  integrityIssues: { missing: 0, duplicate: 0, unpaired: 0 },
-  error: null,
-};
-
 /**
  * 감독관이 retrospective 결과에서 자동 추출한 「검토 메모」.
  * 사용자가 별점·피드백을 남기지 않아도, 자주 발생하는 실패 패턴이 다음 호출의
@@ -67,18 +98,16 @@ let lastSnapshot: SupervisorSnapshot = {
  *
  * findRelevantCautions(autoPipelineLog.ts) 가 이 배열을 함께 가져와 프롬프트에 합친다.
  */
-let autoCautions: string[] = [];
-
 export function getAutoSupervisorCautions(): string[] {
-  return autoCautions;
+  return getState().autoCautions;
 }
 
 export function getSupervisorSnapshot(): SupervisorSnapshot {
   // 안전망: instrumentation 미동작 환경 대비 — 첫 호출 시 자동 시작 (idempotent).
-  if (!started) {
+  if (!getState().started) {
     startSupervisorScheduler();
   }
-  return lastSnapshot;
+  return getState().lastSnapshot;
 }
 
 function reportToSnapshot(report: RetrospectiveReport): SupervisorSnapshot {
@@ -180,55 +209,70 @@ export async function runSupervisorNow(): Promise<{
   autoCautions: string[];
 }> {
   await runOnce();
-  return { snapshot: lastSnapshot, autoCautions };
+  const state = getState();
+  return { snapshot: state.lastSnapshot, autoCautions: state.autoCautions };
 }
 
 async function runOnce(): Promise<void> {
-  if (inProgress) return;
-  inProgress = true;
+  const state = getState();
+  if (state.inProgress) return;
+  // 직전 실행 후 1분 내 재호출은 차단 — 부팅 직후 setTimeout 과 외부 트리거가
+  // 겹쳐 retrospective(Supabase 1000 row 분석) 가 두 번 도는 사고를 막는다.
+  const now = Date.now();
+  if (now - state.lastRunStartedAt < MIN_RUN_INTERVAL_MS) {
+    console.log(
+      `[supervisor] 직전 실행 후 ${Math.round((now - state.lastRunStartedAt) / 1000)}초 — 이중 발화 차단`,
+    );
+    return;
+  }
+  state.inProgress = true;
+  state.lastRunStartedAt = now;
   try {
     const { generateRetrospective } = await import("./retrospective");
     const report = await generateRetrospective({ days: 30, maxRows: 1000 });
-    lastSnapshot = reportToSnapshot(report);
-    autoCautions = deriveAutoCautions(report);
-    if (autoCautions.length > 0) {
+    state.lastSnapshot = reportToSnapshot(report);
+    state.autoCautions = deriveAutoCautions(report);
+    if (state.autoCautions.length > 0) {
       console.warn(
-        `[supervisor] 자동 메모 ${autoCautions.length}건 갱신 — 다음 풀이 호출의 cautionNotes 에 주입됨`,
+        `[supervisor] 자동 메모 ${state.autoCautions.length}건 갱신 — 다음 풀이 호출의 cautionNotes 에 주입됨`,
       );
     }
-    if (lastSnapshot.highPrioritySuggestions.length > 0) {
+    if (state.lastSnapshot.highPrioritySuggestions.length > 0) {
       // Railway 로그·관제에 잡히도록 명시적 warn
       console.warn(
-        `[supervisor] HIGH priority 제안 ${lastSnapshot.highPrioritySuggestions.length}건 — /api/retrospective 확인 권장`,
+        `[supervisor] HIGH priority 제안 ${state.lastSnapshot.highPrioritySuggestions.length}건 — /api/retrospective 확인 권장`,
       );
-      for (const s of lastSnapshot.highPrioritySuggestions) {
+      for (const s of state.lastSnapshot.highPrioritySuggestions) {
         console.warn(`[supervisor]   · [${s.area}] ${s.finding}`);
       }
     }
   } catch (e) {
-    lastSnapshot = {
-      ...lastSnapshot,
+    state.lastSnapshot = {
+      ...state.lastSnapshot,
       ranAt: Date.now(),
       ok: false,
       error: (e as Error).message,
     };
   } finally {
-    inProgress = false;
+    state.inProgress = false;
   }
 }
 
 export function startSupervisorScheduler(): void {
-  if (started) return;
-  started = true;
+  const state = getState();
+  if (state.started) return;
+  state.started = true;
 
   const raw = process.env.SUPERVISOR_INTERVAL_MS?.trim();
   const intervalMs = raw ? Number(raw) : 6 * 60 * 60 * 1000; // 기본 6시간
   if (!Number.isFinite(intervalMs) || intervalMs <= 0) return;
 
+  // .unref() 로 graceful shutdown(SIGTERM) 시 타이머가 프로세스를 붙잡지 않게 한다.
+  // Railway 재시작 시 진행 중 retrospective 가 SIGKILL 로 강제 종료되는 사고 방지.
   setTimeout(() => {
     void runOnce();
-  }, 90_000);
+  }, 90_000).unref?.();
   setInterval(() => {
     void runOnce();
-  }, intervalMs);
+  }, intervalMs).unref?.();
 }

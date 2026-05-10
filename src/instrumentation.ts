@@ -42,6 +42,25 @@ export async function register(): Promise<void> {
     console.error("[instrumentation] supervisor 등록 실패:", (e as Error).message);
   }
 
+  // 4) 메모리 사용량 주기 로깅 — Railway 「Killed」(OOM) 진단용.
+  //    부팅 직후 1회 + 60초마다 1회. 한 줄짜리 로그라 비용 무시 가능.
+  //    누수 의심 시: rss/heapUsed 가 시간에 따라 우상향 → 메모리 누수.
+  //    한도 의심 시: rss 가 일정 천장 근처에서 Killed → Railway 인스턴스 메모리 부족.
+  try {
+    const logMem = (label: string) => {
+      const m = process.memoryUsage();
+      const fmt = (b: number) => `${(b / 1024 / 1024).toFixed(0)}MB`;
+      const uptime = Math.round(process.uptime());
+      console.log(
+        `[mem] ${label} uptime=${uptime}s rss=${fmt(m.rss)} heapUsed=${fmt(m.heapUsed)} heapTotal=${fmt(m.heapTotal)} external=${fmt(m.external)} arrayBuffers=${fmt(m.arrayBuffers)}`,
+      );
+    };
+    logMem("boot");
+    setInterval(() => logMem("tick"), 60_000).unref?.();
+  } catch (e) {
+    console.warn("[instrumentation] memory logger 등록 실패:", (e as Error).message);
+  }
+
   instrumentationRegistered = true;
   console.log("[instrumentation] register() 완료 — instrumentationRegistered=true");
 }
