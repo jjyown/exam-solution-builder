@@ -22,6 +22,7 @@ import {
   resolveDriveWorkCompleteFolderId,
   uploadBufferToDriveFolder,
 } from "@/lib/googleDrive";
+import { injectGeneratedGraphsIntoRuns } from "@/lib/explanationGraphInjection";
 
 type ParsedStep = { text: string; equation: string };
 type Parsed = {
@@ -61,12 +62,20 @@ export async function POST(req: Request) {
   }
 
   const examName = (body.examName || "해설지").trim();
-  const validRuns = body.runs.filter((r) => r.parsed);
-  if (validRuns.length === 0) {
+  const validRunsRaw = body.runs.filter((r) => r.parsed);
+  if (validRunsRaw.length === 0) {
     return NextResponse.json(
       { ok: false, error: "유효한 parsed 결과가 없습니다." },
       { status: 400 },
     );
+  }
+
+  // 그래프 후처리 — ```python``` 펜스 → matplotlib PNG → dataURL 마크다운.
+  // EXPLANATION_GRAPH_RUN env 가 켜진 환경에서만 실제 실행. 꺼져 있으면 그대로 통과.
+  const { runs: validRuns, logs: graphLogs } = await injectGeneratedGraphsIntoRuns(validRunsRaw);
+  if (graphLogs.length > 0) {
+    // 빌드 진단 — 운영자가 Railway 로그로 확인. UI 에는 노출 안 함.
+    console.log("[hml/graph-inject]", graphLogs.join(" | "));
   }
 
   // 다중 문항 — 각 문항을 같은 SECTION 안에 차례로 (단순 concat).

@@ -22,6 +22,7 @@ import {
   resolveDriveWorkCompleteFolderId,
   uploadBufferToDriveFolder,
 } from "@/lib/googleDrive";
+import { injectGeneratedGraphsIntoRuns } from "@/lib/explanationGraphInjection";
 
 type ParsedStep = { text: string; equation: string };
 type Parsed = {
@@ -102,6 +103,15 @@ export async function POST(req: Request) {
   }
 
   const examName = (body.examName || "해설지").trim();
+
+  // 그래프 후처리 — ```python``` 펜스 → matplotlib PNG → dataURL 마크다운.
+  // EXPLANATION_GRAPH_RUN env 가 켜진 환경에서만 실제 실행. 꺼져 있으면 그대로 통과.
+  const { runs: processedRuns, logs: graphLogs } = await injectGeneratedGraphsIntoRuns(body.runs);
+  if (graphLogs.length > 0) {
+    console.log("[docx/graph-inject]", graphLogs.join(" | "));
+  }
+  body.runs = processedRuns;
+
   const explanationBody = body.runs.map(renderRunAsBlock).join("\n\n");
   const quickAnswerLine = body.runs
     .filter((r) => r.parsed?.answer)

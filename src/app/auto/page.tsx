@@ -2904,33 +2904,45 @@ function DocxPreviewModal({
                 </div>
                 {r.parsed && (
                   <>
-                    <div className="mt-3 flex items-baseline gap-2">
+                    {/* [문제] — 실제 DOCX 도 같은 위치에 problem 섹션을 두 단으로 배치.
+                         미리보기는 column-count CSS 로 같은 레이아웃 흉내. */}
+                    <div className="mt-3">
+                      <p className="text-sm font-semibold text-slate-900">[문제]</p>
+                      <div className="docx-two-column mt-1.5 text-[13px] leading-relaxed text-slate-900">
+                        <ProblemBody text={r.questionText} />
+                      </div>
+                    </div>
+                    {/* [정답] — DOCX 에서는 1단(전폭). 미리보기도 동일. */}
+                    <div className="mt-4 flex items-baseline gap-2">
                       <span className="text-sm font-semibold text-slate-900">[정답]</span>
                       <span className="text-sm font-bold text-slate-900">
                         <MathText text={r.parsed.answer} />
                       </span>
                     </div>
+                    {/* [해설] — DOCX 2단. 미리보기도 column-count 적용. */}
                     <div className="mt-4">
                       <p className="text-sm font-semibold text-slate-900">[해설]</p>
-                      <ol className="mt-2 list-decimal space-y-2 pl-5 text-[13px] leading-relaxed text-slate-900">
-                        {r.parsed.explanation_steps.map((s, i) => (
-                          <li key={i}>
-                            <div>
-                              <MathText text={s.text} />
-                            </div>
-                            {s.equation && (
-                              <div className="mt-1">
-                                <EquationBlock tex={s.equation} />
+                      <div className="docx-two-column mt-2">
+                        <ol className="list-decimal space-y-2 pl-5 text-[13px] leading-relaxed text-slate-900">
+                          {r.parsed.explanation_steps.map((s, i) => (
+                            <li key={i}>
+                              <div>
+                                <MathText text={s.text} />
                               </div>
-                            )}
-                          </li>
-                        ))}
-                      </ol>
-                      {r.parsed.summary && (
-                        <p className="mt-3 text-[12px] text-slate-700">
-                          <MathText text={r.parsed.summary} />
-                        </p>
-                      )}
+                              {s.equation && (
+                                <div className="mt-1">
+                                  <EquationBlock tex={s.equation} />
+                                </div>
+                              )}
+                            </li>
+                          ))}
+                        </ol>
+                        {r.parsed.summary && (
+                          <p className="mt-3 text-[12px] text-slate-700">
+                            <MathText text={r.parsed.summary} />
+                          </p>
+                        )}
+                      </div>
                     </div>
                   </>
                 )}
@@ -2946,6 +2958,23 @@ function DocxPreviewModal({
           min-height: 1100px;
           font-family: 'Malgun Gothic', '맑은 고딕', 'Noto Sans KR', sans-serif;
         }
+        /* 실제 DOCX 의 problem/explanation 섹션 column:2 와 시각적으로 일치시키기 위한
+           CSS column 폴리필. column-fill:auto 로 위에서 아래로 자연스레 흐르고,
+           overflow-wrap 으로 긴 수식이 column boundary 에서 깨지지 않게. */
+        .docx-two-column {
+          column-count: 2;
+          column-gap: 18px;
+          column-rule: 1px dashed #e2e8f0;
+          column-fill: auto;
+          overflow-wrap: anywhere;
+        }
+        .docx-two-column > * {
+          break-inside: avoid;
+        }
+        .docx-two-column img,
+        .docx-two-column .katex-display {
+          max-width: 100%;
+        }
         @media print {
           .docx-page {
             page-break-after: always;
@@ -2955,12 +2984,63 @@ function DocxPreviewModal({
           .docx-page:last-child {
             page-break-after: auto;
           }
+          .docx-two-column {
+            column-rule: none;
+          }
           @page {
             size: A4;
             margin: 18mm 16mm;
           }
         }
       `}</style>
+    </div>
+  );
+}
+
+/**
+ * 미리보기용 [문제] 섹션 본문 — 수식 + 마크다운 이미지 동시 처리.
+ *  - `![alt](src)` → <img>  (크롭 페이지에서 dataURL 로 들어옴, /auto 도 OCR 결과에
+ *    그래프 이미지가 마크다운으로 박혀 있을 수 있음)
+ *  - 그 외 텍스트 라인 → MathText (수식·일반 텍스트 KaTeX 렌더)
+ *  - 빈 텍스트 → 「(문제 본문 없음)」 안내
+ *
+ *  주의: 실제 DOCX 빌더는 `parseExplanationBlocks` 로 [문제]/[정답]/[해설] 블록을
+ *  나누지만, 미리보기 단계에서는 runs[i].questionText 를 통째로 받아 그대로 박는다.
+ *  DOCX 와 100% 같지는 않지만 「2단 위에서 어떻게 보일지」 의 핵심을 보여주기엔 충분.
+ */
+function ProblemBody({ text }: { text: string }) {
+  if (!text || !text.trim()) {
+    return <span className="text-slate-400">(문제 본문 없음)</span>;
+  }
+  // 줄 단위로 split — 각 줄이 ![](...) 마크다운 이미지면 <img>, 아니면 MathText.
+  const lines = text.split(/\r?\n/);
+  const imageRe = /^!\[([^\]]*)\]\(([^)]+)\)\s*$/;
+  return (
+    <div className="space-y-1">
+      {lines.map((line, i) => {
+        const trimmed = line.trim();
+        if (!trimmed) return <div key={i} className="h-1" />;
+        const m = imageRe.exec(trimmed);
+        if (m) {
+          const alt = m[1];
+          const src = m[2];
+          // dataURL · 외부 URL 둘 다 허용. 컬럼 폭에 자연스럽게 맞도록 max-w 제한.
+          // eslint-disable-next-line @next/next/no-img-element
+          return (
+            <img
+              key={i}
+              src={src}
+              alt={alt || "문제 이미지"}
+              className="my-1 max-w-full rounded border border-slate-200"
+            />
+          );
+        }
+        return (
+          <div key={i}>
+            <MathText text={line} />
+          </div>
+        );
+      })}
     </div>
   );
 }
