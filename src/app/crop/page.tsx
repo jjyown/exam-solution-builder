@@ -508,7 +508,7 @@ export default function CropPage() {
         <h1 className="text-xl font-bold text-slate-900">✂️ 크롭으로 해설 제작</h1>
         <p className="mt-1 text-xs text-slate-600">
           시험지 PDF/이미지에서 <strong>필요한 문항만 잘라</strong> OCR·풀이합니다 — Gemini API 비용을
-          최소 20배 이상 절약. 풀이 모델은 기본 OpenAI 사용 (Gemini 한도 보호).
+          최소 20배 이상 절약. 풀이 모델은 기본 Gemini 사용 (해설 자동 제작과 동일), OpenAI 는 보조.
         </p>
       </header>
 
@@ -532,8 +532,8 @@ export default function CropPage() {
               onChange={(e) => setModel(e.target.value as "gemini" | "openai")}
               className="mt-1 w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm font-normal"
             >
-              <option value="openai">OpenAI (권장 — Gemini 한도 보호)</option>
-              <option value="gemini">Gemini</option>
+              <option value="gemini">Gemini (권장 — 해설 자동 제작과 통일)</option>
+              <option value="openai">OpenAI (보조 — Gemini 한도 초과 시)</option>
             </select>
           </label>
         </div>
@@ -723,7 +723,7 @@ export default function CropPage() {
           )}
           {activeSrc && (
             <div
-              className="relative overflow-auto rounded border border-slate-200 bg-slate-50 p-2"
+              className="crop-canvas relative overflow-auto rounded border border-slate-200 bg-slate-50 p-2"
               ref={pageContainerRef}
             >
               <div className="relative inline-block">

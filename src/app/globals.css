@@ -34,3 +34,29 @@ body {
 .newspaper-columns > * {
   break-inside: avoid;
 }
+
+/* ── /crop 페이지 커서 가시성 ──────────────────────────────────────────────
+ * 흰 시험지 위에 OS 기본 crosshair 커서가 묻혀서 위치를 잃는 문제 픽스.
+ * 검은 채움 + 흰 외곽선의 SVG 십자 커서로 강제 — 흰/검 어떤 배경에서도 보임.
+ * ReactCrop 자체의 cursor (move/resize 등) 도 함께 덮어쓴다.
+ * --------------------------------------------------------------------- */
+.crop-canvas,
+.crop-canvas *,
+.crop-canvas .ReactCrop,
+.crop-canvas .ReactCrop__crop-selection,
+.crop-canvas .ReactCrop__drag-handle,
+.crop-canvas img {
+  cursor:
+    url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='28' height='28' viewBox='0 0 28 28'><g stroke-linecap='round' fill='none'><path d='M14 1 V27 M1 14 H27' stroke='white' stroke-width='5'/><path d='M14 1 V27 M1 14 H27' stroke='black' stroke-width='2.2'/></g></svg>")
+      14 14,
+    crosshair;
+}
+
+/* 박스 안쪽(이미 그려진 selection)은 이동 의도 — 손바닥 커서가 적합하나
+ * OS 기본 'move' 도 흰 배경에서 잘 안 보이는 케이스 있어 동일 패턴 적용. */
+.crop-canvas .ReactCrop__crop-selection {
+  cursor:
+    url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='28' height='28' viewBox='0 0 28 28'><g stroke-linecap='round' fill='none'><path d='M5 14 H23 M14 5 V23' stroke='white' stroke-width='5'/><path d='M5 14 H23 M14 5 V23' stroke='black' stroke-width='2.2'/><path d='M9 9 L5 14 L9 19 M19 9 L23 14 L19 19 M9 9 L14 5 L19 9 M9 19 L14 23 L19 19' stroke='black' stroke-width='2'/></g></svg>")
+      14 14,
+    move;
+}
