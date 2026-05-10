@@ -122,6 +122,18 @@ export type AnalysisLearnSummary = {
     unpairedProblems: number;
     /** OCR 정규화 시 매칭된 룰 개수 (디버깅) */
     normalizedFiles: number;
+    /**
+     * 파일별 페어링률 — 임계치(<40%) 미달 PDF 만 모아 「bbox 재처리 권장 큐」 로 노출.
+     * 텍스트 헤더 매칭이 깨졌다는 신호 → scripts/textbook_page_split_mathpix.py
+     * (Mathpix include_line_data=true + bbox 분할) 로 재처리하면 살아남.
+     * 임계치 이상 파일은 포함하지 않는다 (응답 비대 방지).
+     */
+    lowPairingFiles: Array<{
+      source: string;        // "drive/분석용자료/시중교재/쎈_대수.pdf"
+      problemRecords: number;
+      pairedRecords: number;
+      rate: number;          // 0~1
+    }>;
   };
   /**
    * 화이트리스트 root 폴더(시중교재/시험지 원안 등) 별 처리 결과.
@@ -172,6 +184,7 @@ export async function loadDriveAnalysisRecords(): Promise<{
       pairingRate: 0,
       unpairedProblems: 0,
       normalizedFiles: 0,
+      lowPairingFiles: [],
     },
     byRootFolder: {},
     integrity: {
@@ -470,15 +483,43 @@ export async function loadDriveAnalysisRecords(): Promise<{
   // 매핑 통계 — problem_no 가 있는 record 중 solution_text 까지 가진 비율
   let problemRecs = 0;
   let pairedRecs = 0;
+  // 파일별 집계 (페어링 깨진 PDF 식별용)
+  const perFile = new Map<string, { problem: number; paired: number }>();
   for (const r of merged) {
     if (typeof r.problem_no !== "number") continue;
     problemRecs += 1;
-    if (r.solution_text && r.solution_text.trim()) pairedRecs += 1;
+    const fileKey = r.source; // "drive/분석용자료/시중교재/쎈_대수.pdf"
+    const slot = perFile.get(fileKey) ?? { problem: 0, paired: 0 };
+    slot.problem += 1;
+    if (r.solution_text && r.solution_text.trim()) {
+      pairedRecs += 1;
+      slot.paired += 1;
+    }
+    perFile.set(fileKey, slot);
   }
   summary.pairing.problemRecords = problemRecs;
   summary.pairing.pairedRecords = pairedRecs;
   summary.pairing.unpairedProblems = problemRecs - pairedRecs;
   summary.pairing.pairingRate = problemRecs > 0 ? pairedRecs / problemRecs : 0;
+
+  // 임계치(<40%) 미달 + 최소 표본(problem ≥ 5) 충족 파일만 큐에 — 노이즈 차단.
+  // 페어링률 오름차순 → 가장 깨진 PDF 가 위쪽.
+  const LOW_PAIRING_THRESHOLD = 0.4;
+  const MIN_PROBLEM_SAMPLES = 5;
+  const lowPairingFiles: AnalysisLearnSummary["pairing"]["lowPairingFiles"] = [];
+  for (const [source, stat] of perFile.entries()) {
+    if (stat.problem < MIN_PROBLEM_SAMPLES) continue;
+    const rate = stat.problem > 0 ? stat.paired / stat.problem : 0;
+    if (rate >= LOW_PAIRING_THRESHOLD) continue;
+    lowPairingFiles.push({
+      source,
+      problemRecords: stat.problem,
+      pairedRecords: stat.paired,
+      rate,
+    });
+  }
+  lowPairingFiles.sort((a, b) => a.rate - b.rate);
+  summary.pairing.lowPairingFiles = lowPairingFiles.slice(0, 30); // 응답 비대 방지
 
   // 무결성 검사 — 누락/중복/페어 깨짐. 비용 0 규칙 기반.
   const integrity = checkIntegrity(merged);

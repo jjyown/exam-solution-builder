@@ -47,6 +47,17 @@ type AutoSyncSnapshot = {
   >;
   /** 마지막 학습에서 발견된 시리즈 무결성 카운트 (누락/중복/페어 깨짐) */
   lastIntegrityCounts: { missing: number; duplicate: number; unpaired: number };
+  /**
+   * 페어링률 < 40% 인 PDF 큐 — 텍스트 헤더 매칭이 깨진 신호.
+   * UI 「bbox 재처리 권장」 칩으로 노출, scripts/textbook_page_split_mathpix.py
+   * 로 재처리 후보가 됨.
+   */
+  lastLowPairingFiles: Array<{
+    source: string;
+    problemRecords: number;
+    pairedRecords: number;
+    rate: number;
+  }>;
 };
 
 let snapshot: AutoSyncSnapshot = {
@@ -58,6 +69,7 @@ let snapshot: AutoSyncSnapshot = {
   intervalMs: 0,
   lastByRootFolder: {},
   lastIntegrityCounts: { missing: 0, duplicate: 0, unpaired: 0 },
+  lastLowPairingFiles: [],
 };
 
 export function getDriveAnalysisSyncSnapshot(): AutoSyncSnapshot {
@@ -103,7 +115,18 @@ export function startDriveAnalysisAutoSync(): void {
         lastErrors: summary.errors,
         lastByRootFolder: summary.byRootFolder,
         lastIntegrityCounts: summary.integrity.counts,
+        lastLowPairingFiles: summary.pairing.lowPairingFiles,
       };
+      if (summary.pairing.lowPairingFiles.length > 0) {
+        console.warn(
+          `[driveAnalysisAutoSync] 페어링률 <40% PDF ${summary.pairing.lowPairingFiles.length}개 — bbox 재처리 권장`,
+        );
+        for (const f of summary.pairing.lowPairingFiles.slice(0, 5)) {
+          console.warn(
+            `[driveAnalysisAutoSync]   · ${f.source}: ${f.pairedRecords}/${f.problemRecords} (${(f.rate * 100).toFixed(0)}%)`,
+          );
+        }
+      }
       // 화이트리스트 매칭 0건처럼 명시적 경고가 나오면 운영 로그에 흘려둔다
       for (const err of summary.errors) {
         if (/화이트리스트 매칭 0건/.test(err)) {

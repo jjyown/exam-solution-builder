@@ -190,6 +190,12 @@ export default function AutoPipelinePage() {
         string,
         { filesFound: number; sizeSkipped: number; ocrFailed: number; cacheHit: number; newOrChanged: number }
       >;
+      lastLowPairingFiles?: Array<{
+        source: string;
+        problemRecords: number;
+        pairedRecords: number;
+        rate: number;
+      }>;
     } | null;
     supervisor: {
       ranAt: number | null;
@@ -212,6 +218,8 @@ export default function AutoPipelinePage() {
   const [health, setHealth] = useState<HealthSnapshot | null>(null);
   const [cautionsOpen, setCautionsOpen] = useState(false);
   const [supervisorRunning, setSupervisorRunning] = useState(false);
+  // bbox 재처리 권장 큐 토글 — 페어링률 <40% PDF 목록을 표시
+  const [lowPairingOpen, setLowPairingOpen] = useState(false);
 
   // 분석 현황 탭 (시중교재/시험지 원안 진행 상태)
   const [analysisStatusOpen, setAnalysisStatusOpen] = useState(false);
@@ -991,7 +999,7 @@ export default function AutoPipelinePage() {
             문제 입력 → 검색 · 생성 · 검증 · 자동 재시도 → 검수 체크리스트.
             결과는 Supabase에 기록되며 사용자 피드백이 다음 호출에 반영됩니다.
           </p>
-          <HealthBadges health={health} />
+          <HealthBadges health={health} onToggleLowPairing={() => setLowPairingOpen((v) => !v)} />
           {/*
             감독관 자동 메모 — 6시간마다 retrospective 결과에서 추출되며 다음 풀이 호출의
             cautionNotes 에 자동 주입된다. 사용자가 별점 안 남겨도 자동 학습.
@@ -1033,6 +1041,57 @@ export default function AutoPipelinePage() {
                     <li key={i}>{c}</li>
                   ))}
                 </ul>
+              )}
+            </div>
+          )}
+          {/*
+            bbox 재처리 권장 PDF 목록 — 페어링률 <40% 인 파일만.
+            scripts/textbook_page_split_mathpix.py 로 재처리할 후보를 사용자에게 노출.
+            (실행은 사용자가 로컬 터미널에서 수동 — Railway 에 Python 의존성 없음)
+          */}
+          {lowPairingOpen && (
+            <div className="mt-2 rounded-lg border border-rose-200 bg-rose-50 p-2 text-[11px] text-rose-950">
+              {(health?.drive_sync?.lastLowPairingFiles?.length ?? 0) === 0 ? (
+                <p className="text-slate-700">
+                  페어링률 &lt;40% PDF 없음 — 텍스트 헤더 매칭이 잘 작동 중. bbox 재처리 불필요.
+                </p>
+              ) : (
+                <>
+                  <p className="mb-1 font-semibold">
+                    📦 페어링률 &lt;40% PDF {health!.drive_sync!.lastLowPairingFiles!.length}개 — bbox 분할 권장
+                  </p>
+                  <p className="mb-2 text-rose-800">
+                    텍스트 헤더 매칭 깨짐. 로컬에서{' '}
+                    <code className="rounded bg-white px-1 py-0.5 font-mono">
+                      python scripts/textbook_page_split_mathpix.py &lt;파일경로&gt;
+                    </code>{' '}
+                    로 재처리하면 bbox 기반 분할로 살아납니다 (Mathpix include_line_data=true).
+                  </p>
+                  <table className="w-full text-[11px]">
+                    <thead className="text-rose-700">
+                      <tr>
+                        <th className="px-1 py-0.5 text-left">파일</th>
+                        <th className="px-1 py-0.5 text-right">페어/문제</th>
+                        <th className="px-1 py-0.5 text-right">적중률</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(health?.drive_sync?.lastLowPairingFiles ?? []).map((f) => (
+                        <tr key={f.source} className="border-t border-rose-200">
+                          <td className="px-1 py-0.5 font-mono text-slate-800">
+                            {f.source.split('/').slice(-2).join('/')}
+                          </td>
+                          <td className="px-1 py-0.5 text-right text-slate-700">
+                            {f.pairedRecords}/{f.problemRecords}
+                          </td>
+                          <td className="px-1 py-0.5 text-right font-semibold text-rose-700">
+                            {(f.rate * 100).toFixed(0)}%
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </>
               )}
             </div>
           )}
@@ -2644,6 +2703,12 @@ type HealthBadgesProps = {
         string,
         { filesFound: number; sizeSkipped: number; ocrFailed: number; cacheHit: number; newOrChanged: number }
       >;
+      lastLowPairingFiles?: Array<{
+        source: string;
+        problemRecords: number;
+        pairedRecords: number;
+        rate: number;
+      }>;
     } | null;
     supervisor: {
       ranAt: number | null;
@@ -2658,9 +2723,11 @@ type HealthBadgesProps = {
       error: string | null;
     } | null;
   } | null;
+  onToggleLowPairing?: () => void;
 };
 
-function HealthBadges({ health }: HealthBadgesProps) {
+function HealthBadges(props: HealthBadgesProps) {
+  const { health } = props;
   if (!health) return null;
   const sync = health.drive_sync;
   const sup = health.supervisor;
@@ -2759,6 +2826,27 @@ function HealthBadges({ health }: HealthBadgesProps) {
         >
           무결성 ⚠ {sup.integrityIssues.missing + sup.integrityIssues.duplicate + sup.integrityIssues.unpaired}
         </a>
+      )}
+      {/*
+        bbox 재처리 권장 큐 — 페어링률 <40% PDF 만. 클릭 시 패널 토글.
+        텍스트 헤더 매칭이 깨진 PDF 가 식별되면, scripts/textbook_page_split_mathpix.py
+        (Mathpix include_line_data=true + bbox 분할) 로 재처리할 후보로 노출.
+      */}
+      {(sync?.lastLowPairingFiles?.length ?? 0) > 0 && (
+        <button
+          type="button"
+          onClick={() => props.onToggleLowPairing?.()}
+          className="rounded border border-rose-400 bg-rose-50 px-1.5 py-0.5 font-semibold text-rose-900 hover:bg-rose-100"
+          title={
+            `페어링률 <40% PDF ${sync!.lastLowPairingFiles!.length}개 — 텍스트 헤더 매칭 깨짐.\n` +
+            `bbox 기반 재분할 권장 (scripts/textbook_page_split_mathpix.py).\n` +
+            sync!.lastLowPairingFiles!.slice(0, 5)
+              .map((f) => `· ${f.source.split('/').slice(-2).join('/')} ${(f.rate * 100).toFixed(0)}% (${f.pairedRecords}/${f.problemRecords})`)
+              .join('\n')
+          }
+        >
+          ⊕ bbox 재처리 {sync!.lastLowPairingFiles!.length}건
+        </button>
       )}
     </div>
   );
