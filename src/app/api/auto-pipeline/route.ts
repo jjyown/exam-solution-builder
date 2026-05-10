@@ -591,10 +591,11 @@ export async function GET() {
   try {
     const r = await getRetriever();
     // 동시 import — 둘 다 module 전역 스냅샷이라 비용 거의 0
-    const [{ getDriveAnalysisSyncSnapshot }, { getSupervisorSnapshot }] = await Promise.all([
+    const [{ getDriveAnalysisSyncSnapshot }, supervisor] = await Promise.all([
       import('@/lib/driveAnalysisAutoSync'),
       import('@/lib/supervisorScheduler'),
     ]);
+    const { getSupervisorSnapshot, getAutoSupervisorCautions } = supervisor;
     // instrumentation 등록 여부 확인 — Railway 빌드에서 안 호출되는 경우 진단용
     let instrumentationRegistered = false;
     try {
@@ -608,6 +609,7 @@ export async function GET() {
       kb_size: r.size(),
       drive_sync: getDriveAnalysisSyncSnapshot(),
       supervisor: getSupervisorSnapshot(),
+      supervisor_cautions: getAutoSupervisorCautions(),
       instrumentationRegistered,
     });
   } catch (e) {

@@ -18,6 +18,19 @@ import {
   generateRetrospective,
   renderRetrospectiveMarkdown,
 } from "@/lib/retrospective";
+import { runSupervisorNow } from "@/lib/supervisorScheduler";
+
+/**
+ * POST /api/retrospective
+ * 감독관(supervisor) 을 즉시 한 번 실행하고 갱신된 스냅샷·자동 메모를 반환.
+ * 6시간 주기를 기다리지 않고 V6 같은 변경 직후 학습 결과를 확인할 때 사용.
+ *
+ *   curl -X POST https://.../api/retrospective
+ */
+export async function POST() {
+  const result = await runSupervisorNow();
+  return NextResponse.json({ ok: true, ...result });
+}
 
 export async function GET(req: Request) {
   const url = new URL(req.url);
