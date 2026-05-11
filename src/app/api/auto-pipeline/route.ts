@@ -164,19 +164,30 @@ async function callOpenAI(prompt: string, modelOverride?: string): Promise<strin
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) throw new Error('OPENAI_API_KEY 미설정');
   const model = modelOverride || process.env.OPENAI_MODEL || 'gpt-4o-mini';
+  // 모델 계열별 파라미터 분기:
+  //   - reasoning 계열(o1/o3/gpt-5/o4): reasoning_effort 사용, temperature 미지원
+  //   - 일반 chat 계열(gpt-4o, gpt-4.1, gpt-4o-mini 등): temperature 사용,
+  //     reasoning_effort 보내면 400 "Unrecognized request argument" 로 거부됨.
+  // 본 프로젝트 profileRouting 은 기본 gpt-4o 계열을 쓰므로 과거 무조건 reasoning_effort
+  // 를 보내던 코드가 모든 OpenAI 호출을 막던 버그를 픽스.
+  const isReasoningModel = /^o[1-9]|^o[1-9]-|gpt-5/i.test(model);
+  const body: Record<string, unknown> = {
+    model,
+    messages: [{ role: 'user', content: prompt }],
+    response_format: { type: 'json_object' },
+  };
+  if (isReasoningModel) {
+    body.reasoning_effort = 'high';
+  } else {
+    body.temperature = 0.2;
+  }
   const res = await fetch('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${apiKey}`,
     },
-    body: JSON.stringify({
-      model,
-      messages: [{ role: 'user', content: prompt }],
-      response_format: { type: 'json_object' },
-      temperature: 0.2,
-      reasoning_effort: 'high',
-    }),
+    body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(`OpenAI ${res.status}: ${await res.text()}`);
   const data = await res.json();
