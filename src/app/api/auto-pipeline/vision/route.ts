@@ -69,48 +69,76 @@ const VISION_PROMPT = `
 - 추측하지 말 것 — 이미지에서 읽을 수 있는 정보로만 풀이.
 `.trim();
 
+/**
+ * Gemini Vision 호출 + 429 자동 재시도.
+ *
+ * 무료/저티어 한도(RPM 60 등)에 빠르게 부딪히는 케이스가 빈번해
+ * exponential backoff 로 자동 재시도. quota error(RESOURCE_EXHAUSTED 등)도
+ * 같은 흐름으로 처리. 마지막 시도까지 실패하면 throw.
+ *
+ *  schedule: 즉시 → 2s → 5s → 10s (총 4번 시도)
+ */
 async function callGeminiVision(
   imageBase64: string,
   mimeType: string,
   modelOverride?: string,
-): Promise<{ text: string; usedModel: string }> {
+): Promise<{ text: string; usedModel: string; retried: number }> {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) throw new Error('GEMINI_API_KEY 미설정');
   const model =
     modelOverride || process.env.GEMINI_VISION_MODEL || process.env.GEMINI_MODEL || 'gemini-2.5-flash';
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
 
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      contents: [
-        {
-          role: 'user',
-          parts: [
-            { text: VISION_PROMPT },
-            { inlineData: { mimeType, data: imageBase64 } },
-          ],
+  const sleeps = [0, 2000, 5000, 10000];
+  let lastErr = '';
+  for (let attempt = 0; attempt < sleeps.length; attempt++) {
+    if (sleeps[attempt] > 0) {
+      await new Promise((r) => setTimeout(r, sleeps[attempt]));
+    }
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [
+          {
+            role: 'user',
+            parts: [
+              { text: VISION_PROMPT },
+              { inlineData: { mimeType, data: imageBase64 } },
+            ],
+          },
+        ],
+        generationConfig: {
+          responseMimeType: 'application/json',
+          temperature: 0.2,
         },
-      ],
-      generationConfig: {
-        responseMimeType: 'application/json',
-        temperature: 0.2,
-      },
-    }),
-  });
+      }),
+    });
 
-  if (!res.ok) {
+    if (res.ok) {
+      const data = await res.json();
+      const text =
+        data?.candidates?.[0]?.content?.parts
+          ?.map((p: { text?: string }) => p.text)
+          .filter(Boolean)
+          .join('') || '';
+      return { text, usedModel: model, retried: attempt };
+    }
+
     const body = await res.text();
-    throw new Error(`Gemini Vision ${res.status}: ${body.slice(0, 400)}`);
+    lastErr = `Gemini Vision ${res.status}: ${body.slice(0, 400)}`;
+
+    // 429 또는 quota 류 에러만 재시도. 그 외(400 등) 는 즉시 throw.
+    const retryable =
+      res.status === 429 ||
+      res.status === 503 ||
+      /RESOURCE_EXHAUSTED|quota|rate.*limit|exceeded/i.test(body);
+    if (!retryable) {
+      throw new Error(lastErr);
+    }
+    // 다음 attempt 로 (마지막 attempt 였으면 루프 탈출 후 throw)
   }
-  const data = await res.json();
-  const text =
-    data?.candidates?.[0]?.content?.parts
-      ?.map((p: { text?: string }) => p.text)
-      .filter(Boolean)
-      .join('') || '';
-  return { text, usedModel: model };
+  throw new Error(`${lastErr} (${sleeps.length}회 재시도 모두 실패 — 잠시 후 다시 시도하세요)`);
 }
 
 function safeParseJson(raw: string): Parsed | null {
@@ -197,11 +225,13 @@ export async function POST(req: Request) {
   const t0 = Date.now();
   let llmRaw = '';
   let usedModel = '';
+  let retriedCount = 0;
   const errors: string[] = [];
   try {
     const r = await callGeminiVision(body.fileData, body.fileType, visionModel);
     llmRaw = r.text;
     usedModel = r.usedModel;
+    retriedCount = r.retried;
   } catch (e) {
     const msg = (e as Error).message;
     errors.push(msg);
@@ -225,8 +255,13 @@ export async function POST(req: Request) {
     vendor: 'gemini',
     model: usedModel,
     ok: true,
-    units: 1,
-    meta: { latencyMs: Date.now() - t0, exam: body.examName, qNo: body.questionNo },
+    units: 1 + retriedCount, // 재시도까지 포함한 실제 호출 수 (429 backoff)
+    meta: {
+      latencyMs: Date.now() - t0,
+      exam: body.examName,
+      qNo: body.questionNo,
+      retried: retriedCount,
+    },
   });
 
   const parsed = safeParseJson(llmRaw);

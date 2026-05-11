@@ -91,8 +91,13 @@ function detectOcrIssue(c: CropEntry): OcrIssue | null {
   const text = (c.extractedText || "").trim();
   const answer = (c.parsed.answer || "").trim();
 
-  // 1) OCR 텍스트가 너무 짧음 — 거의 확실히 인식 실패
-  if (text.length > 0 && text.length < 30) {
+  // 비전 모드는 OCR 단계 자체를 건너뛰므로 questionText 가 placeholder
+  // ("[비전 직접 풀이] 이미지 입력") 로 옴 — 이 경우 OCR 길이/수식 비율 룰은
+  // 의미가 없으니 skip. AI 답변 자체에 대한 룰만 적용.
+  const isVisionRun = text.startsWith("[비전 직접 풀이]") || text.startsWith("[vision");
+
+  // 1) OCR 텍스트가 너무 짧음 — 거의 확실히 인식 실패 (OCR 모드만 적용)
+  if (!isVisionRun && text.length > 0 && text.length < 30) {
     return {
       level: "high",
       reason: `OCR 텍스트가 ${text.length}자로 매우 짧음`,
@@ -100,8 +105,8 @@ function detectOcrIssue(c: CropEntry): OcrIssue | null {
     };
   }
 
-  // 2) 수식·숫자가 거의 없음 — 수학 문제는 거의 항상 숫자/연산자 포함
-  if (text.length >= 30) {
+  // 2) 수식·숫자가 거의 없음 — 수학 문제는 거의 항상 숫자/연산자 포함 (OCR 모드만)
+  if (!isVisionRun && text.length >= 30) {
     const mathChars = (text.match(/[0-9+\-=×÷·()²³⁴⁵√∫∑∞≤≥≠≈π×∂Δ]|\\frac|\\int|\\sum|\\sqrt/g) || []).length;
     const ratio = mathChars / text.length;
     if (ratio < 0.05) {
