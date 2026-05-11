@@ -164,3 +164,137 @@ export function buildExamExplanationHml(input: HmlInput): string {
 export function buildExamExplanationHmlBuffer(input: HmlInput): Buffer {
   return Buffer.from(buildExamExplanationHml(input), "utf8");
 }
+
+// ── 멀티 문항 — PDF 구조(문제 전체 → 빠른정답 전체 → 해설 전체) 빌더 ───────
+/**
+ * 사용자 보고 「문제→빠른정답→해설 3섹션 분리가 안 됨」 픽스.
+ *
+ * 기존 흐름 (잘못):
+ *   HML route 가 각 문항마다 buildExamExplanationHmlBuffer 를 호출하고 SECTION
+ *   안쪽 P 들만 잘라 concat → 문항 1 [문제]/[정답]/[해설] → 문항 2 [문제]/[정답]/[해설] ...
+ *   처럼 인라인으로 섞임. PDF (문제 N개 → 빠른정답 N개 → 해설 N개) 와 다름.
+ *
+ * 새 함수 (이 빌더):
+ *   - 표지: 시험명(해설) + 날짜
+ *   - [문제] 페이지 그룹: 문항 1 본문 → 문항 2 본문 → ... (페이지 break 매 문항 사이 X,
+ *     전체 [문제] 블록 끝나면 page break)
+ *   - [빠른 정답] 페이지: 「N. [정답] 값」 한 줄씩 나열 (페이지 break 끝에서)
+ *   - [해설] 페이지 그룹: 문항 N [정답] 값 → 단계별 풀이 → 다음 문항
+ *
+ * 페이지 break: HML 의 BreakSetting BreakPage="1" 또는 CTRL Type="PB" 사용.
+ * 한컴 한글이 PARA 의 ParaShape 안 BreakSetting 을 받아준다 — 일단 보수적으로
+ * <P><BREAKSETTING BreakPage="1"/></P> 빈 단락을 분리자로 박음.
+ * (실제 동작 안 하면 한컴에서 사용자가 Ctrl+Enter 로 수동 분리 가능 — 텍스트
+ *  구조는 어떻든 깔끔히 3블록으로 나뉘므로 시각 가독성은 보장됨.)
+ */
+function pageBreakParagraph(): string {
+  // 한컴 한글 HWPML: 페이지 강제 분리 마커. 여러 변형이 있어 호환성 최대화.
+  // <P PageBreak="true"> 가 일부 버전에서, <CTRL Type="PB"/> 가 다른 버전에서.
+  // 둘 다 박지 않으면 그냥 문단 한 줄 분량 띄어진다.
+  return `<P PageBreak="true"><TEXT><CHAR></CHAR></TEXT></P>`;
+}
+
+/** [문제] 한 문항 — 「N. {본문}」. 본문에 줄바꿈 보존. */
+function problemEntryHml(questionNo: string, questionText: string): string[] {
+  const out: string[] = [];
+  const heading = `${questionNo}. `;
+  const lines = (questionText || "").split(/\r?\n/);
+  const first = lines.shift() ?? "";
+  // 첫 줄에 번호 prefix 같이 출력
+  out.push(paragraph(`${heading}${first}`));
+  for (const line of lines) {
+    out.push(paragraph(line));
+  }
+  out.push(paragraph("")); // 문항 사이 빈 줄
+  return out;
+}
+
+/** [빠른 정답] 한 줄 — 「N. [정답] 값」 */
+function quickAnswerEntryHml(questionNo: string, answer: string): string {
+  return paragraph(`${questionNo}. [정답] ${answer || "-"}`);
+}
+
+/** [해설] 한 문항 — 「N. [정답] 값」 + 「[해설]」 + 단계들 */
+function explanationEntryHml(
+  questionNo: string,
+  parsed: { answer: string; explanation_steps: Array<{ text: string; equation?: string }>; summary?: string },
+): string[] {
+  const out: string[] = [];
+  out.push(paragraph(`${questionNo}) [정답] ${parsed.answer || "-"}`));
+  out.push(paragraph("[해설]"));
+  parsed.explanation_steps.forEach((step, idx) => {
+    const num = idx + 1;
+    if (step.text) out.push(paragraph(`${num}단계. ${step.text}`));
+    if (step.equation) out.push(displayEquation(step.equation));
+  });
+  if (parsed.summary) {
+    out.push(paragraph(""));
+    out.push(paragraph(`[결론] ${parsed.summary}`));
+  }
+  out.push(paragraph("")); // 문항 사이 빈 줄
+  return out;
+}
+
+export type HmlMultiInput = {
+  examName: string;
+  runs: Array<{
+    questionNo: string;
+    questionText?: string;
+    parsed: {
+      answer: string;
+      explanation_steps: Array<{ text: string; equation?: string }>;
+      summary?: string;
+    } | null;
+  }>;
+};
+
+/**
+ * 여러 문항을 받아 PDF 구조(문제 전체 → 빠른정답 → 해설 전체) HML 문서 1개 생성.
+ * parsed=null 인 run 은 제외.
+ */
+export function buildExamExplanationHmlMulti(input: HmlMultiInput): string {
+  const examName = input.examName || "해설지";
+  const valid = input.runs.filter((r) => r.parsed);
+
+  const parts: string[] = [];
+
+  // 표지
+  parts.push(paragraph("수학영역"));
+  parts.push(paragraph(`${examName}(해설)`));
+  const now = new Date();
+  const dateStr = `${now.getFullYear()}.${String(now.getMonth() + 1).padStart(2, "0")}.${String(now.getDate()).padStart(2, "0")}`;
+  parts.push(paragraph(dateStr));
+  parts.push(paragraph(""));
+  parts.push(pageBreakParagraph());
+
+  // [문제] 섹션
+  parts.push(paragraph("[문제]"));
+  parts.push(paragraph(""));
+  for (const r of valid) {
+    parts.push(...problemEntryHml(r.questionNo, r.questionText || ""));
+  }
+  parts.push(pageBreakParagraph());
+
+  // [빠른 정답] 섹션
+  parts.push(paragraph("[빠른 정답]"));
+  parts.push(paragraph(""));
+  for (const r of valid) {
+    parts.push(quickAnswerEntryHml(r.questionNo, r.parsed!.answer));
+  }
+  parts.push(pageBreakParagraph());
+
+  // [해설] 섹션
+  parts.push(paragraph("[해설]"));
+  parts.push(paragraph(""));
+  for (const r of valid) {
+    parts.push(...explanationEntryHml(r.questionNo, r.parsed!));
+  }
+
+  const head = `<HEAD SecCnt="1"><BEGINNUM Page="1" Footnote="1" Endnote="1" Pic="1" Tbl="1" Equation="1"/><FACENAMELIST><FONTFACE Lang="HANGUL" Count="1"><FONT Id="0" Type="TTF" Name="함초롬바탕"/></FONTFACE></FACENAMELIST></HEAD>`;
+  const body = `<BODY><SECTION>${parts.join("")}</SECTION></BODY>`;
+  return `${XML_HEADER}\n<HWPML Version="2.81" SubVersion="2.81">${head}${body}</HWPML>`;
+}
+
+export function buildExamExplanationHmlMultiBuffer(input: HmlMultiInput): Buffer {
+  return Buffer.from(buildExamExplanationHmlMulti(input), "utf8");
+}

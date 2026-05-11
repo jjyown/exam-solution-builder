@@ -15,7 +15,7 @@
  * ────────────────────────────────────────────────────────────────────────────
  */
 import { NextResponse } from "next/server";
-import { buildExamExplanationHmlBuffer } from "@/lib/examExplanationHml";
+import { buildExamExplanationHmlMultiBuffer } from "@/lib/examExplanationHml";
 import {
   getDriveClient,
   isGoogleDriveConfigured,
@@ -78,29 +78,17 @@ export async function POST(req: Request) {
     console.log("[hml/graph-inject]", graphLogs.join(" | "));
   }
 
-  // 다중 문항 — 각 문항을 같은 SECTION 안에 차례로 (단순 concat).
-  // HML 빌더가 single 입력을 받으므로 각 문항마다 본문 누적.
-  // 첫 문항만 examName 헤더 표시, 나머지는 [문항 N] 만.
-  let combinedHmlBody = "";
-  validRuns.forEach((r, idx) => {
-    const oneHml = buildExamExplanationHmlBuffer({
-      examName: idx === 0 ? examName : undefined,
+  // 멀티 문항 → PDF 구조(문제 전체 → 빠른정답 → 해설 전체) 빌더 호출.
+  // 기존엔 문항별 SECTION 잘라 concat 해서 [문제]/[정답]/[해설] 가 문항마다 인라인으로
+  // 섞이는 잘못된 구조였음 — buildExamExplanationHmlMultiBuffer 가 3섹션으로 정리.
+  const buffer = buildExamExplanationHmlMultiBuffer({
+    examName,
+    runs: validRuns.map((r) => ({
       questionNo: r.questionNo,
       questionText: r.questionText,
       parsed: r.parsed!,
-    }).toString("utf8");
-    // BODY/SECTION 안 P 들만 추출 (단순 정규식)
-    const m = oneHml.match(/<SECTION>([\s\S]*?)<\/SECTION>/);
-    combinedHmlBody += m ? m[1] : "";
-    if (idx < validRuns.length - 1) {
-      combinedHmlBody += "<P><TEXT><CHAR></CHAR></TEXT></P>";  // 빈 줄 구분
-    }
+    })),
   });
-
-  // 합본 HML 생성 — 첫 문항의 head 를 wrapper 로 재사용
-  const head = `<HEAD SecCnt="1"><BEGINNUM Page="1" Footnote="1" Endnote="1" Pic="1" Tbl="1" Equation="1"/><FACENAMELIST><FONTFACE Lang="HANGUL" Count="1"><FONT Id="0" Type="TTF" Name="함초롬바탕"/></FONTFACE></FACENAMELIST></HEAD>`;
-  const finalHml = `<?xml version="1.0" encoding="UTF-8"?>\n<HWPML Version="2.81" SubVersion="2.81">${head}<BODY><SECTION>${combinedHmlBody}</SECTION></BODY></HWPML>`;
-  const buffer = Buffer.from(finalHml, "utf8");
 
   const fileName = `${safeFilename(examName)}_해설.hml`;
 
