@@ -176,6 +176,29 @@ export default function CropPage() {
   );
   const [topK, setTopK] = useState<number>(SHARED_OPTIONS_DEFAULT.topK);
   const [maxRetries, setMaxRetries] = useState<number>(SHARED_OPTIONS_DEFAULT.maxRetries);
+  /**
+   * 비전 모드 — true 면 OCR(Mathpix) 단계를 건너뛰고 이미지를 Gemini Vision 에
+   * 직접 전달해 한 번에 풀이. OCR 텍스트 누락으로 「입력과 무관한 풀이」 가
+   * 나오는 사고를 근본적으로 피한다. localStorage 영속화 (기본 OFF — 안정화 후 ON 권장).
+   */
+  const [useVision, setUseVision] = useState<boolean>(false);
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      const v = window.localStorage.getItem("highroad:crop:use-vision");
+      if (v === "true") setUseVision(true);
+    } catch {
+      /* best-effort */
+    }
+  }, []);
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      window.localStorage.setItem("highroad:crop:use-vision", String(useVision));
+    } catch {
+      /* QuotaExceeded 등 — 조용히 무시 */
+    }
+  }, [useVision]);
   const pageContainerRef = useRef<HTMLDivElement | null>(null);
   /** 이미지 로드/리렌더 시 overlay 위치 다시 계산하도록 강제 — img 의 display 크기가 바뀌었을 때 */
   const [overlayTick, setOverlayTick] = useState(0);
@@ -491,23 +514,37 @@ export default function CropPage() {
     try {
       // dataUrl 에서 base64 부분만 추출
       const base64 = entry.imageDataUrl.split(",")[1] || "";
-      const res = await fetch("/api/auto-pipeline", {
+      // 비전 모드: OCR 단계 건너뛰고 이미지 → Gemini Vision 직접
+      // 일반 모드: 이미지 → Mathpix/Gemini OCR → 텍스트 → RAG → LLM
+      const endpoint = useVision ? "/api/auto-pipeline/vision" : "/api/auto-pipeline";
+      const requestBody = useVision
+        ? {
+            examName: examName || undefined,
+            questionNo: entry.questionNo,
+            // 비전은 Gemini 만 — model 필드는 무시되지만 의도 명시
+            model: "gemini",
+            profile: profile === "auto" ? undefined : profile,
+            fileData: base64,
+            fileType: entry.imageMimeType,
+          }
+        : {
+            examName: examName || undefined,
+            questionNo: entry.questionNo,
+            model,
+            // /auto 와 동일 옵션 — 사용자가 「크롭만 다르고 나머지 동일」 동선을 가질 수 있게.
+            profile: profile === "auto" ? undefined : profile,
+            topK,
+            maxRetries,
+            fileData: base64,
+            fileName: `crop_${entry.questionNo}.png`,
+            fileType: entry.imageMimeType,
+            // 크롭은 본질적으로 단일 문항 — explanationMode 는 의미 없음(서버는 단일 모드로 처리).
+            explanationMode: "full",
+          };
+      const res = await fetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          examName: examName || undefined,
-          questionNo: entry.questionNo,
-          model,
-          // /auto 와 동일 옵션 — 사용자가 「크롭만 다르고 나머지 동일」 동선을 가질 수 있게.
-          profile: profile === "auto" ? undefined : profile,
-          topK,
-          maxRetries,
-          fileData: base64,
-          fileName: `crop_${entry.questionNo}.png`,
-          fileType: entry.imageMimeType,
-          // 크롭은 본질적으로 단일 문항 — explanationMode 는 의미 없음(서버는 단일 모드로 처리).
-          explanationMode: "full",
-        }),
+        body: JSON.stringify(requestBody),
       });
       const data = await res.json();
       const row0 = data.runs?.[0];
@@ -710,6 +747,39 @@ export default function CropPage() {
         <p className="mt-1 text-[11px] text-slate-500">
           ↑ 「해설 제작」 탭과 자동 동기화되는 옵션입니다 — 한 곳에서 바꾸면 양쪽에 즉시 반영됩니다.
         </p>
+
+        {/* 비전 모드 토글 — OCR 누락으로 「입력과 무관한 풀이」가 나오는 사고 방지 */}
+        <div className="mt-3 rounded border border-emerald-200 bg-emerald-50 p-2.5 text-xs">
+          <label className="flex cursor-pointer items-start gap-2">
+            <input
+              type="checkbox"
+              checked={useVision}
+              onChange={(e) => setUseVision(e.target.checked)}
+              className="mt-0.5 h-4 w-4 cursor-pointer accent-emerald-600"
+            />
+            <div className="flex-1">
+              <div className="font-semibold text-emerald-900">
+                🔭 비전 모드 (Gemini Vision 직접 풀이){" "}
+                <span className="ml-1 rounded bg-emerald-200 px-1.5 py-0.5 text-[10px] font-bold text-emerald-900">
+                  추천
+                </span>
+              </div>
+              <p className="mt-0.5 leading-snug text-emerald-800">
+                OCR(Mathpix) 단계를 건너뛰고 이미지를 Gemini 가 직접 보고 풀이합니다.
+                {" "}OCR 텍스트가 깨져서 「엉뚱한 풀이」가 나오는 사고를 근본적으로 방지.
+                {useVision ? (
+                  <span className="block mt-0.5 text-emerald-900 font-semibold">
+                    ✓ 활성화 — 「이 크롭 풀이」 클릭 시 비전 엔드포인트로 호출됩니다.
+                  </span>
+                ) : (
+                  <span className="block mt-0.5 text-emerald-700/70">
+                    OFF — 기존 OCR + LLM 파이프라인 사용 (RAG·재시도 활용 가능).
+                  </span>
+                )}
+              </p>
+            </div>
+          </label>
+        </div>
         {/* Google Drive 「시험지」 폴더 — 로컬 업로드 위에 노출 */}
         <div className="mt-3">
           <div className="flex items-center justify-between gap-2">

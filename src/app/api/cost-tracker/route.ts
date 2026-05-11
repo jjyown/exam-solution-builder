@@ -78,6 +78,10 @@ const ROUTE_LABELS: Record<string, { purpose: string; trigger: string }> = {
     purpose: "해설 자동 제작 — 업로드 파일 OCR (사전단계)",
     trigger: "/auto 업로드 + 「풀이 생성」 흐름",
   },
+  "/api/auto-pipeline/vision": {
+    purpose: "크롭 비전 직접 풀이 — Gemini Vision (OCR 단계 생략)",
+    trigger: "/crop UI 「비전 모드」 토글 ON + 「이 크롭 풀이」",
+  },
   "/api/auto-pipeline/extract": {
     purpose: "해설 자동 제작 — 문항 미리보기 OCR",
     trigger: "/auto 파일 업로드 직후 (인식된 문항 표시)",
