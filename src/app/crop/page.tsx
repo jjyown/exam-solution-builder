@@ -1138,6 +1138,19 @@ export default function CropPage() {
                         </div>
                         {c.previewOpen && (
                           <div className="mt-2">
+                            {/* 원본 크롭 이미지 — 풀이가 어느 문제 영역에 적용된 것인지 한눈에 확인 */}
+                            <div className="mb-3 rounded border border-slate-200 bg-slate-50 p-2">
+                              <div className="mb-1 flex items-center gap-1.5 text-[10px] font-semibold text-slate-600">
+                                <span>📷 원본 문제</span>
+                                <span className="text-slate-400">— 풀이가 적용된 영역</span>
+                              </div>
+                              {/* eslint-disable-next-line @next/next/no-img-element */}
+                              <img
+                                src={c.imageDataUrl}
+                                alt={`문항 ${c.questionNo} 원본`}
+                                className="max-h-60 w-auto rounded border border-slate-300 bg-white"
+                              />
+                            </div>
                             <ExplanationMarkdownMath
                               source={parsedToMarkdown(c.parsed, c.questionNo)}
                               className="text-[13px] leading-6"
