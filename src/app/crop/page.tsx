@@ -26,6 +26,7 @@ import {
   writeSharedOptions,
   SHARED_OPTIONS_DEFAULT,
 } from "@/lib/explanationOptions";
+import { ExplanationMarkdownMath } from "@/components/ExplanationMarkdownMath";
 
 type ParsedExplanation = {
   answer: string;
@@ -66,7 +67,88 @@ type CropEntry = {
   feedbackNote?: string;
   feedbackSaving?: boolean;
   feedbackSaved?: boolean;
+  /** OCR 결과 텍스트 — 품질 감지·디버깅에 사용 (서버 응답의 questionText 보관) */
+  extractedText?: string;
+  /** 미리보기(KaTeX 렌더) 펼침 여부 */
+  previewOpen?: boolean;
 };
+
+/**
+ * OCR 결과 품질을 감지해 경고/액션을 제안.
+ * 「LLM 답이 입력 이미지와 무관한 결과」가 반복되는 근본 원인은 거의 항상
+ * OCR 단계에서 텍스트가 거의 추출되지 않았거나 (LLM 이 RAG 예시를 모방함),
+ * 의미 없는 짧은 fragment 만 추출됐을 때다. 사람이 매번 검수하는 부담을
+ * 줄이기 위해 클라이언트가 즉시 판정해 「다시 크롭」 액션을 제안한다.
+ */
+type OcrIssue = {
+  level: "warn" | "high";
+  reason: string;
+  suggestion: string;
+};
+
+function detectOcrIssue(c: CropEntry): OcrIssue | null {
+  if (c.status !== "done" || !c.parsed) return null;
+  const text = (c.extractedText || "").trim();
+  const answer = (c.parsed.answer || "").trim();
+
+  // 1) OCR 텍스트가 너무 짧음 — 거의 확실히 인식 실패
+  if (text.length > 0 && text.length < 30) {
+    return {
+      level: "high",
+      reason: `OCR 텍스트가 ${text.length}자로 매우 짧음`,
+      suggestion: "크롭 영역을 더 크게 (문제 본문 + 보기 ①~⑤ 모두 포함) 다시 잡아주세요.",
+    };
+  }
+
+  // 2) 수식·숫자가 거의 없음 — 수학 문제는 거의 항상 숫자/연산자 포함
+  if (text.length >= 30) {
+    const mathChars = (text.match(/[0-9+\-=×÷·()²³⁴⁵√∫∑∞≤≥≠≈π×∂Δ]|\\frac|\\int|\\sum|\\sqrt/g) || []).length;
+    const ratio = mathChars / text.length;
+    if (ratio < 0.05) {
+      return {
+        level: "warn",
+        reason: `OCR 텍스트에 수식/숫자가 거의 없음 (${Math.round(ratio * 100)}%)`,
+        suggestion: "수학 문제인데 수식이 인식 안 됐습니다. 더 선명한 영역으로 다시 크롭하거나 Mathpix 잔여량을 확인하세요.",
+      };
+    }
+  }
+
+  // 3) LLM 이 「문제가 제공되지 않음」을 정직하게 답함
+  const noInputPatterns = /확인\s*필요|주어지지\s*않|문제가\s*제공|정보\s*부족|내용이\s*없|주어진\s*내용은/;
+  const firstStep = c.parsed.explanation_steps?.[0]?.text || "";
+  if (noInputPatterns.test(answer) || noInputPatterns.test(firstStep)) {
+    return {
+      level: "high",
+      reason: "AI가 「입력에서 문제를 찾지 못함」 으로 응답",
+      suggestion: "OCR 이 본문 추출에 실패했습니다. 크롭 영역을 다시 잡고 「다시 풀이」를 눌러주세요.",
+    };
+  }
+
+  // 4) 단계 수가 1~2 로 극단적으로 적음 + 답이 너무 단순 → 피상적 응답 의심
+  if ((c.parsed.explanation_steps?.length ?? 0) <= 2 && answer.length <= 2) {
+    return {
+      level: "warn",
+      reason: "풀이 단계가 매우 적고 답이 단순 — 피상적 응답일 수 있음",
+      suggestion: "미리보기로 내용 확인 후, 의심되면 더 큰 크롭으로 다시 풀이를 권장합니다.",
+    };
+  }
+
+  return null;
+}
+
+/** parsed 결과 → KaTeX 미리보기용 마크다운 본문 변환 */
+function parsedToMarkdown(parsed: ParsedExplanation, questionNo: string): string {
+  const head = questionNo ? `**[문항 ${questionNo}]**\n\n` : "";
+  const ans = `**[정답]** ${parsed.answer}\n\n`;
+  const steps = parsed.explanation_steps
+    .map((s, i) => {
+      const eq = s.equation ? `\n\n$$${s.equation}$$` : "";
+      return `${i + 1}. ${s.text}${eq}`;
+    })
+    .join("\n");
+  const summary = parsed.summary ? `\n\n**요약** ${parsed.summary}` : "";
+  return `${head}${ans}**[해설]**\n\n${steps}${summary}`;
+}
 
 type SourceImage = {
   /** 원본(또는 PDF 한 페이지) data URL */
@@ -467,6 +549,10 @@ export default function CropPage() {
                 error: row.parsed ? undefined : (row.errors || []).join(" / "),
                 // 새 풀이 도착 → 이전 피드백 상태 초기화
                 feedbackSaved: false,
+                // OCR 결과 텍스트 저장 — detectOcrIssue() · 미리보기 디버깅용
+                extractedText: typeof row.questionText === "string" ? row.questionText : "",
+                // 새 풀이가 도착하면 미리보기 자동 펼침 — 사용자가 즉시 KaTeX 렌더로 확인
+                previewOpen: true,
               }
             : c,
         ),
@@ -905,17 +991,102 @@ export default function CropPage() {
                         </span>
                       )}
                     </div>
+                    {/* OCR 품질 자동 감지 — 입력과 무관한 결과가 나오는 가장 큰 원인을 표면화 */}
+                    {(() => {
+                      const issue = detectOcrIssue(c);
+                      if (!issue) return null;
+                      const colorCls =
+                        issue.level === "high"
+                          ? "border-rose-300 bg-rose-50 text-rose-900"
+                          : "border-amber-300 bg-amber-50 text-amber-900";
+                      return (
+                        <div className={`mt-2 rounded border ${colorCls} p-2 text-[11px]`}>
+                          <div className="flex items-center gap-1.5">
+                            <span className="font-bold">
+                              {issue.level === "high" ? "⚠️ 인식 문제 감지" : "ℹ️ 인식 의심"}
+                            </span>
+                            <span className="text-[10px] opacity-80">{issue.reason}</span>
+                          </div>
+                          <p className="mt-1">{issue.suggestion}</p>
+                          <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                            <button
+                              onClick={() => processCrop(c)}
+                              className="rounded border border-current bg-white px-2 py-0.5 text-[10px] font-semibold hover:bg-white/70"
+                              title="현재 크롭으로 다시 풀이 (OCR 재시도)"
+                            >
+                              ↻ 다시 풀이
+                            </button>
+                            <button
+                              onClick={() => removeCrop(c.id)}
+                              className="rounded border border-current bg-white px-2 py-0.5 text-[10px] font-semibold hover:bg-white/70"
+                              title="이 크롭 삭제 후 더 큰 영역으로 다시 잡기"
+                            >
+                              ✂ 삭제 → 다시 크롭
+                            </button>
+                            {c.extractedText !== undefined && (
+                              <details className="ml-1">
+                                <summary className="cursor-pointer text-[10px] font-semibold underline">
+                                  OCR 결과 보기({c.extractedText.length}자)
+                                </summary>
+                                <pre className="mt-1 max-h-32 overflow-auto rounded bg-white/80 p-1.5 text-[10px] font-mono whitespace-pre-wrap break-words">
+                                  {c.extractedText || "(빈 텍스트 — OCR 실패)"}
+                                </pre>
+                              </details>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })()}
+
+                    {/* 결과 미리보기 — KaTeX 로 수식 렌더 (\overline{...}, $...$ 등이 그림으로 보임) */}
                     {c.parsed && (
-                      <details className="mt-1 rounded bg-white p-2">
-                        <summary className="cursor-pointer text-[11px] font-semibold text-slate-700">
-                          정답: {c.parsed.answer} (단계 {c.parsed.explanation_steps.length})
-                        </summary>
-                        <ol className="mt-1 list-decimal pl-4 text-[11px] text-slate-700">
-                          {c.parsed.explanation_steps.slice(0, 5).map((s, i) => (
-                            <li key={i}>{s.text.slice(0, 200)}</li>
-                          ))}
-                        </ol>
-                      </details>
+                      <div className="mt-2 rounded border border-indigo-200 bg-white p-2">
+                        <div className="flex items-center gap-2 border-b border-slate-100 pb-1.5">
+                          <span className="text-[11px] font-bold text-slate-700">
+                            정답: {c.parsed.answer}
+                          </span>
+                          <span className="text-[10px] text-slate-500">
+                            단계 {c.parsed.explanation_steps.length}
+                          </span>
+                          <button
+                            onClick={() =>
+                              setCrops((prev) =>
+                                prev.map((x) =>
+                                  x.id === c.id ? { ...x, previewOpen: !x.previewOpen } : x,
+                                ),
+                              )
+                            }
+                            className="ml-auto rounded border border-indigo-300 bg-indigo-50 px-2 py-0.5 text-[10px] font-semibold text-indigo-700 hover:bg-indigo-100"
+                          >
+                            {c.previewOpen ? "▾ 미리보기 접기" : "▸ 미리보기"}
+                          </button>
+                        </div>
+                        {c.previewOpen && (
+                          <div className="mt-2">
+                            <ExplanationMarkdownMath
+                              source={parsedToMarkdown(c.parsed, c.questionNo)}
+                              className="text-[13px] leading-6"
+                            />
+                            <details className="mt-2">
+                              <summary className="cursor-pointer text-[10px] font-semibold text-slate-500 hover:text-slate-700">
+                                📝 원본 텍스트 (디버깅용)
+                              </summary>
+                              <ol className="mt-1 list-decimal pl-4 text-[10px] text-slate-600">
+                                {c.parsed.explanation_steps.map((s, i) => (
+                                  <li key={i}>
+                                    {s.text}
+                                    {s.equation && (
+                                      <span className="ml-1 text-slate-500">
+                                        ({s.equation})
+                                      </span>
+                                    )}
+                                  </li>
+                                ))}
+                              </ol>
+                            </details>
+                          </div>
+                        )}
+                      </div>
                     )}
 
                     {/* 피드백 패널 — 풀이 후 별점·메모 → 다음 호출 프롬프트에 반영 */}
