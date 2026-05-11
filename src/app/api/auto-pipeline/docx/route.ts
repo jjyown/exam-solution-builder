@@ -36,6 +36,14 @@ type RunItem = {
   /** 원본 문제 본문 (자동 파이프라인이 보존한 questionText) — DOCX 「문제」 섹션에 들어간다 */
   questionText?: string;
   parsed: Parsed | null;
+  /**
+   * 원본 문제 이미지 (data URL 형식: 'data:image/png;base64,...').
+   * /crop 에서 잘라낸 이미지가 있으면 [문제] 섹션 위에 그대로 삽입.
+   * DOCX 빌더가 마크다운 이미지 라인을 자동으로 ImageRun 으로 변환.
+   * 비전 모드에서 questionText 가 placeholder 라 본문 텍스트가 거의 없어도
+   * 사용자가 어떤 문제인지 한눈에 알 수 있게 해주는 핵심 단서.
+   */
+  questionImageDataUrl?: string;
 };
 
 type Body = {
@@ -65,6 +73,11 @@ function renderRunAsBlock(run: RunItem): string {
   const lines: string[] = [];
   lines.push(`[문항 ${run.questionNo}]`);
   lines.push(`[문제]`);
+  // 원본 크롭 이미지가 있으면 마크다운 이미지 라인으로 삽입 — DOCX/HML 빌더가
+  // parseMarkdownImageLine + bufferFromDataUrl 로 자동 임베드.
+  if (run.questionImageDataUrl && run.questionImageDataUrl.startsWith("data:image/")) {
+    lines.push(`![문항 ${run.questionNo} 원본 이미지](${run.questionImageDataUrl})`);
+  }
   const body = cleanQuestionText(run.questionNo, run.questionText);
   lines.push(body || "(문제 본문 누락 — 운영자 검수 필요)");
   if (!run.parsed) {

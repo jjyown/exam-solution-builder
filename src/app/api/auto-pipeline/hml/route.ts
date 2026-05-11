@@ -35,6 +35,12 @@ type RunItem = {
   questionNo: string;
   questionText?: string;
   parsed: Parsed | null;
+  /**
+   * /crop 에서 잘라낸 원본 문제 이미지 (data URL).
+   * 있으면 questionText 머리에 마크다운 이미지 라인을 prepend 해서
+   * HML 빌더가 자동으로 해당 위치에 이미지 임베드.
+   */
+  questionImageDataUrl?: string;
 };
 
 type Body = {
@@ -83,11 +89,19 @@ export async function POST(req: Request) {
   // 섞이는 잘못된 구조였음 — buildExamExplanationHmlMultiBuffer 가 3섹션으로 정리.
   const buffer = buildExamExplanationHmlMultiBuffer({
     examName,
-    runs: validRuns.map((r) => ({
-      questionNo: r.questionNo,
-      questionText: r.questionText,
-      parsed: r.parsed!,
-    })),
+    runs: validRuns.map((r) => {
+      // 원본 크롭 이미지가 있으면 questionText 머리에 마크다운 이미지 라인 prepend.
+      // HML 빌더가 마크다운 이미지를 자동으로 해당 위치에 임베드.
+      const imgLine =
+        r.questionImageDataUrl && r.questionImageDataUrl.startsWith("data:image/")
+          ? `![문항 ${r.questionNo} 원본 이미지](${r.questionImageDataUrl})\n\n`
+          : "";
+      return {
+        questionNo: r.questionNo,
+        questionText: imgLine + (r.questionText || ""),
+        parsed: r.parsed!,
+      };
+    }),
   });
 
   const fileName = `${safeFilename(examName)}_해설.hml`;
