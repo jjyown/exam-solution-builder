@@ -236,6 +236,10 @@ export async function POST(req: Request) {
   }
 
   // 영속화 — 기존 auto_pipeline_runs 와 동일 형식으로 저장 (이력·미리보기·DOCX 재사용)
+  // model 에 'vision:' prefix 를 붙여 cost-tracker / inbox 에서 비전 runs 로 식별 가능하게.
+  // - cost-tracker: 'vision:' prefix 있는 row 는 auto_pipeline_runs 집계에서 skip
+  //   (api_call_logs 의 /api/auto-pipeline/vision 으로만 1회 카운트 → 이중 카운트 방지)
+  // - inbox: model 시작이 'vision:' 이면 🔭 배지 표시
   let runId: string | null = null;
   let persistError: string | undefined;
   if (body.persist !== false) {
@@ -244,7 +248,7 @@ export async function POST(req: Request) {
         questionText: '[비전 직접 풀이] 이미지 입력',
         examName: body.examName,
         questionNo: body.questionNo,
-        model: usedModel,
+        model: `vision:${usedModel}`,
         topK: 0,
         maxRetries: 0,
       },

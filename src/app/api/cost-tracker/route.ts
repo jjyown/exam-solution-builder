@@ -184,9 +184,17 @@ async function handleCostTracker(req: Request) {
   let autoTotalAttempts = 0;
   let autoEstUsd = 0;
 
+  let visionRunsCount = 0;
   if (!runsErr && Array.isArray(runs)) {
     for (const r of runs) {
       const model = (r.model as string | null) || "(unknown)";
+      // 비전 모드 runs (model 이 'vision:' prefix) 는 별도 라우트
+      // /api/auto-pipeline/vision 으로 api_call_logs 에 1회 잡힘.
+      // 여기서 또 카운트하면 이중 집계 → skip.
+      if (model.startsWith("vision:")) {
+        visionRunsCount += 1;
+        continue;
+      }
       const attempts = Number(r.attempts) || 1;
       // 한 run = 한 사용자 요청, attempts 만큼 모델 호출 (재시도 포함)
       const unit = inferUnitCost(model);
@@ -553,6 +561,15 @@ async function handleCostTracker(req: Request) {
     diagnoses.push({
       level: "info",
       message: "최근 호출 기록 없음 — Supabase 영속화가 막혔거나 진짜로 호출이 0건. auto_pipeline_runs / api_call_logs 테이블 확인.",
+    });
+  }
+  // g-pre. 비전 모드 runs 가 있으면 안내 (이중 카운트 회피 정책 명시)
+  if (visionRunsCount > 0) {
+    diagnoses.push({
+      level: "info",
+      message:
+        `🔭 비전 모드 runs ${visionRunsCount} 건 감지 — auto_pipeline_runs 집계에서 제외되고 ` +
+        `api_call_logs 의 /api/auto-pipeline/vision 라우트로만 1회씩 카운트됩니다 (이중 카운트 방지).`,
     });
   }
   // g. api_call_logs 미적용 안내 — 사진편집·페어정제 등이 비용에 안 잡힘

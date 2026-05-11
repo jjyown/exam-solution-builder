@@ -628,7 +628,18 @@ export default function InboxPage() {
                             {r.question_no ?? "-"}
                           </td>
                           <td className="px-3 py-2 text-slate-500">{fmtTime(r.created_at)}</td>
-                          <td className="px-3 py-2 text-slate-700">{r.model}</td>
+                          <td className="px-3 py-2 text-slate-700">
+                            {r.model?.startsWith("vision:") ? (
+                              <span title="비전 모드 — Gemini Vision 직접 풀이 (OCR 단계 생략)">
+                                <span className="mr-1 rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] font-bold text-emerald-800">
+                                  🔭 비전
+                                </span>
+                                <span className="text-[11px]">{r.model.slice(7)}</span>
+                              </span>
+                            ) : (
+                              r.model
+                            )}
+                          </td>
                           <td className="px-3 py-2">
                             <span
                               className={
