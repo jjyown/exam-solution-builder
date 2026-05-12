@@ -250,7 +250,12 @@ export async function loadDriveAnalysisRecords(): Promise<{
 
   let allFiles;
   try {
-    allFiles = await listDriveFolderFilesRecursive(folderId, ALLOWED_EXTS);
+    // textbook-drive-build 작업 폴더(시중교재/<책>/pages, .../ocr) 는 분석 OCR 대상에서 제외.
+    // pages 하위의 PNG 들이 또 Mathpix OCR 되어 이중 비용 발생하는 것을 막는다.
+    // ocr 하위의 .md 들은 어차피 ALLOWED_EXTS(.pdf/.png/.jpg/.jpeg/.webp) 에 안 잡히지만,
+    // 명시적으로 walk 차단해 Drive API 호출도 절약.
+    const skipFolderNames = new Set(["pages", "ocr"]);
+    allFiles = await listDriveFolderFilesRecursive(folderId, ALLOWED_EXTS, 4, skipFolderNames);
   } catch (e) {
     summary.errors.push(`분석용 자료 폴더 목록 조회 실패: ${(e as Error).message}`);
     return { records: [], summary };

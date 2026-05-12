@@ -355,6 +355,7 @@ export async function listDriveFolderFilesRecursive(
   rootFolderId: string,
   allowedExtensions?: Set<string>,
   maxDepth = 4,
+  skipFolderNames?: Set<string>,
 ): Promise<DriveFileMetaWithPath[]> {
   const drive = getDriveClient();
   const out: DriveFileMetaWithPath[] = [];
@@ -372,6 +373,8 @@ export async function listDriveFolderFilesRecursive(
       const name = f.name ?? "";
       if (!id || !name) continue;
       if (f.mimeType === "application/vnd.google-apps.folder") {
+        // 특정 이름의 하위 폴더는 재귀 진입 자체를 건너뜀 (예: textbook-drive-build 작업 폴더 「pages」, 「ocr」).
+        if (skipFolderNames && skipFolderNames.has(name)) continue;
         await walk(id, [...segments, name], depth + 1);
         continue;
       }
