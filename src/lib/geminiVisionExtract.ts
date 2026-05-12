@@ -64,6 +64,42 @@ function isGeminiQuotaError(message: string): boolean {
 }
 
 /**
+ * 시중교재 페이지 전용 OCR 프롬프트.
+ * 시험지 프롬프트는 "메타 정보 제외" 규칙 때문에 표지·안내·목차 페이지에서
+ * 빈 응답을 반환한다. 교재는 표지·목차·단원 안내·문제·풀이까지 모두
+ * 살려야 하므로 별도 프롬프트를 사용한다.
+ */
+const KOREAN_TEXTBOOK_OCR_PROMPT = [
+  "당신은 한국 중·고등 수학 교재(쎈·EBS·RPM 등 시중교재) 페이지를 텍스트로 옮기는 OCR 전문가입니다.",
+  "다음 규칙을 따르세요:",
+  "",
+  "1) **모든 텍스트 추출**: 페이지에 있는 한국어·숫자·기호를 누락 없이 옮긴다. 단원 제목·소제목·문항 번호·발문·선지·풀이·정답·표·캡션 모두 포함.",
+  "2) **표지/목차/안내 페이지도 그대로**: 표지면 제목·저자·출판사를, 목차면 차례를, 안내 페이지면 학습 방법을 옮긴다. 빈 페이지가 아니면 무엇이라도 출력한다.",
+  "3) **문항 번호 보존**: `1.`, `2.`, `001`, `(1)` 등 원문 번호 그대로.",
+  "4) **수식**: 인라인은 `$...$`, 디스플레이는 `$$...$$` 로 LaTeX. 분수 `\\frac{a}{b}`, 루트 `\\sqrt{x}`, 적분 `\\int` 등 표준.",
+  "5) **선지**: ①②③④⑤ 형태 그대로, 또는 `1) 2) 3)` 그대로. 각 선지 별도 줄.",
+  "6) **<보기>·조건 박스**: `<보기>` ... `</보기>` 태그로 감싼다.",
+  "7) **도형·그래프·표**: 한 줄로 `[그림: ... ]` 식의 핵심 묘사. 표는 가능하면 마크다운 표로.",
+  "8) **풀이 섹션**: 같은 페이지에 「정답 및 해설」 / 「풀이」 표시가 있으면 그대로 옮긴다. 문제 번호와 풀이 번호 매칭이 보이도록.",
+  "9) **출력 형식**: 마크다운 코드블록 없이 평문. 메타 코멘트(\"여기 OCR 결과...\") 일절 금지. 추출된 본문 텍스트만 반환.",
+  "10) **진짜 빈 페이지** (전혀 글자·그림 없음) 일 때만 단어 `[빈 페이지]` 만 출력.",
+  "",
+  "위 규칙대로 페이지 내용을 텍스트로 변환해 반환하세요.",
+].join("\n");
+
+/**
+ * 시중교재 페이지 1장을 Gemini Vision 으로 OCR.
+ * 시험지용 extractTextWithGeminiVision 과 별도 — 표지/목차/안내 페이지도 살린다.
+ * 빈 페이지는 `[빈 페이지]` 한 줄을 반환 (실패 아님).
+ */
+export async function extractTextbookPageWithGeminiVision(
+  base64: string,
+  mimeType: string,
+): Promise<VisionExtractResult> {
+  return runGeminiVisionWithPrompt(base64, mimeType, KOREAN_TEXTBOOK_OCR_PROMPT);
+}
+
+/**
  * 이미지/PDF base64 → Gemini multimodal 로 텍스트 추출.
  * mimeType 예: "image/png", "image/jpeg", "application/pdf".
  * Gemini SDK 는 inlineData 50MB 한도, application/pdf 는 페이지 합산.
@@ -71,6 +107,14 @@ function isGeminiQuotaError(message: string): boolean {
 export async function extractTextWithGeminiVision(
   base64: string,
   mimeType: string,
+): Promise<VisionExtractResult> {
+  return runGeminiVisionWithPrompt(base64, mimeType, KOREAN_EXAM_OCR_PROMPT);
+}
+
+async function runGeminiVisionWithPrompt(
+  base64: string,
+  mimeType: string,
+  prompt: string,
 ): Promise<VisionExtractResult> {
   if (isGeminiOcrKillSwitched()) {
     return {
@@ -91,7 +135,7 @@ export async function extractTextWithGeminiVision(
     try {
       const model = client.getGenerativeModel({ model: modelName });
       const result = await model.generateContent([
-        { text: KOREAN_EXAM_OCR_PROMPT },
+        { text: prompt },
         {
           inlineData: {
             data: base64,

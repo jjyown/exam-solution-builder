@@ -162,7 +162,7 @@ async function main() {
     uploadBufferToDriveFolder,
     downloadDriveFileById,
   } = await import("../src/lib/googleDrive.ts");
-  const { extractTextWithGeminiVision } = await import("../src/lib/geminiVisionExtract.ts");
+  const { extractTextbookPageWithGeminiVision } = await import("../src/lib/geminiVisionExtract.ts");
 
   const drive = getDriveClient();
   const analysisRootId = await resolveDriveAnalysisFolderId(drive);
@@ -277,7 +277,7 @@ async function main() {
       }
 
       const base64 = pngBuf.toString("base64");
-      const ocr = await extractTextWithGeminiVision(base64, "image/png");
+      const ocr = await extractTextbookPageWithGeminiVision(base64, "image/png");
       if (!ocr.ok) {
         manifest.pageStatuses.push({ page: pageNo, ok: false, error: ocr.error });
         process.stdout.write(
