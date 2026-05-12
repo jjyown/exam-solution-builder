@@ -209,6 +209,48 @@ export async function moveDriveFileToFolder(
   };
 }
 
+/**
+ * 부모 폴더 아래에서 이름이 일치하는 하위 폴더 ID를 찾고, 없으면 새로 만든다.
+ * 시중교재 책별 작업 폴더(「시중교재/<책>/pages」 등) 생성에 쓰임.
+ */
+export async function findOrCreateChildFolder(
+  parentId: string,
+  folderName: string,
+): Promise<string> {
+  const drive = getDriveClient();
+  const existing = await findChildFolderId(drive, parentId, folderName);
+  if (existing) return existing;
+  const res = await drive.files.create({
+    requestBody: {
+      name: folderName,
+      mimeType: "application/vnd.google-apps.folder",
+      parents: [parentId],
+    },
+    fields: "id",
+  });
+  if (!res.data.id) {
+    throw new Error(`Drive 폴더 생성 실패: ${folderName}`);
+  }
+  return res.data.id;
+}
+
+/** 부모 폴더 아래 하위 폴더 목록 (이름·ID). 시중교재 책 목록 스캔용. */
+export async function listDriveChildFolders(
+  parentId: string,
+): Promise<Array<{ id: string; name: string }>> {
+  const drive = getDriveClient();
+  const res = await drive.files.list({
+    q: `'${parentId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`,
+    fields: "files(id, name)",
+    pageSize: 1000,
+  });
+  const out: Array<{ id: string; name: string }> = [];
+  for (const f of res.data.files ?? []) {
+    if (f.id && f.name) out.push({ id: f.id, name: f.name });
+  }
+  return out;
+}
+
 export async function uploadBufferToDriveFolder(params: {
   folderId: string;
   fileName: string;

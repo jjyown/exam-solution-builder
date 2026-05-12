@@ -33,7 +33,8 @@
     "textbook:split-pages": "python scripts/textbook_page_split_mathpix.py",
     "textbook:audit-tree": "python tools/audit_textbook_reference_tree.py",
     "textbook:normalize-ref": "python tools/normalize_textbook_reference_layout.py",
-    "textbook:refine-md": "tsx scripts/refine-textbook-md.mts"
+    "textbook:refine-md": "tsx scripts/refine-textbook-md.mts",
+    "textbook:drive-build": "tsx scripts/textbook-drive-build.mts"
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
