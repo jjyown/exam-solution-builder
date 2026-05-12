@@ -31,17 +31,37 @@ function initRetriever(): Promise<ReferenceRetriever> {
   const kbPath =
     process.env.REFERENCE_KB_PATH ||
     path.join(process.cwd(), "reference", "kb.jsonl");
-  // ⚠️ 핵심: kb.jsonl 만 로드되면 즉시 반환 (~50ms).
-  //    Drive 분석용 자료 OCR 은 백그라운드로 처리해서 startup·healthcheck 막지 않음.
-  //    첫 몇 호출은 Drive records 없이 동작하고, 이후 백그라운드 완료 시 자동 합쳐짐.
-  return ReferenceRetriever.fromJsonl(kbPath).then((r) => {
+  // ⚠️ 핵심 로딩 순서 / 비용:
+  //  1) kb.jsonl (~50ms)                            — 즉시
+  //  2) 로컬 「교재 참고자료/」 *.md (~100~200ms)    — 인라인 (이미 빌드된 1k+ 시중교재 참고자료)
+  //  3) Drive 분석용 자료 (네트워크·OCR)             — 백그라운드 (응답 막지 않음)
+  //
+  //  로컬 교재는 동기 인라인으로 로드해서 startup 직후 호출에도 RAG 에 포함되게 한다.
+  //  비활성화: TEXTBOOK_REFERENCE_DIR= (빈 값)
+  return ReferenceRetriever.fromJsonl(kbPath).then(async (r) => {
+    try {
+      const { loadLocalTextbookReferenceRecords } = await import(
+        "./textbookReferenceLocalLoader"
+      );
+      const { records, fileCount } = await loadLocalTextbookReferenceRecords();
+      if (records.length > 0) {
+        r.addRecords(records);
+        console.log(
+          `[retriever] 로컬 교재 참고자료 ${records.length}개 record 합산 (파일 ${fileCount}개)`,
+        );
+      }
+    } catch (e) {
+      console.warn(
+        `[retriever] 로컬 교재 참고자료 로드 실패 — Drive/kb 만으로 동작: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
     void (async () => {
       try {
         const { loadDriveAnalysisRecords } = await import("./driveAnalysisLearner");
         const { records } = await loadDriveAnalysisRecords();
         if (records.length > 0) r.addRecords(records);
       } catch {
-        // best-effort — Drive 실패해도 베이스 KB 만으로 동작
+        // best-effort — Drive 실패해도 베이스 KB·로컬 교재 만으로 동작
       }
     })();
     return r;
