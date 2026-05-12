@@ -150,14 +150,38 @@ async function processFolder(args: {
   const localMirrorRoot = path.join(process.cwd(), "교재 참고자료", mirrorSub);
   await fs.mkdir(localMirrorRoot, { recursive: true });
 
+  // ⚠️ 메모리 보호: 매우 큰 PDF 는 Railway Hobby (512MB~1GB RAM) 환경에서 OOM 위험.
+  //  - downloadDriveFileById 가 전체 PDF 를 메모리 buffer 로 적재
+  //  - pdf-to-img(pdfjs) 가 파싱·렌더에 추가 2~3배 메모리 사용
+  //  - 300MB PDF → 약 900MB~1GB 피크 → Hobby 인스턴스 OOM 가능
+  //  - 한도 초과 PDF 는 skip 하고 로그 — 사용자가 로컬에서 처리하도록 안내
+  // 환경변수: TEXTBOOK_DRIVE_BUILD_MAX_PDF_MB (기본 150MB, 0 이면 무제한)
+  const maxPdfMb = (() => {
+    const raw = Number(process.env.TEXTBOOK_DRIVE_BUILD_MAX_PDF_MB);
+    if (!Number.isFinite(raw)) return 150;
+    if (raw === 0) return Number.MAX_SAFE_INTEGER;
+    return raw;
+  })();
+
   const ocrModel = "gemini-2.0-flash";
   let processedBooks = 0;
   let skippedBooks = 0;
 
   for (const pdf of targets) {
     const bookName = safeStem(pdf.name);
-    const sizeMb = (Number(pdf.size ?? 0) / 1024 / 1024).toFixed(1);
+    const sizeBytes = Number(pdf.size ?? 0);
+    const sizeMb = (sizeBytes / 1024 / 1024).toFixed(1);
     log(`\n=== 📘 [${label}] ${bookName} (${sizeMb}MB) ===`);
+
+    // 큰 PDF 게이트 — Railway OOM 보호
+    if (sizeBytes > maxPdfMb * 1024 * 1024) {
+      log(
+        `  [skip] PDF 크기 ${sizeMb}MB > 한도 ${maxPdfMb}MB — Railway OOM 보호. ` +
+        `로컬에서 처리하거나 환경변수 TEXTBOOK_DRIVE_BUILD_MAX_PDF_MB 로 한도 상향.`,
+      );
+      skippedBooks += 1;
+      continue;
+    }
 
     const workFolderId = await findOrCreateChildFolder(folderId, bookName);
     const pagesFolderId = await findOrCreateChildFolder(workFolderId, "pages");
