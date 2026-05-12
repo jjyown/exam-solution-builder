@@ -94,6 +94,7 @@ type CostResponse = {
     estKrw: number;
   };
   assistedPairingEnabled?: boolean;
+  last24h?: { runs: number; failed: number; failureRate: number; retryShare: number };
   diagnoses: Array<{ level: "info" | "warn" | "high"; message: string }>;
 };
 
@@ -313,6 +314,36 @@ export default function CostPage() {
         </div>
       )}
 
+      {/* 🚨 24h 알람 — level: 'high' 진단을 prominent 배너로 분리 노출. */}
+      {/*    사용자가 선택한 기간(1d/7d/30d/90d) 과 무관하게 항상 last 24h 기준이라 */}
+      {/*    30일 보고 있어도 최근 사고를 못 보고 지나치지 않음. */}
+      {data && data.diagnoses?.some((d) => d.level === "high") && (
+        <section className="mb-4 rounded-lg border-2 border-rose-400 bg-rose-50 p-4 shadow-md">
+          <div className="mb-2 flex items-center gap-2">
+            <span className="rounded bg-rose-600 px-2 py-0.5 text-xs font-bold text-white">
+              ALERT
+            </span>
+            <h2 className="text-sm font-bold text-rose-900">24시간 알람 — 즉시 점검 필요</h2>
+            {data.last24h && (
+              <span className="ml-auto text-[11px] text-rose-700">
+                24h: 실행 {data.last24h.runs}건 · 실패{" "}
+                {(data.last24h.failureRate * 100).toFixed(0)}% · 재시도 비중{" "}
+                {(data.last24h.retryShare * 100).toFixed(0)}%
+              </span>
+            )}
+          </div>
+          <ul className="space-y-1.5">
+            {data.diagnoses
+              .filter((d) => d.level === "high")
+              .map((d, i) => (
+                <li key={i} className="text-xs leading-relaxed text-rose-900">
+                  {d.message}
+                </li>
+              ))}
+          </ul>
+        </section>
+      )}
+
       {/* 총 비용 카드 */}
       {data && (
         <section className="mb-4 grid grid-cols-1 gap-3 md:grid-cols-4">
@@ -450,18 +481,20 @@ export default function CostPage() {
         </section>
       )}
 
-      {/* 진단 메시지 */}
-      {data && data.diagnoses && data.diagnoses.length > 0 && (
+      {/* 진단 메시지 — 'high' 는 위 ALERT 배너에 별도 노출되므로 여기서는 info/warn 만 */}
+      {data && data.diagnoses && data.diagnoses.some((d) => d.level !== "high") && (
         <section className="mb-4 space-y-1.5">
-          {data.diagnoses.map((d, i) => (
-            <div
-              key={i}
-              className={`rounded-md border px-3 py-2 text-xs ${badgeColor(d.level)}`}
-            >
-              <strong className="mr-2 uppercase">[{d.level}]</strong>
-              {d.message}
-            </div>
-          ))}
+          {data.diagnoses
+            .filter((d) => d.level !== "high")
+            .map((d, i) => (
+              <div
+                key={i}
+                className={`rounded-md border px-3 py-2 text-xs ${badgeColor(d.level)}`}
+              >
+                <strong className="mr-2 uppercase">[{d.level}]</strong>
+                {d.message}
+              </div>
+            ))}
         </section>
       )}
 

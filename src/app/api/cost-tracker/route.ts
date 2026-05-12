@@ -167,6 +167,7 @@ async function handleCostTracker(req: Request) {
       total: { estUsd: 0, estKrw: 0 },
       hint: "Supabase 미설정 — 사용량 추적 불가. SUPABASE_SERVICE_ROLE_KEY 설정 필요.",
       assistedPairingEnabled: isAssistedPairingEnabled(),
+      last24h: { runs: 0, failed: 0, failureRate: 0, retryShare: 0 },
       diagnoses: [],
     });
   }
@@ -512,8 +513,65 @@ async function handleCostTracker(req: Request) {
   const total = autoEstUsd + drvOcrEstUsd + apiLogTotalUsd + academyEstUsd;
   const totalKrw = total * KRW_PER_USD;
 
+  // ── 24h 알람 윈도우 — 사용자가 선택한 기간(days)과 무관하게 항상 last 24h 만 별도 집계.
+  // 사용자가 30d 보고 있어도 최근 24h 의 실패 스파이크/재시도 폭증을 놓치지 않게 한다.
+  // 임계:
+  //   - failureRate > 0.30 (min 5 runs)  → 'high'  (페이지 상단 큰 배너)
+  //   - retryShare  > 0.70 (min 5 runs)  → 'warn'  (작은 줄, 검증 게이트 점검 신호)
+  // 최소 표본 5건은 1~2건만 실패한 정상 운영에서 false positive 가 안 뜨도록.
+  type Last24h = { runs: number; failed: number; failureRate: number; retryShare: number };
+  let last24h: Last24h = { runs: 0, failed: 0, failureRate: 0, retryShare: 0 };
+  {
+    const since24 = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const { data: recentRuns } = await client
+      .from("auto_pipeline_runs")
+      .select("attempts, ok")
+      .gte("created_at", since24)
+      .limit(5000);
+    if (Array.isArray(recentRuns) && recentRuns.length > 0) {
+      let runs24 = 0;
+      let failed24 = 0;
+      let attemptsTotal24 = 0;
+      let retryAttempts24 = 0;
+      for (const r of recentRuns) {
+        runs24 += 1;
+        const a = Number(r.attempts) || 1;
+        attemptsTotal24 += a;
+        if (a > 1) retryAttempts24 += a - 1; // 재시도 분만 카운트
+        if (r.ok === false) failed24 += 1;
+      }
+      last24h = {
+        runs: runs24,
+        failed: failed24,
+        failureRate: runs24 > 0 ? failed24 / runs24 : 0,
+        retryShare: attemptsTotal24 > 0 ? retryAttempts24 / attemptsTotal24 : 0,
+      };
+    }
+  }
+
   // 진단 로직 — 사용량 폭증 원인 자동 식별
   const diagnoses: Array<{ level: "info" | "warn" | "high"; message: string }> = [];
+
+  // 0-a. 24h 실패율 임계 초과 — 'high' (코드 버그·외부 API 장애·키 만료 등의 즉시 시그널)
+  if (last24h.runs >= 5 && last24h.failureRate > 0.30) {
+    diagnoses.push({
+      level: "high",
+      message:
+        `🚨 24h 실패율 ${(last24h.failureRate * 100).toFixed(0)}% ` +
+        `(${last24h.failed}/${last24h.runs} 실패) — 임계 30% 초과. ` +
+        `OpenAI/Gemini 키 만료·모델 호환·검증기 오류 즉시 점검. ` +
+        `errors jsonb 샘플: SELECT errors FROM auto_pipeline_runs WHERE NOT ok AND created_at >= now()-interval '24 hours' LIMIT 5;`,
+    });
+  }
+  // 0-b. 24h 재시도 비중 과다 — 'warn' (실패는 안 나지만 호출 증폭으로 비용만 새는 상태)
+  if (last24h.runs >= 5 && last24h.retryShare > 0.70) {
+    diagnoses.push({
+      level: "warn",
+      message:
+        `24h 재시도 비중 ${(last24h.retryShare * 100).toFixed(0)}% — 임계 70% 초과. ` +
+        `검증 게이트 임계 또는 페어매핑 적중률 점검 권장 (호출은 성공하지만 attempt 만 늘어남).`,
+    });
+  }
 
   // a. 자동 파이프라인 호출이 평균보다 많음
   const dailyAvg = autoTotalCalls / days;
@@ -636,6 +694,12 @@ async function handleCostTracker(req: Request) {
       },
     },
     assistedPairingEnabled: isAssistedPairingEnabled(),
+    last24h: {
+      runs: last24h.runs,
+      failed: last24h.failed,
+      failureRate: Number(last24h.failureRate.toFixed(3)),
+      retryShare: Number(last24h.retryShare.toFixed(3)),
+    },
     diagnoses,
     hint:
       "추정 비용은 모델별 평균 단가 기준 ±50% 오차. 정확한 청구액은 Google AI Studio / OpenAI / Mathpix billing 확인.",
