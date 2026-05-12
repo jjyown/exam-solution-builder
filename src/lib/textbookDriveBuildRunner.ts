@@ -23,7 +23,6 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
-import { pdf as pdfToImg } from "pdf-to-img";
 import {
   getDriveClient,
   resolveDriveAnalysisFolderId,
@@ -33,6 +32,15 @@ import {
   downloadDriveFileById,
 } from "./googleDrive";
 import { extractTextbookPageWithGeminiVision } from "./geminiVisionExtract";
+
+// pdf-to-img 는 @napi-rs/canvas 네이티브 모듈에 의존 — 모듈 로드 시점에 바이너리
+// 동적 로드를 시도한다. Railway Linux 환경에서 로드 실패 시 모듈 전체가 import
+// 단계에서 죽으면 디버깅 어려움. lazy 로 감싸 에러 메시지를 잡고 자동 실행이 통째로
+// 중단되지 않게 한다.
+async function loadPdfRenderer(): Promise<typeof import("pdf-to-img").pdf> {
+  const mod = await import("pdf-to-img");
+  return mod.pdf;
+}
 
 export type TextbookDriveBuildOptions = {
   /** 책 이름 필터 (부분 일치). 없으면 폴더 안 모든 PDF. */
@@ -205,11 +213,14 @@ async function processFolder(args: {
     const dl = await downloadDriveFileById(pdf.id);
 
     log(`  ▤ 페이지 렌더 (pdf-to-img)…`);
-    let pdfDoc: Awaited<ReturnType<typeof pdfToImg>>;
+    let pdfDoc: Awaited<ReturnType<Awaited<ReturnType<typeof loadPdfRenderer>>>>;
     try {
-      pdfDoc = await pdfToImg(dl.buffer, { scale: 2 });
+      const pdfFn = await loadPdfRenderer();
+      pdfDoc = await pdfFn(dl.buffer, { scale: 2 });
     } catch (e) {
-      log(`  ✗ PDF 렌더 실패: ${(e as Error).message}`);
+      const err = e as Error;
+      log(`  ✗ PDF 렌더 실패: ${err.message}`);
+      if (err.stack) log(`     stack: ${err.stack.split("\n").slice(0, 5).join(" | ")}`);
       continue;
     }
     const totalPages = pdfDoc.length;

@@ -108,12 +108,18 @@ export function startTextbookDriveBuildAutoRun(): void {
       };
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
+      const stack = e instanceof Error && e.stack ? e.stack : "";
+      // 진단용 — 첫 행은 사용자 친화 메시지, stack 첫 5줄로 원인 추적
       console.error(`[textbook-build-auto] 실패: ${msg}`);
+      if (stack) {
+        const stackLines = stack.split("\n").slice(0, 6).join("\n");
+        console.error(`[textbook-build-auto] stack:\n${stackLines}`);
+      }
       snapshot = {
         ...snapshot,
         lastRunAt: Date.now(),
         lastOk: false,
-        lastErrors: [msg],
+        lastErrors: [msg, ...(stack ? [stack.split("\n").slice(0, 3).join(" | ")] : [])],
         totalRuns: snapshot.totalRuns + 1,
       };
     } finally {
