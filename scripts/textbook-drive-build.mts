@@ -1,8 +1,17 @@
 /**
  * textbook-drive-build.mts
  * ────────────────────────────────────────────────────────────────────────────
- *  Drive 「분석용 자료/시중교재/」 폴더의 PDF 들을 페이지 단위로 풀어
- *  Gemini Vision 으로 OCR 한 결과를 책별 작업 폴더에 영구 저장하는 로컬 빌더.
+ *  Drive 「분석용 자료」 아래 시중교재 / 시험지 원안 폴더의 PDF 들을 페이지
+ *  단위로 풀어 Gemini Vision 으로 OCR 한 결과를 책(또는 시험지)별 작업 폴더에
+ *  영구 저장하는 로컬 빌더.
+ *
+ *  폴더 우선순위 (자동):
+ *    1) 시중교재 먼저 처리 (skip 이미 끝난 책)
+ *    2) 시중교재에 새 작업이 0건이면 → 시험지 원안도 같은 방식으로 자동 처리
+ *    3) 시중교재에 새 작업이 있었으면 → 시험지 원안은 다음 실행으로 미룸
+ *
+ *  추가 교재 업로드 → 다음 실행에서 새 교재만 처리 → 새 교재 없을 때 자연스럽게
+ *  시험지 원안 처리로 넘어가는 흐름.
  *
  *  목표 폴더 구조 (사용자 요청):
  *    분석용 자료/시중교재/
@@ -150,67 +159,91 @@ function buildPageMd(meta: {
   ].join("\n");
 }
 
-async function main() {
-  dotenv.config({ path: path.join(process.cwd(), ".env.local") });
-  const cli = parseArgs(process.argv);
+/**
+ * 폴더 우선순위 — 시중교재 우선, 시중교재에 새 작업이 없으면 시험지 원안도 자동 처리.
+ *  - driveName  : Drive 「분석용 자료」 아래 폴더명
+ *  - mirrorSub  : 로컬 「교재 참고자료/」 아래 미러 하위 디렉토리명 (RAG 자동 픽업)
+ *  - label      : 로그 표시용 라벨
+ */
+const FOLDER_PRIORITY: Array<{ driveName: string; mirrorSub: string; label: string }> = [
+  { driveName: "시중교재", mirrorSub: "시중교재", label: "시중교재" },
+  { driveName: "시험지 원안", mirrorSub: "시험지 원안", label: "시험지 원안" },
+];
 
-  const {
-    getDriveClient,
-    resolveDriveAnalysisFolderId,
-    listDriveFolderFiles,
-    findOrCreateChildFolder,
-    uploadBufferToDriveFolder,
-    downloadDriveFileById,
-  } = await import("../src/lib/googleDrive.ts");
-  const { extractTextbookPageWithGeminiVision } = await import("../src/lib/geminiVisionExtract.ts");
+type DriveDeps = {
+  listDriveFolderFiles: (
+    folderId: string,
+    allowedExt?: Set<string>,
+  ) => Promise<Array<{ id: string; name: string; modifiedTime: string | null; size: number | null }>>;
+  findOrCreateChildFolder: (parentId: string, name: string) => Promise<string>;
+  uploadBufferToDriveFolder: (params: {
+    folderId: string;
+    fileName: string;
+    buffer: Buffer;
+    mimeType: string;
+  }) => Promise<{ id: string; name: string }>;
+  downloadDriveFileById: (fileId: string) => Promise<{ buffer: Buffer }>;
+  extractTextbookPageWithGeminiVision: (
+    base64: string,
+    mimeType: string,
+  ) => Promise<{ ok: true; text: string; model: string; mimeType: string } | { ok: false; error: string }>;
+};
 
-  const drive = getDriveClient();
-  const analysisRootId = await resolveDriveAnalysisFolderId(drive);
-  if (!analysisRootId) {
-    console.error("[textbook-drive-build] 「분석용 자료」 폴더를 찾지 못했습니다.");
-    process.exit(1);
-  }
-  const textbookFolderId = await findOrCreateChildFolder(analysisRootId, "시중교재");
-
-  const pdfFiles = (await listDriveFolderFiles(textbookFolderId, new Set([".pdf"])))
+/**
+ * 한 폴더(시중교재 또는 시험지 원안) 안의 PDF 들을 페이지 분할 + OCR 처리.
+ * 반환: { found 전체 PDF 수, processedBooks 새로 OCR 한 책 수, skippedBooks 이미 처리된 책 수 }
+ */
+async function processFolder(args: {
+  analysisRootId: string;
+  driveName: string;
+  mirrorSub: string;
+  label: string;
+  cli: Cli;
+  deps: DriveDeps;
+}): Promise<{ found: number; processedBooks: number; skippedBooks: number }> {
+  const { driveName, mirrorSub, label, cli, deps, analysisRootId } = args;
+  const folderId = await deps.findOrCreateChildFolder(analysisRootId, driveName);
+  const pdfFiles = (await deps.listDriveFolderFiles(folderId, new Set([".pdf"])))
     .filter((f) => f.name.toLowerCase().endsWith(".pdf"));
   if (pdfFiles.length === 0) {
-    console.log("[textbook-drive-build] 시중교재 폴더에 PDF 가 없습니다.");
-    return;
+    console.log(`[${label}] 폴더에 PDF 가 없습니다.`);
+    return { found: 0, processedBooks: 0, skippedBooks: 0 };
   }
 
   const targets = cli.bookFilter
     ? pdfFiles.filter((f) => f.name.includes(cli.bookFilter!))
     : pdfFiles;
   if (targets.length === 0) {
-    console.error(`[textbook-drive-build] --book "${cli.bookFilter}" 매칭 파일 없음.`);
-    process.exit(1);
+    // --book 필터가 이 폴더와 안 맞음 — 다음 폴더로 (에러 아님)
+    return { found: pdfFiles.length, processedBooks: 0, skippedBooks: 0 };
   }
 
-  console.log(`[textbook-drive-build] 대상 ${targets.length}권 처리 시작.`);
-  if (cli.maxPages > 0) {
-    console.log(`[textbook-drive-build] (테스트) 책당 최대 ${cli.maxPages} 페이지`);
-  }
+  console.log(`\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+  console.log(`[${label}] 대상 ${targets.length}건 (전체 ${pdfFiles.length}건 중)`);
+  if (cli.maxPages > 0) console.log(`[${label}] (테스트) 책당 최대 ${cli.maxPages} 페이지`);
+  console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
 
-  // 로컬 미러 루트 — Phase 1 로더가 walk 해서 RAG 자동 합산.
-  const localMirrorRoot = path.join(process.cwd(), "교재 참고자료", "시중교재");
+  const localMirrorRoot = path.join(process.cwd(), "교재 참고자료", mirrorSub);
   await fs.mkdir(localMirrorRoot, { recursive: true });
 
   const ocrModel = "gemini-2.5-flash";
+  let processedBooks = 0;
+  let skippedBooks = 0;
 
   for (const pdf of targets) {
     const bookName = safeStem(pdf.name);
     const sizeMb = (Number(pdf.size ?? 0) / 1024 / 1024).toFixed(1);
     console.log(`\n=== 📘 ${bookName} (${sizeMb}MB) ===`);
 
-    const workFolderId = await findOrCreateChildFolder(textbookFolderId, bookName);
-    const pagesFolderId = await findOrCreateChildFolder(workFolderId, "pages");
-    const ocrFolderId = await findOrCreateChildFolder(workFolderId, "ocr");
+    const workFolderId = await deps.findOrCreateChildFolder(folderId, bookName);
+    const pagesFolderId = await deps.findOrCreateChildFolder(workFolderId, "pages");
+    const ocrFolderId = await deps.findOrCreateChildFolder(workFolderId, "ocr");
 
     if (!cli.force) {
-      const existingOcr = await listDriveFolderFiles(ocrFolderId, new Set([".md"]));
+      const existingOcr = await deps.listDriveFolderFiles(ocrFolderId, new Set([".md"]));
       if (existingOcr.length > 0) {
         console.log(`  [skip] 이미 ocr md ${existingOcr.length}개 존재 — --force 로 덮어쓰기`);
+        skippedBooks += 1;
         continue;
       }
     }
@@ -221,7 +254,7 @@ async function main() {
     await fs.mkdir(localBookDir, { recursive: true });
 
     console.log(`  ↓ PDF 다운로드…`);
-    const dl = await downloadDriveFileById(pdf.id);
+    const dl = await deps.downloadDriveFileById(pdf.id);
     const pdfLocalPath = path.join(tmpRoot, pdf.name);
     await fs.writeFile(pdfLocalPath, dl.buffer);
 
@@ -261,7 +294,7 @@ async function main() {
       }
 
       try {
-        await uploadBufferToDriveFolder({
+        await deps.uploadBufferToDriveFolder({
           folderId: pagesFolderId,
           fileName: pngName,
           buffer: pngBuf,
@@ -277,7 +310,7 @@ async function main() {
       }
 
       const base64 = pngBuf.toString("base64");
-      const ocr = await extractTextbookPageWithGeminiVision(base64, "image/png");
+      const ocr = await deps.extractTextbookPageWithGeminiVision(base64, "image/png");
       if (!ocr.ok) {
         manifest.pageStatuses.push({ page: pageNo, ok: false, error: ocr.error });
         process.stdout.write(
@@ -295,7 +328,7 @@ async function main() {
       const mdBuf = Buffer.from(md, "utf8");
 
       try {
-        await uploadBufferToDriveFolder({
+        await deps.uploadBufferToDriveFolder({
           folderId: ocrFolderId,
           fileName: mdName,
           buffer: mdBuf,
@@ -335,7 +368,7 @@ async function main() {
     process.stdout.write("\n");
 
     const manifestJson = JSON.stringify(manifest, null, 2);
-    await uploadBufferToDriveFolder({
+    await deps.uploadBufferToDriveFolder({
       folderId: workFolderId,
       fileName: "manifest.json",
       buffer: Buffer.from(manifestJson, "utf8"),
@@ -346,17 +379,73 @@ async function main() {
     console.log(
       `  ✓ ${bookName}: ${manifest.processedPages}/${limit} 페이지 OCR 성공 (전체 ${totalPages} 페이지 중)`,
     );
+    processedBooks += 1;
 
     await fs.rm(tmpRoot, { recursive: true, force: true }).catch(() => {});
   }
 
-  console.log("\n[textbook-drive-build] 완료.");
+  return { found: pdfFiles.length, processedBooks, skippedBooks };
+}
+
+async function main() {
+  dotenv.config({ path: path.join(process.cwd(), ".env.local") });
+  const cli = parseArgs(process.argv);
+
+  const drive = await import("../src/lib/googleDrive.ts");
+  const gemini = await import("../src/lib/geminiVisionExtract.ts");
+
+  const driveClient = drive.getDriveClient();
+  const analysisRootId = await drive.resolveDriveAnalysisFolderId(driveClient);
+  if (!analysisRootId) {
+    console.error("[textbook-drive-build] 「분석용 자료」 폴더를 찾지 못했습니다.");
+    process.exit(1);
+  }
+
+  const deps: DriveDeps = {
+    listDriveFolderFiles: drive.listDriveFolderFiles,
+    findOrCreateChildFolder: drive.findOrCreateChildFolder,
+    uploadBufferToDriveFolder: drive.uploadBufferToDriveFolder,
+    downloadDriveFileById: drive.downloadDriveFileById,
+    extractTextbookPageWithGeminiVision: gemini.extractTextbookPageWithGeminiVision,
+  };
+
   console.log(
-    "  ▷ Drive: 분석용 자료/시중교재/<책>/{pages, ocr, manifest.json}",
+    `[textbook-drive-build] 폴더 우선순위: ${FOLDER_PRIORITY.map((f) => f.label).join(" → ")}`,
   );
-  console.log(
-    "  ▷ 로컬:  교재 참고자료/시중교재/<책>/*.md  ← retriever 가 자동으로 RAG 합산",
-  );
+
+  let totalProcessed = 0;
+  let firstFolderHadWork = false;
+
+  for (const folderSpec of FOLDER_PRIORITY) {
+    // 시중교재 가 첫 폴더 — 새 작업이 있었으면 다음 폴더(시험지 원안) 는 다음 실행으로 미룸.
+    if (folderSpec !== FOLDER_PRIORITY[0] && firstFolderHadWork) {
+      console.log(
+        `\n[${folderSpec.label}] 이번 실행에서는 건너뜀 — 「${FOLDER_PRIORITY[0]!.label}」 에서 새 작업이 있었기 때문. 다음 실행 시 자동 처리됩니다.`,
+      );
+      break;
+    }
+
+    const result = await processFolder({
+      analysisRootId,
+      driveName: folderSpec.driveName,
+      mirrorSub: folderSpec.mirrorSub,
+      label: folderSpec.label,
+      cli,
+      deps,
+    });
+    totalProcessed += result.processedBooks;
+    console.log(
+      `\n[${folderSpec.label}] 요약 — 전체 ${result.found}건, 새로 처리 ${result.processedBooks}건, 스킵 ${result.skippedBooks}건`,
+    );
+    if (folderSpec === FOLDER_PRIORITY[0]) {
+      firstFolderHadWork = result.processedBooks > 0;
+    }
+  }
+
+  console.log("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+  console.log(`[textbook-drive-build] 완료 — 새로 처리 ${totalProcessed}건`);
+  console.log("  ▷ Drive: 분석용 자료/<폴더>/<PDF>/{pages, ocr, manifest.json}");
+  console.log("  ▷ 로컬:  교재 참고자료/<폴더>/<PDF>/*.md  ← retriever 자동 합산");
 }
 
 void main().catch((e) => {
