@@ -95,6 +95,16 @@ type CostResponse = {
   };
   assistedPairingEnabled?: boolean;
   last24h?: { runs: number; failed: number; failureRate: number; retryShare: number };
+  textbookBuild?: {
+    intervalHours: number;
+    lastRunAt: number | null;
+    lastOk: boolean;
+    totalRuns: number;
+    processedBooks: number;
+    skippedBooks: number;
+    byFolder: Array<{ label: string; found: number; processedBooks: number; skippedBooks: number }>;
+    errors: string[];
+  } | null;
   diagnoses: Array<{ level: "info" | "warn" | "high"; message: string }>;
 };
 
@@ -478,6 +488,65 @@ export default function CostPage() {
             rows={data.byRouteModel}
             totalEstUsd={totalEstUsd}
           />
+        </section>
+      )}
+
+      {/* 시중교재 자동 빌드 상태 패널 — Railway 가 매일 자동으로 처리한 결과 표시 */}
+      {data?.textbookBuild && data.textbookBuild.intervalHours > 0 && (
+        <section className="mb-4 rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+          <div className="mb-2 flex items-center gap-2">
+            <h2 className="text-sm font-semibold text-slate-900">시중교재·시험지 원안 자동 빌드</h2>
+            <span className="rounded bg-slate-100 px-2 py-0.5 text-[10px] text-slate-600">
+              {data.textbookBuild.intervalHours.toFixed(0)}h 주기
+            </span>
+            {data.textbookBuild.lastOk ? (
+              <span className="rounded bg-emerald-100 px-2 py-0.5 text-[10px] font-semibold text-emerald-800">
+                정상
+              </span>
+            ) : data.textbookBuild.lastRunAt ? (
+              <span className="rounded bg-rose-100 px-2 py-0.5 text-[10px] font-semibold text-rose-800">
+                실패
+              </span>
+            ) : (
+              <span className="rounded bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-800">
+                대기
+              </span>
+            )}
+          </div>
+          <div className="grid grid-cols-1 gap-2 text-xs text-slate-700 md:grid-cols-3">
+            <div>
+              <div className="text-slate-500">마지막 실행</div>
+              <div className="font-medium">
+                {data.textbookBuild.lastRunAt
+                  ? new Date(data.textbookBuild.lastRunAt).toLocaleString("ko-KR")
+                  : "—"}
+              </div>
+            </div>
+            <div>
+              <div className="text-slate-500">새로 처리한 책</div>
+              <div className="font-medium">
+                {data.textbookBuild.processedBooks}건 (스킵 {data.textbookBuild.skippedBooks}건)
+              </div>
+            </div>
+            <div>
+              <div className="text-slate-500">누적 실행</div>
+              <div className="font-medium">{data.textbookBuild.totalRuns}회</div>
+            </div>
+          </div>
+          {data.textbookBuild.byFolder.length > 0 && (
+            <ul className="mt-2 space-y-0.5 text-[11px] text-slate-600">
+              {data.textbookBuild.byFolder.map((f) => (
+                <li key={f.label}>
+                  <span className="font-medium">{f.label}</span> — 발견 {f.found}, 처리 {f.processedBooks}, 스킵 {f.skippedBooks}
+                </li>
+              ))}
+            </ul>
+          )}
+          {data.textbookBuild.errors.length > 0 && (
+            <div className="mt-2 rounded border border-rose-200 bg-rose-50 px-2 py-1.5 text-[11px] text-rose-800">
+              {data.textbookBuild.errors[0]}
+            </div>
+          )}
         </section>
       )}
 

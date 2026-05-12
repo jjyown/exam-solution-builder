@@ -64,6 +64,26 @@ function initRetriever(): Promise<ReferenceRetriever> {
         // best-effort — Drive 실패해도 베이스 KB·로컬 교재 만으로 동작
       }
     })();
+    // Drive 책별 ocr/*.md (Railway 자동 빌드 산출물) 도 합산.
+    // 로컬 미러가 ephemeral 한 Railway 환경에서 RAG 데이터의 진짜 출처.
+    void (async () => {
+      try {
+        const { loadDriveTextbookReferenceRecords } = await import(
+          "./textbookDriveReferenceLoader"
+        );
+        const { records, fileCount } = await loadDriveTextbookReferenceRecords();
+        if (records.length > 0) {
+          r.addRecords(records);
+          console.log(
+            `[retriever] Drive 교재 ocr record ${records.length}개 합산 (md 파일 ${fileCount}개)`,
+          );
+        }
+      } catch (e) {
+        console.warn(
+          `[retriever] Drive 교재 ocr 로드 실패 — kb/로컬만으로 동작: ${e instanceof Error ? e.message : String(e)}`,
+        );
+      }
+    })();
     return r;
   });
 }

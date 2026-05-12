@@ -700,6 +700,26 @@ async function handleCostTracker(req: Request) {
       failureRate: Number(last24h.failureRate.toFixed(3)),
       retryShare: Number(last24h.retryShare.toFixed(3)),
     },
+    textbookBuild: await (async () => {
+      try {
+        const { getTextbookDriveBuildSnapshot } = await import(
+          "@/lib/textbookDriveBuildAutoRun"
+        );
+        const s = getTextbookDriveBuildSnapshot();
+        return {
+          intervalHours: s.intervalMs > 0 ? s.intervalMs / 1000 / 60 / 60 : 0,
+          lastRunAt: s.lastRunAt,
+          lastOk: s.lastOk,
+          totalRuns: s.totalRuns,
+          processedBooks: s.lastResult?.totalProcessedBooks ?? 0,
+          skippedBooks: s.lastResult?.totalSkippedBooks ?? 0,
+          byFolder: s.lastResult?.byFolder ?? [],
+          errors: s.lastErrors,
+        };
+      } catch {
+        return null;
+      }
+    })(),
     diagnoses,
     hint:
       "추정 비용은 모델별 평균 단가 기준 ±50% 오차. 정확한 청구액은 Google AI Studio / OpenAI / Mathpix billing 확인.",

@@ -42,6 +42,15 @@ export async function register(): Promise<void> {
     console.error("[instrumentation] supervisor 등록 실패:", (e as Error).message);
   }
 
+  // 3-b) 시중교재 / 시험지 원안 페이지 OCR 자동 빌더 (24h 주기)
+  try {
+    const { startTextbookDriveBuildAutoRun } = await import("./lib/textbookDriveBuildAutoRun");
+    startTextbookDriveBuildAutoRun();
+    console.log("[instrumentation] startTextbookDriveBuildAutoRun() 등록 완료");
+  } catch (e) {
+    console.error("[instrumentation] textbook-build-auto 등록 실패:", (e as Error).message);
+  }
+
   // 4) 메모리 사용량 주기 로깅 — Railway 「Killed」(OOM) 진단용.
   //    부팅 직후 1회 + 60초마다 1회. 한 줄짜리 로그라 비용 무시 가능.
   //    누수 의심 시: rss/heapUsed 가 시간에 따라 우상향 → 메모리 누수.

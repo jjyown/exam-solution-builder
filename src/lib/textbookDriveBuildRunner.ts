@@ -1,0 +1,368 @@
+/**
+ * textbookDriveBuildRunner.ts
+ * ────────────────────────────────────────────────────────────────────────────
+ *  Drive 「분석용 자료」 아래 시중교재 / 시험지 원안 폴더의 PDF 들을 페이지 단위
+ *  로 풀어 Gemini Vision 으로 OCR 한 결과를 책별 작업 폴더에 영구 저장하는
+ *  **공통 로직**. CLI 스크립트(scripts/textbook-drive-build.mts) 와 자동 실행
+ *  스케줄러(textbookDriveBuildAutoRun.ts) 둘 다 이 함수를 호출한다.
+ *
+ *  설계 결정:
+ *   - PDF 페이지 렌더링은 Node 내장 `pdf-to-img` (pdfjs 기반, 네이티브 의존성 X).
+ *     Python(pypdfium2) 의존성을 제거해 Railway 빌드(Nixpacks)가 단순해진다.
+ *   - 폴더 우선순위: 시중교재 먼저 → 새 작업 없으면 시험지 원안. CLI 와 동일.
+ *   - 로컬 미러 + Drive 업로드 양쪽 — 로컬 retriever 가 walk 해서 RAG 자동 합산.
+ *   - 비용: gemini-2.0-flash 페이지당 ~$0.0001.
+ *
+ *  주의:
+ *   - 대용량 PDF (300MB+) 도 안전: pdf-to-img 는 페이지 lazy iteration 이라 메모리
+ *     상에 한 페이지씩만 올림.
+ *   - 한 책 처리 시간 ≈ 페이지수 × (~3초 OCR + 업로드 0.5초). 300페이지 ≈ 17분.
+ * ────────────────────────────────────────────────────────────────────────────
+ */
+import { promises as fs } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { createHash } from "node:crypto";
+import { pdf as pdfToImg } from "pdf-to-img";
+import {
+  getDriveClient,
+  resolveDriveAnalysisFolderId,
+  listDriveFolderFiles,
+  findOrCreateChildFolder,
+  uploadBufferToDriveFolder,
+  downloadDriveFileById,
+} from "./googleDrive";
+import { extractTextbookPageWithGeminiVision } from "./geminiVisionExtract";
+
+export type TextbookDriveBuildOptions = {
+  /** 책 이름 필터 (부분 일치). 없으면 폴더 안 모든 PDF. */
+  bookFilter?: string | null;
+  /** 책당 최대 페이지 (0 또는 미지정 = 무제한). 테스트용. */
+  maxPages?: number;
+  /** 이미 처리된 책도 강제 재처리. */
+  force?: boolean;
+  /** 로그 출력 콜백 (없으면 console.log). */
+  log?: (msg: string) => void;
+};
+
+export type FolderResult = {
+  label: string;
+  driveName: string;
+  found: number;
+  processedBooks: number;
+  skippedBooks: number;
+};
+
+export type TextbookDriveBuildResult = {
+  byFolder: FolderResult[];
+  totalProcessedBooks: number;
+  totalSkippedBooks: number;
+  startedAt: string;
+  finishedAt: string;
+  durationMs: number;
+};
+
+type Manifest = {
+  bookName: string;
+  pdfFileId: string;
+  pdfModifiedTime: string | null;
+  totalPages: number;
+  processedPages: number;
+  ocrModel: string;
+  builtAt: string;
+  pageStatuses: Array<{ page: number; ok: boolean; bytes?: number; error?: string }>;
+};
+
+const FOLDER_PRIORITY: Array<{ driveName: string; mirrorSub: string; label: string }> = [
+  { driveName: "시중교재", mirrorSub: "시중교재", label: "시중교재" },
+  { driveName: "시험지 원안", mirrorSub: "시험지 원안", label: "시험지 원안" },
+];
+
+function safeStem(pdfName: string): string {
+  return pdfName.replace(/\.pdf$/i, "");
+}
+
+function pagePadded(pageNo: number): string {
+  return String(pageNo).padStart(3, "0");
+}
+
+function shortHash(s: string): string {
+  return createHash("sha1").update(s).digest("hex").slice(0, 10);
+}
+
+function buildPageMd(meta: {
+  bookName: string;
+  pageNo: number;
+  ocrModel: string;
+  ocrText: string;
+  folderLabel: string;
+}): string {
+  return [
+    "---",
+    `book: ${meta.bookName}`,
+    `page: ${meta.pageNo}`,
+    `ocrModel: ${meta.ocrModel}`,
+    `unit: ${meta.folderLabel}`,
+    `type: ${meta.bookName}`,
+    `difficulty: 미분류난이도`,
+    `sourceImage: ${meta.bookName}/pages/page${pagePadded(meta.pageNo)}.png`,
+    "---",
+    "",
+    "## OCR_본문",
+    "",
+    meta.ocrText.trim(),
+    "",
+  ].join("\n");
+}
+
+/**
+ * 한 폴더(시중교재 또는 시험지 원안) 안의 PDF 들을 페이지 분할 + OCR 처리.
+ */
+async function processFolder(args: {
+  analysisRootId: string;
+  driveName: string;
+  mirrorSub: string;
+  label: string;
+  opts: TextbookDriveBuildOptions;
+  log: (m: string) => void;
+}): Promise<FolderResult> {
+  const { analysisRootId, driveName, mirrorSub, label, opts, log } = args;
+  const folderId = await findOrCreateChildFolder(analysisRootId, driveName);
+  const pdfFiles = (await listDriveFolderFiles(folderId, new Set([".pdf"])))
+    .filter((f) => f.name.toLowerCase().endsWith(".pdf"));
+  if (pdfFiles.length === 0) {
+    log(`[${label}] 폴더에 PDF 가 없습니다.`);
+    return { label, driveName, found: 0, processedBooks: 0, skippedBooks: 0 };
+  }
+
+  const targets = opts.bookFilter
+    ? pdfFiles.filter((f) => f.name.includes(opts.bookFilter!))
+    : pdfFiles;
+  if (targets.length === 0) {
+    return { label, driveName, found: pdfFiles.length, processedBooks: 0, skippedBooks: 0 };
+  }
+
+  log(`\n━━━ [${label}] 대상 ${targets.length}건 (전체 ${pdfFiles.length}건 중) ━━━`);
+  if (opts.maxPages && opts.maxPages > 0) {
+    log(`[${label}] (테스트) 책당 최대 ${opts.maxPages} 페이지`);
+  }
+
+  const localMirrorRoot = path.join(process.cwd(), "교재 참고자료", mirrorSub);
+  await fs.mkdir(localMirrorRoot, { recursive: true });
+
+  const ocrModel = "gemini-2.0-flash";
+  let processedBooks = 0;
+  let skippedBooks = 0;
+
+  for (const pdf of targets) {
+    const bookName = safeStem(pdf.name);
+    const sizeMb = (Number(pdf.size ?? 0) / 1024 / 1024).toFixed(1);
+    log(`\n=== 📘 [${label}] ${bookName} (${sizeMb}MB) ===`);
+
+    const workFolderId = await findOrCreateChildFolder(folderId, bookName);
+    const pagesFolderId = await findOrCreateChildFolder(workFolderId, "pages");
+    const ocrFolderId = await findOrCreateChildFolder(workFolderId, "ocr");
+
+    if (!opts.force) {
+      const existingOcr = await listDriveFolderFiles(ocrFolderId, new Set([".md"]));
+      if (existingOcr.length > 0) {
+        log(`  [skip] 이미 ocr md ${existingOcr.length}개 — --force 로 덮어쓰기`);
+        skippedBooks += 1;
+        continue;
+      }
+    }
+
+    const tmpRoot = path.join(os.tmpdir(), "textbook-drive-build", shortHash(bookName));
+    await fs.mkdir(tmpRoot, { recursive: true });
+    const localBookDir = path.join(localMirrorRoot, bookName);
+    await fs.mkdir(localBookDir, { recursive: true });
+
+    log(`  ↓ PDF 다운로드…`);
+    const dl = await downloadDriveFileById(pdf.id);
+
+    log(`  ▤ 페이지 렌더 (pdf-to-img)…`);
+    let pdfDoc: Awaited<ReturnType<typeof pdfToImg>>;
+    try {
+      pdfDoc = await pdfToImg(dl.buffer, { scale: 2 });
+    } catch (e) {
+      log(`  ✗ PDF 렌더 실패: ${(e as Error).message}`);
+      continue;
+    }
+    const totalPages = pdfDoc.length;
+    log(`  ✔ ${totalPages} 페이지 — OCR 시작`);
+
+    const limit = opts.maxPages && opts.maxPages > 0 ? Math.min(opts.maxPages, totalPages) : totalPages;
+    const manifest: Manifest = {
+      bookName,
+      pdfFileId: pdf.id,
+      pdfModifiedTime: pdf.modifiedTime ?? null,
+      totalPages,
+      processedPages: 0,
+      ocrModel,
+      builtAt: new Date().toISOString(),
+      pageStatuses: [],
+    };
+
+    let pageNo = 0;
+    for await (const pngBuf of pdfDoc) {
+      pageNo += 1;
+      if (pageNo > limit) break;
+
+      const pngName = `page${pagePadded(pageNo)}.png`;
+      const mdName = `page${pagePadded(pageNo)}.md`;
+
+      // 1) PNG 업로드
+      try {
+        await uploadBufferToDriveFolder({
+          folderId: pagesFolderId,
+          fileName: pngName,
+          buffer: pngBuf,
+          mimeType: "image/png",
+        });
+      } catch (e) {
+        manifest.pageStatuses.push({
+          page: pageNo,
+          ok: false,
+          error: `PNG 업로드 실패: ${(e as Error).message}`,
+        });
+        continue;
+      }
+
+      // 2) Gemini Vision OCR
+      const base64 = pngBuf.toString("base64");
+      const ocr = await extractTextbookPageWithGeminiVision(base64, "image/png");
+      if (!ocr.ok) {
+        manifest.pageStatuses.push({ page: pageNo, ok: false, error: ocr.error });
+        log(`  [page ${pagePadded(pageNo)}/${pagePadded(limit)}] ✗ ${(ocr.error || "").slice(0, 60)}`);
+        continue;
+      }
+
+      // 3) md 생성 + 업로드 + 로컬 미러
+      const md = buildPageMd({
+        bookName,
+        pageNo,
+        ocrModel: ocr.model || ocrModel,
+        ocrText: ocr.text,
+        folderLabel: label,
+      });
+      const mdBuf = Buffer.from(md, "utf8");
+
+      try {
+        await uploadBufferToDriveFolder({
+          folderId: ocrFolderId,
+          fileName: mdName,
+          buffer: mdBuf,
+          mimeType: "text/markdown",
+        });
+      } catch (e) {
+        manifest.pageStatuses.push({
+          page: pageNo,
+          ok: false,
+          error: `md 업로드 실패: ${(e as Error).message}`,
+        });
+        continue;
+      }
+
+      await fs.writeFile(path.join(localBookDir, mdName), md, "utf8").catch(() => {
+        // 로컬 미러 실패는 무시 (Railway 등 read-only fs 환경 가능성)
+      });
+
+      manifest.processedPages += 1;
+      manifest.pageStatuses.push({ page: pageNo, ok: true, bytes: mdBuf.byteLength });
+      log(`  [page ${pagePadded(pageNo)}/${pagePadded(limit)}] ✓ ${ocr.model} ${mdBuf.byteLength}B`);
+    }
+
+    const manifestJson = JSON.stringify(manifest, null, 2);
+    await uploadBufferToDriveFolder({
+      folderId: workFolderId,
+      fileName: "manifest.json",
+      buffer: Buffer.from(manifestJson, "utf8"),
+      mimeType: "application/json",
+    });
+    await fs.writeFile(path.join(localBookDir, "manifest.json"), manifestJson, "utf8").catch(() => {});
+
+    log(
+      `  ✓ ${bookName}: ${manifest.processedPages}/${limit} 페이지 OCR (전체 ${totalPages} 페이지 중)`,
+    );
+    processedBooks += 1;
+
+    await fs.rm(tmpRoot, { recursive: true, force: true }).catch(() => {});
+  }
+
+  return { label, driveName, found: pdfFiles.length, processedBooks, skippedBooks };
+}
+
+/**
+ * 메인 엔트리 — 폴더 우선순위 자동 체인.
+ *  - 시중교재 먼저 처리
+ *  - 시중교재에 새 작업이 0건이면 → 시험지 원안도 자동 처리
+ *  - 시중교재에 새 작업이 있으면 → 시험지 원안은 다음 실행으로
+ */
+export async function runTextbookDriveBuild(
+  opts: TextbookDriveBuildOptions = {},
+): Promise<TextbookDriveBuildResult> {
+  const log = opts.log || ((m: string) => console.log(m));
+  const startedAt = Date.now();
+
+  const drive = getDriveClient();
+  const analysisRootId = await resolveDriveAnalysisFolderId(drive);
+  if (!analysisRootId) {
+    throw new Error("「분석용 자료」 폴더를 찾지 못했습니다.");
+  }
+
+  log(`[textbook-drive-build] 폴더 우선순위: ${FOLDER_PRIORITY.map((f) => f.label).join(" → ")}`);
+
+  const byFolder: FolderResult[] = [];
+  let firstFolderHadWork = false;
+
+  for (const folderSpec of FOLDER_PRIORITY) {
+    if (folderSpec !== FOLDER_PRIORITY[0] && firstFolderHadWork) {
+      log(
+        `\n[${folderSpec.label}] 이번 실행 건너뜀 — 「${FOLDER_PRIORITY[0]!.label}」에 새 작업 있음. 다음 실행 시 처리.`,
+      );
+      byFolder.push({
+        label: folderSpec.label,
+        driveName: folderSpec.driveName,
+        found: 0,
+        processedBooks: 0,
+        skippedBooks: 0,
+      });
+      continue;
+    }
+
+    const result = await processFolder({
+      analysisRootId,
+      driveName: folderSpec.driveName,
+      mirrorSub: folderSpec.mirrorSub,
+      label: folderSpec.label,
+      opts,
+      log,
+    });
+    byFolder.push(result);
+
+    if (folderSpec === FOLDER_PRIORITY[0]) {
+      firstFolderHadWork = result.processedBooks > 0;
+    }
+
+    log(
+      `\n[${result.label}] 요약 — 발견 ${result.found}, 새로 처리 ${result.processedBooks}, 스킵 ${result.skippedBooks}`,
+    );
+  }
+
+  const totalProcessedBooks = byFolder.reduce((s, b) => s + b.processedBooks, 0);
+  const totalSkippedBooks = byFolder.reduce((s, b) => s + b.skippedBooks, 0);
+  const finishedAt = Date.now();
+
+  log(
+    `\n[textbook-drive-build] 완료 — 새로 ${totalProcessedBooks}건 처리, ${totalSkippedBooks}건 스킵, ${((finishedAt - startedAt) / 1000).toFixed(1)}s`,
+  );
+
+  return {
+    byFolder,
+    totalProcessedBooks,
+    totalSkippedBooks,
+    startedAt: new Date(startedAt).toISOString(),
+    finishedAt: new Date(finishedAt).toISOString(),
+    durationMs: finishedAt - startedAt,
+  };
+}

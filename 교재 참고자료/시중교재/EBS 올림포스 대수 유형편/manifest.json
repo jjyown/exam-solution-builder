@@ -1,0 +1,1251 @@
+{
+  "bookName": "EBS 올림포스 대수 유형편",
+  "pdfFileId": "1NJzFJ6FN0aMjl0RA5n0kdqieg0Ymy3F8",
+  "pdfModifiedTime": "2026-05-10T08:39:03.000Z",
+  "totalPages": 248,
+  "processedPages": 248,
+  "ocrModel": "gemini-2.5-flash",
+  "builtAt": "2026-05-12T12:33:30.001Z",
+  "pageStatuses": [
+    {
+      "page": 1,
+      "ok": true,
+      "bytes": 284
+    },
+    {
+      "page": 2,
+      "ok": true,
+      "bytes": 5134
+    },
+    {
+      "page": 3,
+      "ok": true,
+      "bytes": 3505
+    },
+    {
+      "page": 4,
+      "ok": true,
+      "bytes": 1483
+    },
+    {
+      "page": 5,
+      "ok": true,
+      "bytes": 337
+    },
+    {
+      "page": 6,
+      "ok": true,
+      "bytes": 3353
+    },
+    {
+      "page": 7,
+      "ok": true,
+      "bytes": 1785
+    },
+    {
+      "page": 8,
+      "ok": true,
+      "bytes": 3238
+    },
+    {
+      "page": 9,
+      "ok": true,
+      "bytes": 2009
+    },
+    {
+      "page": 10,
+      "ok": true,
+      "bytes": 3262
+    },
+    {
+      "page": 11,
+      "ok": true,
+      "bytes": 1504
+    },
+    {
+      "page": 12,
+      "ok": true,
+      "bytes": 2218
+    },
+    {
+      "page": 13,
+      "ok": true,
+      "bytes": 1890
+    },
+    {
+      "page": 14,
+      "ok": true,
+      "bytes": 2297
+    },
+    {
+      "page": 15,
+      "ok": true,
+      "bytes": 1821
+    },
+    {
+      "page": 16,
+      "ok": true,
+      "bytes": 2142
+    },
+    {
+      "page": 17,
+      "ok": true,
+      "bytes": 1889
+    },
+    {
+      "page": 18,
+      "ok": true,
+      "bytes": 1875
+    },
+    {
+      "page": 19,
+      "ok": true,
+      "bytes": 1753
+    },
+    {
+      "page": 20,
+      "ok": true,
+      "bytes": 1918
+    },
+    {
+      "page": 21,
+      "ok": true,
+      "bytes": 1573
+    },
+    {
+      "page": 22,
+      "ok": true,
+      "bytes": 2221
+    },
+    {
+      "page": 23,
+      "ok": true,
+      "bytes": 2034
+    },
+    {
+      "page": 24,
+      "ok": true,
+      "bytes": 2025
+    },
+    {
+      "page": 25,
+      "ok": true,
+      "bytes": 2684
+    },
+    {
+      "page": 26,
+      "ok": true,
+      "bytes": 1749
+    },
+    {
+      "page": 27,
+      "ok": true,
+      "bytes": 1657
+    },
+    {
+      "page": 28,
+      "ok": true,
+      "bytes": 2800
+    },
+    {
+      "page": 29,
+      "ok": true,
+      "bytes": 2283
+    },
+    {
+      "page": 30,
+      "ok": true,
+      "bytes": 3236
+    },
+    {
+      "page": 31,
+      "ok": true,
+      "bytes": 2191
+    },
+    {
+      "page": 32,
+      "ok": true,
+      "bytes": 1485
+    },
+    {
+      "page": 33,
+      "ok": true,
+      "bytes": 1719
+    },
+    {
+      "page": 34,
+      "ok": true,
+      "bytes": 3164
+    },
+    {
+      "page": 35,
+      "ok": true,
+      "bytes": 2002
+    },
+    {
+      "page": 36,
+      "ok": true,
+      "bytes": 2604
+    },
+    {
+      "page": 37,
+      "ok": true,
+      "bytes": 2193
+    },
+    {
+      "page": 38,
+      "ok": true,
+      "bytes": 2907
+    },
+    {
+      "page": 39,
+      "ok": true,
+      "bytes": 2314
+    },
+    {
+      "page": 40,
+      "ok": true,
+      "bytes": 2872
+    },
+    {
+      "page": 41,
+      "ok": true,
+      "bytes": 2147
+    },
+    {
+      "page": 42,
+      "ok": true,
+      "bytes": 2448
+    },
+    {
+      "page": 43,
+      "ok": true,
+      "bytes": 2317
+    },
+    {
+      "page": 44,
+      "ok": true,
+      "bytes": 2015
+    },
+    {
+      "page": 45,
+      "ok": true,
+      "bytes": 2305
+    },
+    {
+      "page": 46,
+      "ok": true,
+      "bytes": 2071
+    },
+    {
+      "page": 47,
+      "ok": true,
+      "bytes": 2382
+    },
+    {
+      "page": 48,
+      "ok": true,
+      "bytes": 2079
+    },
+    {
+      "page": 49,
+      "ok": true,
+      "bytes": 2153
+    },
+    {
+      "page": 50,
+      "ok": true,
+      "bytes": 1828
+    },
+    {
+      "page": 51,
+      "ok": true,
+      "bytes": 1633
+    },
+    {
+      "page": 52,
+      "ok": true,
+      "bytes": 1404
+    },
+    {
+      "page": 53,
+      "ok": true,
+      "bytes": 324
+    },
+    {
+      "page": 54,
+      "ok": true,
+      "bytes": 3242
+    },
+    {
+      "page": 55,
+      "ok": true,
+      "bytes": 1355
+    },
+    {
+      "page": 56,
+      "ok": true,
+      "bytes": 3263
+    },
+    {
+      "page": 57,
+      "ok": true,
+      "bytes": 1748
+    },
+    {
+      "page": 58,
+      "ok": true,
+      "bytes": 3892
+    },
+    {
+      "page": 59,
+      "ok": true,
+      "bytes": 1256
+    },
+    {
+      "page": 60,
+      "ok": true,
+      "bytes": 1871
+    },
+    {
+      "page": 61,
+      "ok": true,
+      "bytes": 1777
+    },
+    {
+      "page": 62,
+      "ok": true,
+      "bytes": 2206
+    },
+    {
+      "page": 63,
+      "ok": true,
+      "bytes": 1806
+    },
+    {
+      "page": 64,
+      "ok": true,
+      "bytes": 2150
+    },
+    {
+      "page": 65,
+      "ok": true,
+      "bytes": 1673
+    },
+    {
+      "page": 66,
+      "ok": true,
+      "bytes": 2313
+    },
+    {
+      "page": 67,
+      "ok": true,
+      "bytes": 1837
+    },
+    {
+      "page": 68,
+      "ok": true,
+      "bytes": 2692
+    },
+    {
+      "page": 69,
+      "ok": true,
+      "bytes": 2398
+    },
+    {
+      "page": 70,
+      "ok": true,
+      "bytes": 2593
+    },
+    {
+      "page": 71,
+      "ok": true,
+      "bytes": 1720
+    },
+    {
+      "page": 72,
+      "ok": true,
+      "bytes": 2192
+    },
+    {
+      "page": 73,
+      "ok": true,
+      "bytes": 1840
+    },
+    {
+      "page": 74,
+      "ok": true,
+      "bytes": 1803
+    },
+    {
+      "page": 75,
+      "ok": true,
+      "bytes": 1028
+    },
+    {
+      "page": 76,
+      "ok": true,
+      "bytes": 2508
+    },
+    {
+      "page": 77,
+      "ok": true,
+      "bytes": 2397
+    },
+    {
+      "page": 78,
+      "ok": true,
+      "bytes": 1647
+    },
+    {
+      "page": 79,
+      "ok": true,
+      "bytes": 1968
+    },
+    {
+      "page": 80,
+      "ok": true,
+      "bytes": 1878
+    },
+    {
+      "page": 81,
+      "ok": true,
+      "bytes": 1745
+    },
+    {
+      "page": 82,
+      "ok": true,
+      "bytes": 1446
+    },
+    {
+      "page": 83,
+      "ok": true,
+      "bytes": 1401
+    },
+    {
+      "page": 84,
+      "ok": true,
+      "bytes": 2124
+    },
+    {
+      "page": 85,
+      "ok": true,
+      "bytes": 1867
+    },
+    {
+      "page": 86,
+      "ok": true,
+      "bytes": 1900
+    },
+    {
+      "page": 87,
+      "ok": true,
+      "bytes": 1054
+    },
+    {
+      "page": 88,
+      "ok": true,
+      "bytes": 1611
+    },
+    {
+      "page": 89,
+      "ok": true,
+      "bytes": 338
+    },
+    {
+      "page": 90,
+      "ok": true,
+      "bytes": 2412
+    },
+    {
+      "page": 91,
+      "ok": true,
+      "bytes": 1865
+    },
+    {
+      "page": 92,
+      "ok": true,
+      "bytes": 2334
+    },
+    {
+      "page": 93,
+      "ok": true,
+      "bytes": 1804
+    },
+    {
+      "page": 94,
+      "ok": true,
+      "bytes": 2604
+    },
+    {
+      "page": 95,
+      "ok": true,
+      "bytes": 1967
+    },
+    {
+      "page": 96,
+      "ok": true,
+      "bytes": 2028
+    },
+    {
+      "page": 97,
+      "ok": true,
+      "bytes": 2309
+    },
+    {
+      "page": 98,
+      "ok": true,
+      "bytes": 2435
+    },
+    {
+      "page": 99,
+      "ok": true,
+      "bytes": 2103
+    },
+    {
+      "page": 100,
+      "ok": true,
+      "bytes": 2938
+    },
+    {
+      "page": 101,
+      "ok": true,
+      "bytes": 2386
+    },
+    {
+      "page": 102,
+      "ok": true,
+      "bytes": 2188
+    },
+    {
+      "page": 103,
+      "ok": true,
+      "bytes": 2534
+    },
+    {
+      "page": 104,
+      "ok": true,
+      "bytes": 2147
+    },
+    {
+      "page": 105,
+      "ok": true,
+      "bytes": 3391
+    },
+    {
+      "page": 106,
+      "ok": true,
+      "bytes": 2640
+    },
+    {
+      "page": 107,
+      "ok": true,
+      "bytes": 3310
+    },
+    {
+      "page": 108,
+      "ok": true,
+      "bytes": 1644
+    },
+    {
+      "page": 109,
+      "ok": true,
+      "bytes": 1293
+    },
+    {
+      "page": 110,
+      "ok": true,
+      "bytes": 3450
+    },
+    {
+      "page": 111,
+      "ok": true,
+      "bytes": 1616
+    },
+    {
+      "page": 112,
+      "ok": true,
+      "bytes": 3122
+    },
+    {
+      "page": 113,
+      "ok": true,
+      "bytes": 2328
+    },
+    {
+      "page": 114,
+      "ok": true,
+      "bytes": 1752
+    },
+    {
+      "page": 115,
+      "ok": true,
+      "bytes": 1862
+    },
+    {
+      "page": 116,
+      "ok": true,
+      "bytes": 1866
+    },
+    {
+      "page": 117,
+      "ok": true,
+      "bytes": 2516
+    },
+    {
+      "page": 118,
+      "ok": true,
+      "bytes": 2223
+    },
+    {
+      "page": 119,
+      "ok": true,
+      "bytes": 2318
+    },
+    {
+      "page": 120,
+      "ok": true,
+      "bytes": 2315
+    },
+    {
+      "page": 121,
+      "ok": true,
+      "bytes": 2198
+    },
+    {
+      "page": 122,
+      "ok": true,
+      "bytes": 2998
+    },
+    {
+      "page": 123,
+      "ok": true,
+      "bytes": 3490
+    },
+    {
+      "page": 124,
+      "ok": true,
+      "bytes": 3350
+    },
+    {
+      "page": 125,
+      "ok": true,
+      "bytes": 3806
+    },
+    {
+      "page": 126,
+      "ok": true,
+      "bytes": 1507
+    },
+    {
+      "page": 127,
+      "ok": true,
+      "bytes": 1131
+    },
+    {
+      "page": 128,
+      "ok": true,
+      "bytes": 1239
+    },
+    {
+      "page": 129,
+      "ok": true,
+      "bytes": 304
+    },
+    {
+      "page": 130,
+      "ok": true,
+      "bytes": 2512
+    },
+    {
+      "page": 131,
+      "ok": true,
+      "bytes": 3558
+    },
+    {
+      "page": 132,
+      "ok": true,
+      "bytes": 2949
+    },
+    {
+      "page": 133,
+      "ok": true,
+      "bytes": 1415
+    },
+    {
+      "page": 134,
+      "ok": true,
+      "bytes": 2287
+    },
+    {
+      "page": 135,
+      "ok": true,
+      "bytes": 4647
+    },
+    {
+      "page": 136,
+      "ok": true,
+      "bytes": 4201
+    },
+    {
+      "page": 137,
+      "ok": true,
+      "bytes": 4668
+    },
+    {
+      "page": 138,
+      "ok": true,
+      "bytes": 4276
+    },
+    {
+      "page": 139,
+      "ok": true,
+      "bytes": 3766
+    },
+    {
+      "page": 140,
+      "ok": true,
+      "bytes": 4413
+    },
+    {
+      "page": 141,
+      "ok": true,
+      "bytes": 330
+    },
+    {
+      "page": 142,
+      "ok": true,
+      "bytes": 3471
+    },
+    {
+      "page": 143,
+      "ok": true,
+      "bytes": 4025
+    },
+    {
+      "page": 144,
+      "ok": true,
+      "bytes": 3920
+    },
+    {
+      "page": 145,
+      "ok": true,
+      "bytes": 3692
+    },
+    {
+      "page": 146,
+      "ok": true,
+      "bytes": 3027
+    },
+    {
+      "page": 147,
+      "ok": true,
+      "bytes": 4387
+    },
+    {
+      "page": 148,
+      "ok": true,
+      "bytes": 3867
+    },
+    {
+      "page": 149,
+      "ok": true,
+      "bytes": 3605
+    },
+    {
+      "page": 150,
+      "ok": true,
+      "bytes": 3903
+    },
+    {
+      "page": 151,
+      "ok": true,
+      "bytes": 4734
+    },
+    {
+      "page": 152,
+      "ok": true,
+      "bytes": 4404
+    },
+    {
+      "page": 153,
+      "ok": true,
+      "bytes": 4109
+    },
+    {
+      "page": 154,
+      "ok": true,
+      "bytes": 4764
+    },
+    {
+      "page": 155,
+      "ok": true,
+      "bytes": 2973
+    },
+    {
+      "page": 156,
+      "ok": true,
+      "bytes": 2662
+    },
+    {
+      "page": 157,
+      "ok": true,
+      "bytes": 3856
+    },
+    {
+      "page": 158,
+      "ok": true,
+      "bytes": 5201
+    },
+    {
+      "page": 159,
+      "ok": true,
+      "bytes": 3685
+    },
+    {
+      "page": 160,
+      "ok": true,
+      "bytes": 3332
+    },
+    {
+      "page": 161,
+      "ok": true,
+      "bytes": 4484
+    },
+    {
+      "page": 162,
+      "ok": true,
+      "bytes": 4475
+    },
+    {
+      "page": 163,
+      "ok": true,
+      "bytes": 3858
+    },
+    {
+      "page": 164,
+      "ok": true,
+      "bytes": 3339
+    },
+    {
+      "page": 165,
+      "ok": true,
+      "bytes": 4113
+    },
+    {
+      "page": 166,
+      "ok": true,
+      "bytes": 4536
+    },
+    {
+      "page": 167,
+      "ok": true,
+      "bytes": 4172
+    },
+    {
+      "page": 168,
+      "ok": true,
+      "bytes": 4432
+    },
+    {
+      "page": 169,
+      "ok": true,
+      "bytes": 3623
+    },
+    {
+      "page": 170,
+      "ok": true,
+      "bytes": 3532
+    },
+    {
+      "page": 171,
+      "ok": true,
+      "bytes": 3267
+    },
+    {
+      "page": 172,
+      "ok": true,
+      "bytes": 3622
+    },
+    {
+      "page": 173,
+      "ok": true,
+      "bytes": 2544
+    },
+    {
+      "page": 174,
+      "ok": true,
+      "bytes": 1954
+    },
+    {
+      "page": 175,
+      "ok": true,
+      "bytes": 3195
+    },
+    {
+      "page": 176,
+      "ok": true,
+      "bytes": 3906
+    },
+    {
+      "page": 177,
+      "ok": true,
+      "bytes": 3892
+    },
+    {
+      "page": 178,
+      "ok": true,
+      "bytes": 3451
+    },
+    {
+      "page": 179,
+      "ok": true,
+      "bytes": 3103
+    },
+    {
+      "page": 180,
+      "ok": true,
+      "bytes": 3861
+    },
+    {
+      "page": 181,
+      "ok": true,
+      "bytes": 3284
+    },
+    {
+      "page": 182,
+      "ok": true,
+      "bytes": 6054
+    },
+    {
+      "page": 183,
+      "ok": true,
+      "bytes": 3835
+    },
+    {
+      "page": 184,
+      "ok": true,
+      "bytes": 3084
+    },
+    {
+      "page": 185,
+      "ok": true,
+      "bytes": 4209
+    },
+    {
+      "page": 186,
+      "ok": true,
+      "bytes": 3480
+    },
+    {
+      "page": 187,
+      "ok": true,
+      "bytes": 4209
+    },
+    {
+      "page": 188,
+      "ok": true,
+      "bytes": 4047
+    },
+    {
+      "page": 189,
+      "ok": true,
+      "bytes": 4026
+    },
+    {
+      "page": 190,
+      "ok": true,
+      "bytes": 3637
+    },
+    {
+      "page": 191,
+      "ok": true,
+      "bytes": 3921
+    },
+    {
+      "page": 192,
+      "ok": true,
+      "bytes": 2666
+    },
+    {
+      "page": 193,
+      "ok": true,
+      "bytes": 3806
+    },
+    {
+      "page": 194,
+      "ok": true,
+      "bytes": 4026
+    },
+    {
+      "page": 195,
+      "ok": true,
+      "bytes": 2043
+    },
+    {
+      "page": 196,
+      "ok": true,
+      "bytes": 4292
+    },
+    {
+      "page": 197,
+      "ok": true,
+      "bytes": 4056
+    },
+    {
+      "page": 198,
+      "ok": true,
+      "bytes": 2663
+    },
+    {
+      "page": 199,
+      "ok": true,
+      "bytes": 4016
+    },
+    {
+      "page": 200,
+      "ok": true,
+      "bytes": 3502
+    },
+    {
+      "page": 201,
+      "ok": true,
+      "bytes": 4498
+    },
+    {
+      "page": 202,
+      "ok": true,
+      "bytes": 3469
+    },
+    {
+      "page": 203,
+      "ok": true,
+      "bytes": 3699
+    },
+    {
+      "page": 204,
+      "ok": true,
+      "bytes": 4267
+    },
+    {
+      "page": 205,
+      "ok": true,
+      "bytes": 4349
+    },
+    {
+      "page": 206,
+      "ok": true,
+      "bytes": 3839
+    },
+    {
+      "page": 207,
+      "ok": true,
+      "bytes": 4241
+    },
+    {
+      "page": 208,
+      "ok": true,
+      "bytes": 5335
+    },
+    {
+      "page": 209,
+      "ok": true,
+      "bytes": 4731
+    },
+    {
+      "page": 210,
+      "ok": true,
+      "bytes": 4110
+    },
+    {
+      "page": 211,
+      "ok": true,
+      "bytes": 4570
+    },
+    {
+      "page": 212,
+      "ok": true,
+      "bytes": 3400
+    },
+    {
+      "page": 213,
+      "ok": true,
+      "bytes": 3230
+    },
+    {
+      "page": 214,
+      "ok": true,
+      "bytes": 2974
+    },
+    {
+      "page": 215,
+      "ok": true,
+      "bytes": 2396
+    },
+    {
+      "page": 216,
+      "ok": true,
+      "bytes": 3392
+    },
+    {
+      "page": 217,
+      "ok": true,
+      "bytes": 3249
+    },
+    {
+      "page": 218,
+      "ok": true,
+      "bytes": 3879
+    },
+    {
+      "page": 219,
+      "ok": true,
+      "bytes": 3682
+    },
+    {
+      "page": 220,
+      "ok": true,
+      "bytes": 3088
+    },
+    {
+      "page": 221,
+      "ok": true,
+      "bytes": 3949
+    },
+    {
+      "page": 222,
+      "ok": true,
+      "bytes": 3777
+    },
+    {
+      "page": 223,
+      "ok": true,
+      "bytes": 3352
+    },
+    {
+      "page": 224,
+      "ok": true,
+      "bytes": 4043
+    },
+    {
+      "page": 225,
+      "ok": true,
+      "bytes": 3978
+    },
+    {
+      "page": 226,
+      "ok": true,
+      "bytes": 3693
+    },
+    {
+      "page": 227,
+      "ok": true,
+      "bytes": 3791
+    },
+    {
+      "page": 228,
+      "ok": true,
+      "bytes": 3099
+    },
+    {
+      "page": 229,
+      "ok": true,
+      "bytes": 3646
+    },
+    {
+      "page": 230,
+      "ok": true,
+      "bytes": 3486
+    },
+    {
+      "page": 231,
+      "ok": true,
+      "bytes": 3016
+    },
+    {
+      "page": 232,
+      "ok": true,
+      "bytes": 2716
+    },
+    {
+      "page": 233,
+      "ok": true,
+      "bytes": 2490
+    },
+    {
+      "page": 234,
+      "ok": true,
+      "bytes": 388
+    },
+    {
+      "page": 235,
+      "ok": true,
+      "bytes": 2714
+    },
+    {
+      "page": 236,
+      "ok": true,
+      "bytes": 3200
+    },
+    {
+      "page": 237,
+      "ok": true,
+      "bytes": 2909
+    },
+    {
+      "page": 238,
+      "ok": true,
+      "bytes": 3073
+    },
+    {
+      "page": 239,
+      "ok": true,
+      "bytes": 4011
+    },
+    {
+      "page": 240,
+      "ok": true,
+      "bytes": 2314
+    },
+    {
+      "page": 241,
+      "ok": true,
+      "bytes": 3829
+    },
+    {
+      "page": 242,
+      "ok": true,
+      "bytes": 3624
+    },
+    {
+      "page": 243,
+      "ok": true,
+      "bytes": 2847
+    },
+    {
+      "page": 244,
+      "ok": true,
+      "bytes": 3981
+    },
+    {
+      "page": 245,
+      "ok": true,
+      "bytes": 4056
+    },
+    {
+      "page": 246,
+      "ok": true,
+      "bytes": 4158
+    },
+    {
+      "page": 247,
+      "ok": true,
+      "bytes": 3430
+    },
+    {
+      "page": 248,
+      "ok": true,
+      "bytes": 3362
+    }
+  ]
+}
