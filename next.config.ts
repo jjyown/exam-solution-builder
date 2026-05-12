@@ -12,6 +12,8 @@ import type { NextConfig } from "next";
 const nextConfig: NextConfig = {
   serverExternalPackages: [
     "pdfjs-dist",
+    "pdf-to-img",
+    "@napi-rs/canvas",
     "@google/generative-ai",
     "googleapis",
     "pg",
