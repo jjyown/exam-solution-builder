@@ -23,6 +23,11 @@ const TABS: Array<{ href: string; label: string; hint: string; comingSoon?: bool
     hint: "이전 풀이 이력에서 자동/크롭 모두 이어서 진행 (DOCX·복원·검수)",
   },
   {
+    href: "/textbook-ocr",
+    label: "교재 OCR",
+    hint: "Drive 시중교재 PDF 선택 → Railway 백그라운드 OCR (PC 꺼도 진행)",
+  },
+  {
     href: "/cost",
     label: "비용 체크",
     hint: "라우트별 API 호출 횟수·추정 비용 (Gemini/OpenAI/Mathpix)",

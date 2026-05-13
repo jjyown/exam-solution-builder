@@ -45,6 +45,11 @@ async function loadPdfRenderer(): Promise<typeof import("pdf-to-img").pdf> {
 export type TextbookDriveBuildOptions = {
   /** 책 이름 필터 (부분 일치). 없으면 폴더 안 모든 PDF. */
   bookFilter?: string | null;
+  /** Drive PDF ID 정확 매칭 (UI 에서 체크박스로 선택). bookFilter 보다 우선. */
+  bookIds?: string[];
+  /** 처리할 폴더 범위 — 기본 'both' (시중교재 → 시험지 원안 자동 체인).
+   *  'textbook' = 시중교재만, 'exam' = 시험지 원안만. /textbook-ocr UI 에서 'textbook' 사용. */
+  folderScope?: "textbook" | "exam" | "both";
   /** 책당 최대 페이지 (0 또는 미지정 = 무제한). 테스트용. */
   maxPages?: number;
   /** 이미 처리된 책도 강제 재처리. */
@@ -143,9 +148,17 @@ async function processFolder(args: {
     return { label, driveName, found: 0, processedBooks: 0, skippedBooks: 0 };
   }
 
-  const targets = opts.bookFilter
-    ? pdfFiles.filter((f) => f.name.includes(opts.bookFilter!))
-    : pdfFiles;
+  // 매칭 우선순위: bookIds (정확 ID) > bookFilter (부분 일치) > 전체.
+  // bookIds 는 /textbook-ocr UI 가 사용 — 사용자가 체크박스로 선택한 책만 처리.
+  const targets = (() => {
+    if (opts.bookIds && opts.bookIds.length > 0) {
+      return pdfFiles.filter((f) => opts.bookIds!.includes(f.id));
+    }
+    if (opts.bookFilter) {
+      return pdfFiles.filter((f) => f.name.includes(opts.bookFilter!));
+    }
+    return pdfFiles;
+  })();
   if (targets.length === 0) {
     return { label, driveName, found: pdfFiles.length, processedBooks: 0, skippedBooks: 0 };
   }
@@ -352,15 +365,23 @@ export async function runTextbookDriveBuild(
     throw new Error("「분석용 자료」 폴더를 찾지 못했습니다.");
   }
 
-  log(`[textbook-drive-build] 폴더 우선순위: ${FOLDER_PRIORITY.map((f) => f.label).join(" → ")}`);
+  // folderScope 옵션으로 처리 범위 제한. 기본 'both' = 현재 동작(시중교재 → 시험지 원안 자동 체인).
+  // /textbook-ocr UI 에서 'textbook' 만 지정해 시험지 원안 자동 체인 차단.
+  const folders = FOLDER_PRIORITY.filter((f) => {
+    if (opts.folderScope === "textbook") return f.driveName === "시중교재";
+    if (opts.folderScope === "exam") return f.driveName === "시험지 원안";
+    return true;
+  });
+
+  log(`[textbook-drive-build] 폴더 우선순위: ${folders.map((f) => f.label).join(" → ")}`);
 
   const byFolder: FolderResult[] = [];
   let firstFolderHadWork = false;
 
-  for (const folderSpec of FOLDER_PRIORITY) {
-    if (folderSpec !== FOLDER_PRIORITY[0] && firstFolderHadWork) {
+  for (const folderSpec of folders) {
+    if (folderSpec !== folders[0] && firstFolderHadWork) {
       log(
-        `\n[${folderSpec.label}] 이번 실행 건너뜀 — 「${FOLDER_PRIORITY[0]!.label}」에 새 작업 있음. 다음 실행 시 처리.`,
+        `\n[${folderSpec.label}] 이번 실행 건너뜀 — 「${folders[0]!.label}」에 새 작업 있음. 다음 실행 시 처리.`,
       );
       byFolder.push({
         label: folderSpec.label,
@@ -382,7 +403,7 @@ export async function runTextbookDriveBuild(
     });
     byFolder.push(result);
 
-    if (folderSpec === FOLDER_PRIORITY[0]) {
+    if (folderSpec === folders[0]) {
       firstFolderHadWork = result.processedBooks > 0;
     }
 
