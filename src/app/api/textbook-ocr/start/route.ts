@@ -26,6 +26,7 @@ type StartRequest = {
   bookIds?: unknown;
   force?: unknown;
   maxPages?: unknown;
+  folderScope?: unknown; // "textbook" | "exam" — UI 가 어느 폴더 책을 선택했는지
 };
 
 export async function POST(req: Request): Promise<Response> {
@@ -43,6 +44,8 @@ export async function POST(req: Request): Promise<Response> {
   const force = body.force === true;
   const maxPages =
     typeof body.maxPages === "number" && body.maxPages > 0 ? Math.floor(body.maxPages) : 0;
+  const folderScope: "textbook" | "exam" =
+    body.folderScope === "exam" ? "exam" : "textbook";
 
   if (bookIds.length === 0) {
     return NextResponse.json(
@@ -74,7 +77,7 @@ export async function POST(req: Request): Promise<Response> {
       const { runTextbookDriveBuild } = await import("@/lib/textbookDriveBuildRunner");
       const result = await runTextbookDriveBuild({
         bookIds,
-        folderScope: "textbook",
+        folderScope,
         force,
         maxPages,
         log: (m) => {

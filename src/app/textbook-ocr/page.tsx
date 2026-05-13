@@ -13,6 +13,13 @@ import type { TextbookOcrProgress } from "@/lib/textbookOcrProgress";
 
 type ProgressResponse = TextbookOcrProgress & { elapsedMs: number };
 
+type FolderScope = "textbook" | "exam";
+
+const SCOPE_TABS: Array<{ value: FolderScope; label: string; hint: string }> = [
+  { value: "textbook", label: "시중교재", hint: "분석용 자료/시중교재 폴더의 PDF" },
+  { value: "exam", label: "시험지 원안", hint: "분석용 자료/시험지 원안 폴더의 PDF (471건+)" },
+];
+
 const STATUS_LABEL: Record<TextbookOcrBookStatus, { text: string; color: string }> = {
   untouched: { text: "미처리", color: "bg-slate-100 text-slate-600" },
   partial: { text: "부분", color: "bg-amber-100 text-amber-700" },
@@ -40,9 +47,14 @@ function formatElapsed(ms: number): string {
 }
 
 export default function TextbookOcrPage() {
+  const [scope, setScope] = useState<FolderScope>("textbook");
   const [books, setBooks] = useState<TextbookOcrBookInfo[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [selected, setSelected] = useState<Set<string>>(new Set());
+  // selected 는 scope 마다 분리 — 시중교재 선택 후 시험지 원안 탭 갔다 돌아와도 유지
+  const [selectedByScope, setSelectedByScope] = useState<Record<FolderScope, Set<string>>>({
+    textbook: new Set(),
+    exam: new Set(),
+  });
   const [force, setForce] = useState(false);
   const [maxPages, setMaxPages] = useState<string>("");
   const [progress, setProgress] = useState<ProgressResponse | null>(null);
@@ -50,12 +62,24 @@ export default function TextbookOcrPage() {
   const [startError, setStartError] = useState<string | null>(null);
   const [expandedBook, setExpandedBook] = useState<string | null>(null);
 
+  const selected = selectedByScope[scope];
+  const setSelected = useCallback(
+    (next: Set<string> | ((prev: Set<string>) => Set<string>)) => {
+      setSelectedByScope((prev) => ({
+        ...prev,
+        [scope]: typeof next === "function" ? next(prev[scope]) : next,
+      }));
+    },
+    [scope],
+  );
+
   const isRunning = progress?.stage === "preparing" || progress?.stage === "processing";
 
   const loadBooks = useCallback(async () => {
     setLoadError(null);
+    setBooks(null);
     try {
-      const res = await fetch("/api/textbook-ocr/list", { cache: "no-store" });
+      const res = await fetch(`/api/textbook-ocr/list?scope=${scope}`, { cache: "no-store" });
       const data = await res.json();
       if (!data.ok) {
         setLoadError(data.error ?? "책 목록 조회 실패");
@@ -67,7 +91,7 @@ export default function TextbookOcrPage() {
       setLoadError((e as Error).message);
       setBooks([]);
     }
-  }, []);
+  }, [scope]);
 
   // 마운트 시 책 목록 + 진행률 한 번 조회 (외부 시스템에서 데이터 fetch — 정당한 effect 사용)
   useEffect(() => {
@@ -113,14 +137,17 @@ export default function TextbookOcrPage() {
     };
   }, [isRunning, loadBooks]);
 
-  const toggleBook = useCallback((id: string) => {
-    setSelected((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  }, []);
+  const toggleBook = useCallback(
+    (id: string) => {
+      setSelected((prev) => {
+        const next = new Set(prev);
+        if (next.has(id)) next.delete(id);
+        else next.add(id);
+        return next;
+      });
+    },
+    [setSelected],
+  );
 
   const selectByStatus = useCallback(
     (predicate: (status: TextbookOcrBookStatus) => boolean) => {
@@ -129,7 +156,7 @@ export default function TextbookOcrPage() {
       for (const b of books) if (predicate(b.status)) next.add(b.id);
       setSelected(next);
     },
-    [books],
+    [books, setSelected],
   );
 
   const onStart = useCallback(
@@ -148,6 +175,7 @@ export default function TextbookOcrPage() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             bookIds,
+            folderScope: scope, // 현재 탭의 폴더를 백엔드에 전달
             force: overrideBookIds ? true : force, // 책 단위 재처리 버튼은 항상 force
             maxPages: Number.isFinite(maxP) && maxP > 0 ? maxP : 0,
           }),
@@ -181,7 +209,7 @@ export default function TextbookOcrPage() {
         setStarting(false);
       }
     },
-    [selected, force, maxPages],
+    [selected, force, maxPages, scope],
   );
 
   const selectedCount = selected.size;
@@ -209,40 +237,130 @@ export default function TextbookOcrPage() {
     <div className="mx-auto max-w-6xl p-6">
       <h1 className="text-2xl font-bold">📚 교재 OCR</h1>
       <p className="mt-2 text-sm text-slate-600">
-        Drive 「분석용 자료/시중교재」 폴더의 PDF 를 선택해 OCR 진행합니다. 시작 후 PC/브라우저 꺼도 Railway
-        서버에서 자동으로 진행 — 나중에 다시 들어와서 진행률·결과를 확인할 수 있습니다.
+        Drive 「분석용 자료」 안의 PDF 를 선택해 OCR 진행합니다. 시작 후 PC/브라우저 꺼도 Railway 서버에서
+        자동으로 진행 — 나중에 다시 들어와서 진행률·결과를 확인할 수 있습니다.
       </p>
 
-      {/* 진행률 패널 */}
+      {/* 폴더 탭 */}
+      <div className="mt-4 flex gap-1 border-b border-slate-200">
+        {SCOPE_TABS.map((t) => {
+          const active = scope === t.value;
+          const selCount = selectedByScope[t.value].size;
+          return (
+            <button
+              key={t.value}
+              onClick={() => setScope(t.value)}
+              title={t.hint}
+              className={`-mb-px border-b-2 px-4 py-2 text-sm font-semibold transition-colors ${
+                active
+                  ? "border-indigo-600 text-indigo-700"
+                  : "border-transparent text-slate-600 hover:text-slate-900"
+              }`}
+            >
+              {t.label}
+              {selCount > 0 && (
+                <span className="ml-1.5 rounded-full bg-indigo-100 px-1.5 py-0.5 text-[10px] font-medium text-indigo-700">
+                  {selCount}
+                </span>
+              )}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* 현재 작업 배너 — 페이지 진입 시 큰 강조로 즉시 인지 */}
       {progress && progress.stage !== "idle" && (
         <div
-          className={`mt-4 rounded-lg border p-4 ${
+          className={`mt-4 rounded-xl border-2 p-5 shadow-md ${
             progress.stage === "completed"
-              ? "border-emerald-300 bg-emerald-50"
+              ? "border-emerald-400 bg-emerald-50"
               : progress.stage === "failed"
-                ? "border-rose-300 bg-rose-50"
-                : "border-indigo-300 bg-indigo-50"
+                ? "border-rose-400 bg-rose-50"
+                : "border-indigo-400 bg-indigo-50"
           }`}
         >
-          <div className="flex items-center justify-between">
-            <div className="font-semibold text-slate-800">{stageLabel}</div>
-            <div className="text-xs text-slate-500">
-              경과 {formatElapsed(progress.elapsedMs)} · 책 {progress.finishedBookCount}/{progress.totalBooks}
+          <div className="flex items-start gap-4">
+            <div className="text-4xl leading-none">
+              {progress.stage === "completed"
+                ? "✅"
+                : progress.stage === "failed"
+                  ? "❌"
+                  : "🔄"}
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="flex flex-wrap items-baseline justify-between gap-2">
+                <h2 className="text-lg font-bold text-slate-900">
+                  {progress.stage === "processing"
+                    ? "현재 OCR 작업 진행 중"
+                    : progress.stage === "preparing"
+                      ? "OCR 작업 준비 중"
+                      : progress.stage === "completed"
+                        ? "최근 OCR 작업 완료"
+                        : "OCR 작업 실패"}
+                </h2>
+                <div className="text-xs font-medium text-slate-600">
+                  경과 {formatElapsed(progress.elapsedMs)} · 책{" "}
+                  <span className="font-bold">{progress.finishedBookCount}</span>/{progress.totalBooks}
+                </div>
+              </div>
+              <div className="mt-1 text-sm text-slate-700">{stageLabel}</div>
+              {isRunning && progress.currentBookTotal > 0 && (
+                <div className="mt-3 h-3 w-full overflow-hidden rounded-full bg-slate-200">
+                  <div
+                    className="h-full bg-indigo-600 transition-all"
+                    style={{
+                      width: `${Math.min(100, (progress.currentPageNo / progress.currentBookTotal) * 100)}%`,
+                    }}
+                  />
+                </div>
+              )}
+              <div className="mt-2 flex flex-wrap gap-4 text-sm">
+                <span className="text-emerald-700">
+                  ✓ 성공 <span className="font-bold">{progress.successPageCount}</span>쪽
+                </span>
+                <span className="text-rose-700">
+                  ✗ 실패 <span className="font-bold">{progress.failedPageCount}</span>쪽
+                </span>
+              </div>
             </div>
           </div>
-          {isRunning && progress.currentBookTotal > 0 && (
-            <div className="mt-2 h-2 w-full overflow-hidden rounded bg-slate-200">
+        </div>
+      )}
+
+      {/* 작업 완료 요약 카드 — result.byFolder 통계 + 책별 상세 안내 */}
+      {progress?.stage === "completed" && progress.result && (
+        <div className="mt-4 rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+          <h3 className="text-sm font-bold text-slate-800">📊 작업 요약</h3>
+          <div className="mt-2 grid grid-cols-2 gap-3 text-sm sm:grid-cols-4">
+            <div className="rounded bg-slate-50 px-3 py-2">
+              <div className="text-xs text-slate-500">처리된 책</div>
+              <div className="text-lg font-bold text-emerald-700">
+                {progress.result.totalProcessedBooks}권
+              </div>
+            </div>
+            <div className="rounded bg-slate-50 px-3 py-2">
+              <div className="text-xs text-slate-500">스킵된 책</div>
+              <div className="text-lg font-bold text-slate-600">
+                {progress.result.totalSkippedBooks}권
+              </div>
+            </div>
+            <div className="rounded bg-slate-50 px-3 py-2">
+              <div className="text-xs text-slate-500">성공 페이지</div>
+              <div className="text-lg font-bold text-emerald-700">{progress.successPageCount}쪽</div>
+            </div>
+            <div className="rounded bg-slate-50 px-3 py-2">
+              <div className="text-xs text-slate-500">실패 페이지</div>
               <div
-                className="h-full bg-indigo-500 transition-all"
-                style={{
-                  width: `${Math.min(100, (progress.currentPageNo / progress.currentBookTotal) * 100)}%`,
-                }}
-              />
+                className={`text-lg font-bold ${progress.failedPageCount > 0 ? "text-rose-700" : "text-slate-600"}`}
+              >
+                {progress.failedPageCount}쪽
+              </div>
             </div>
-          )}
-          <div className="mt-2 text-xs text-slate-600">
-            누적 성공 {progress.successPageCount}쪽 · 실패 {progress.failedPageCount}쪽
           </div>
+          <p className="mt-3 text-xs text-slate-500">
+            책별 상세 진행도·실패 페이지는 아래 책 목록의 「진행도」·「실패」 칸을 확인하세요. 실패가 있는 책은
+            「재처리」 버튼으로 다시 시작할 수 있습니다.
+          </p>
         </div>
       )}
 

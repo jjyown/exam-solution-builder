@@ -1,17 +1,19 @@
 /**
- * GET /api/textbook-ocr/list
+ * GET /api/textbook-ocr/list?scope=textbook|exam
  *
- * /textbook-ocr 페이지가 표시할 시중교재 PDF 목록 + 각 책의 OCR 진행도 + 실패 정보.
+ * /textbook-ocr 페이지가 표시할 PDF 목록 + 각 책의 OCR 진행도 + 실패 정보.
+ *
+ *  scope=textbook (기본): 분석용 자료/시중교재
+ *  scope=exam:           분석용 자료/시험지 원안
  *
  * 응답:
  * {
  *   ok: true,
+ *   scope: "textbook" | "exam",
  *   books: [{ id, name, sizeBytes, ocrMdCount, totalPages, failedPages, lastBuiltAt, status }]
  * }
- *
- * 책마다 manifest.json 다운로드 — 11권이라 1~3초 정도. 캐싱은 별도 작업으로.
  */
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import {
   getDriveClient,
   resolveDriveAnalysisFolderId,
@@ -21,6 +23,11 @@ import {
 } from "@/lib/googleDrive";
 
 export const dynamic = "force-dynamic";
+
+const SCOPE_TO_FOLDER: Record<"textbook" | "exam", string> = {
+  textbook: "시중교재",
+  exam: "시험지 원안",
+};
 
 export type TextbookOcrBookStatus =
   | "untouched" // OCR md 0개
@@ -39,7 +46,11 @@ export type TextbookOcrBookInfo = {
   status: TextbookOcrBookStatus;
 };
 
-export async function GET(): Promise<Response> {
+export async function GET(req: NextRequest): Promise<Response> {
+  const scopeParam = req.nextUrl.searchParams.get("scope");
+  const scope: "textbook" | "exam" = scopeParam === "exam" ? "exam" : "textbook";
+  const folderName = SCOPE_TO_FOLDER[scope];
+
   try {
     const drive = getDriveClient();
     const analysisRootId = await resolveDriveAnalysisFolderId(drive);
@@ -49,8 +60,8 @@ export async function GET(): Promise<Response> {
         { status: 500 },
       );
     }
-    const textbookFolderId = await findOrCreateChildFolder(analysisRootId, "시중교재");
-    const pdfFiles = (await listDriveFolderFiles(textbookFolderId, new Set([".pdf"]))).filter((f) =>
+    const targetFolderId = await findOrCreateChildFolder(analysisRootId, folderName);
+    const pdfFiles = (await listDriveFolderFiles(targetFolderId, new Set([".pdf"]))).filter((f) =>
       f.name.toLowerCase().endsWith(".pdf"),
     );
 
@@ -63,7 +74,7 @@ export async function GET(): Promise<Response> {
         let lastBuiltAt: string | null = null;
 
         try {
-          const workFolderId = await findOrCreateChildFolder(textbookFolderId, bookName);
+          const workFolderId = await findOrCreateChildFolder(targetFolderId, bookName);
           const ocrFolderId = await findOrCreateChildFolder(workFolderId, "ocr");
           const ocrFiles = await listDriveFolderFiles(ocrFolderId, new Set([".md"]));
           ocrMdCount = ocrFiles.length;
@@ -116,10 +127,10 @@ export async function GET(): Promise<Response> {
     // 책 이름 알파벳/한글 정렬 (사용자가 찾기 쉽게)
     books.sort((a, b) => a.name.localeCompare(b.name, "ko"));
 
-    return NextResponse.json({ ok: true, books });
+    return NextResponse.json({ ok: true, scope, books });
   } catch (e) {
     return NextResponse.json(
-      { ok: false, error: (e as Error).message },
+      { ok: false, scope, error: (e as Error).message },
       { status: 500 },
     );
   }
