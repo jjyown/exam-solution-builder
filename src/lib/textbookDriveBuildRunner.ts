@@ -305,6 +305,13 @@ async function processFolder(args: {
       manifest.processedPages += 1;
       manifest.pageStatuses.push({ page: pageNo, ok: true, bytes: mdBuf.byteLength });
       log(`  [page ${pagePadded(pageNo)}/${pagePadded(limit)}] ✓ ${ocr.model} ${mdBuf.byteLength}B`);
+
+      // pdfjs/네이티브 캔버스가 external 메모리에 누적 — V8 GC 가 자동 회수 약함.
+      // 10페이지마다 명시적 GC + event loop tick 양보. NODE_OPTIONS=--expose-gc 필요.
+      if (pageNo % 10 === 0) {
+        await new Promise((r) => setImmediate(r));
+        if (typeof global.gc === "function") global.gc();
+      }
     }
 
     const manifestJson = JSON.stringify(manifest, null, 2);

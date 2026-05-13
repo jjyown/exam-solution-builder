@@ -65,7 +65,7 @@ export async function register(): Promise<void> {
       );
     };
     logMem("boot");
-    setInterval(() => logMem("tick"), 60_000).unref?.();
+    setInterval(() => logMem("tick"), 20_000).unref?.();
   } catch (e) {
     console.warn("[instrumentation] memory logger 등록 실패:", (e as Error).message);
   }
