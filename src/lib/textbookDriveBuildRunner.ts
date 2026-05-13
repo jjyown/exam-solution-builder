@@ -251,10 +251,31 @@ async function processFolder(args: {
       pageStatuses: [],
     };
 
+    // 페이지 단위 멱등 — 이미 OCR md 가 있는 페이지는 건너뜀.
+    // force 옵션은 책 단위 SKIP 만 무시 (페이지 단위 멱등은 항상 적용).
+    // 진짜 "처음부터 다시" 원하면 사용자가 Drive 에서 ocr/ 폴더 비우고 시작.
+    const existingMdFiles = await listDriveFolderFiles(ocrFolderId, new Set([".md"]));
+    const alreadyProcessedPages = new Set<number>();
+    for (const f of existingMdFiles) {
+      const m = /^page(\d+)\.md$/.exec(f.name);
+      if (m) alreadyProcessedPages.add(parseInt(m[1] ?? "0", 10));
+    }
+    if (alreadyProcessedPages.size > 0) {
+      log(`  ↻ 페이지 단위 멱등: 이미 OCR 된 ${alreadyProcessedPages.size}쪽 자동 skip`);
+    }
+
     let pageNo = 0;
     for await (const pngBuf of pdfDoc) {
       pageNo += 1;
       if (pageNo > limit) break;
+
+      // 페이지 단위 멱등 — 이미 처리된 페이지면 OCR/업로드 모두 skip (Gemini 호출 0)
+      if (alreadyProcessedPages.has(pageNo)) {
+        manifest.processedPages += 1;
+        manifest.pageStatuses.push({ page: pageNo, ok: true, bytes: 0 });
+        log(`  [page ${pagePadded(pageNo)}/${pagePadded(limit)}] ↷ skip (이미 처리됨)`);
+        continue;
+      }
 
       const pngName = `page${pagePadded(pageNo)}.png`;
       const mdName = `page${pagePadded(pageNo)}.md`;

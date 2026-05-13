@@ -251,6 +251,16 @@ export async function listDriveChildFolders(
   return out;
 }
 
+/**
+ * Drive 폴더에 파일 업로드. 같은 이름 파일이 이미 있으면 update (덮어쓰기) — 없으면 create.
+ *
+ * 덮어쓰기 도입 이유 (textbook-build-auto OCR 누적 사례):
+ *   Google Drive API 의 files.create 는 같은 이름 파일이 있어도 새 파일로 만든다.
+ *   force 빌드 반복 시 page010.md 가 N개 생기는 누적 문제 → 진짜 진행도 알 수 없게 됨.
+ *   업로드 전 같은 이름 검색 → 있으면 update, 없으면 create 패턴으로 멱등성 확보.
+ *
+ * 비용: 파일당 list 1회 추가 (folderId + name 매치). 미미.
+ */
 export async function uploadBufferToDriveFolder(params: {
   folderId: string;
   fileName: string;
@@ -259,6 +269,32 @@ export async function uploadBufferToDriveFolder(params: {
 }): Promise<{ id: string; name: string; webViewLink: string }> {
   const drive = getDriveClient();
   const { Readable } = await import("node:stream");
+
+  // 같은 이름 기존 파일 검색 — 있으면 update (덮어쓰기)
+  const existing = await drive.files.list({
+    q: `name='${escapeDriveQueryString(params.fileName)}' and '${params.folderId}' in parents and trashed=false`,
+    fields: "files(id)",
+    pageSize: 1,
+  });
+  const existingId = existing.data.files?.[0]?.id;
+
+  if (existingId) {
+    const stream = Readable.from(params.buffer);
+    const res = await drive.files.update({
+      fileId: existingId,
+      media: {
+        mimeType: params.mimeType,
+        body: stream,
+      },
+      fields: "id, name, webViewLink",
+    });
+    const id = res.data.id ?? existingId;
+    const name = res.data.name ?? params.fileName;
+    const webViewLink = res.data.webViewLink ?? `https://drive.google.com/file/d/${id}/view`;
+    return { id, name, webViewLink };
+  }
+
+  // 새 파일 — create
   const stream = Readable.from(params.buffer);
   const res = await drive.files.create({
     requestBody: {
