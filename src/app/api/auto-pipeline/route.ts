@@ -207,27 +207,40 @@ type RoutedCall = (prompt: string, profile: Profile) => Promise<{ text: string; 
 
 function makeRoutedLlmCall(modelPref: string | undefined): RoutedCall {
   let fallenBack = (modelPref || '').toLowerCase() === 'openai';
+  // 429/quota 시 같은 모델 backoff 재시도 스케줄. vision/route.ts 패턴 동일.
+  // 즉시 OpenAI 진급은 비용 spike 위험 (Gemini 일시 혼잡 ≠ 영구 한도 초과).
+  // 짧은 backoff 로 quota 회복 시 그대로 Gemini 사용. 3회 모두 실패 시에만 OpenAI.
+  const QUOTA_BACKOFF_MS = [100, 500, 1000];
   return async (prompt, profile) => {
     if (fallenBack) {
       const m = openaiModelFor(profile);
       return { text: await callOpenAI(prompt, m), usedModel: m, usedVendor: 'openai' };
     }
     const geminiModel = geminiModelFor(profile);
-    try {
-      return { text: await callGemini(prompt, geminiModel), usedModel: geminiModel, usedVendor: 'gemini' };
-    } catch (e) {
-      if (e instanceof GeminiQuotaError) {
-        fallenBack = true;
-        if (process.env.OPENAI_API_KEY) {
-          const m = openaiModelFor(profile);
-          return { text: await callOpenAI(prompt, m), usedModel: m, usedVendor: 'openai' };
-        }
-        throw new Error(
-          `Gemini 한도 초과 + OPENAI_API_KEY 없음. https://ai.studio/spend 또는 Railway에 OPENAI_API_KEY 추가 후 재시도.`,
-        );
+    let lastQuotaErr: GeminiQuotaError | null = null;
+    for (let attempt = 0; attempt <= QUOTA_BACKOFF_MS.length; attempt++) {
+      if (attempt > 0) {
+        await new Promise((r) => setTimeout(r, QUOTA_BACKOFF_MS[attempt - 1]));
       }
-      throw e;
+      try {
+        return { text: await callGemini(prompt, geminiModel), usedModel: geminiModel, usedVendor: 'gemini' };
+      } catch (e) {
+        if (e instanceof GeminiQuotaError) {
+          lastQuotaErr = e;
+          continue; // 다음 backoff 까지 대기 후 재시도
+        }
+        throw e;
+      }
     }
+    // 모든 backoff 실패 → 영구 한도 초과로 간주, OpenAI 로 sticky 진급
+    fallenBack = true;
+    if (process.env.OPENAI_API_KEY) {
+      const m = openaiModelFor(profile);
+      return { text: await callOpenAI(prompt, m), usedModel: m, usedVendor: 'openai' };
+    }
+    throw new Error(
+      `Gemini 한도 초과 (${QUOTA_BACKOFF_MS.length + 1}회 backoff 실패) + OPENAI_API_KEY 없음. https://ai.studio/spend 또는 Railway에 OPENAI_API_KEY 추가 후 재시도. raw=${lastQuotaErr?.raw?.slice(0, 200) ?? ''}`,
+    );
   };
 }
 
@@ -478,6 +491,22 @@ export async function POST(req: Request) {
     body = await req.json();
   } catch {
     return NextResponse.json({ ok: false, error: 'invalid JSON body' }, { status: 400 });
+  }
+
+  // 막누름 비용 폭탄 방지 — 이미 진행 중이면 새 호출 거부.
+  // UI 가드(disabled={running}) 가 새로고침/우회로 무력화돼도 백엔드에서 막음.
+  // progressState 는 모듈 전역 단일 (admin tool, 동시 1개 가정).
+  if (progressState.stage === 'preparing' || progressState.stage === 'processing') {
+    const elapsedMs = progressState.startedAt ? Date.now() - progressState.startedAt : 0;
+    return NextResponse.json(
+      {
+        ok: false,
+        error: `이전 요청 처리 중 (${Math.round(elapsedMs / 1000)}초 경과). 완료 후 다시 시도하세요.`,
+        inProgress: true,
+        progress: { ...progressState, elapsedMs },
+      },
+      { status: 409 },
+    );
   }
 
   // 진행 상황 초기화 — preparing 단계로 시작

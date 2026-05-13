@@ -18,11 +18,11 @@ export type VisionExtractResult =
   | { ok: true; text: string; model: string; mimeType: string }
   | { ok: false; error: string; quotaExceeded?: boolean };
 
-const DEFAULT_OCR_MODELS = [
-  "gemini-2.0-flash",
-  "gemini-2.5-flash",
-  "gemini-2.0-flash-lite",
-];
+// 비용 폭탄 방지: 기본 후보를 가장 싼 단일 모델로 제한.
+// 이전엔 [2.0-flash, 2.5-flash, 2.0-flash-lite] 였으나 429 시 비싼 2.5-flash 로
+// 자동 진급 → output 토큰 8배 단가 → 2026-05-09 비용 spike 사례 발생.
+// 단일 모델 + 호출처 backoff 로 처리. 필요 시 env GEMINI_MODELS_OCR 로 확장 가능.
+const DEFAULT_OCR_MODELS = ["gemini-2.0-flash"];
 
 /** 환경변수로 후보 모델을 오버라이드할 수 있게: `GEMINI_MODELS_OCR=gemini-2.5-flash,gemini-2.0-flash` */
 function resolveOcrModelCandidates(): string[] {
