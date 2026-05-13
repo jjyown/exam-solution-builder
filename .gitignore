@@ -40,6 +40,9 @@ yarn-error.log*
 시험지/
 크롭된 시험지/
 해설지 최종본/
+# textbook OCR 로컬 미러 — Drive 에 정본 저장됨 (CLI/UI 모두 자동 미러).
+# 책별 수백 .md 파일이 누적돼 git 노이즈만 키움 (예: 9권 = 수천 파일).
+교재 참고자료/
 *.pdf
 *.docx
 *.txt
