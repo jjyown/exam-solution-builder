@@ -208,14 +208,13 @@ async function processFolder(args: {
     const pagesFolderId = await findOrCreateChildFolder(workFolderId, "pages");
     const ocrFolderId = await findOrCreateChildFolder(workFolderId, "ocr");
 
-    if (!opts.force) {
-      const existingOcr = await listDriveFolderFiles(ocrFolderId, new Set([".md"]));
-      if (existingOcr.length > 0) {
-        log(`  [skip] 이미 ocr md ${existingOcr.length}개 — --force 로 덮어쓰기`);
-        skippedBooks += 1;
-        continue;
-      }
-    }
+    // 책 단위 SKIP 제거됨 — 페이지 단위 멱등이 알아서 처리:
+    //   - 완전 처리 책: 모든 페이지 skip (Gemini 호출 0, 빠르게 통과)
+    //   - 부분 처리 책: 미처리 페이지만 OCR (자연스럽게 이어서)
+    //   - 미처리 책: 모든 페이지 OCR
+    // force 옵션은 noop (호환성 위해 시그니처만 유지). 진짜 "처음부터 다시" 원하면
+    // 사용자가 Drive 에서 ocr/ 폴더 비우고 시작.
+    void opts.force;
 
     const tmpRoot = path.join(os.tmpdir(), "textbook-drive-build", shortHash(bookName));
     await fs.mkdir(tmpRoot, { recursive: true });

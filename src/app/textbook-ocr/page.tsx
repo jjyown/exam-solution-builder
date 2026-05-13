@@ -55,7 +55,6 @@ export default function TextbookOcrPage() {
     textbook: new Set(),
     exam: new Set(),
   });
-  const [force, setForce] = useState(false);
   const [maxPages, setMaxPages] = useState<string>("");
   const [progress, setProgress] = useState<ProgressResponse | null>(null);
   const [starting, setStarting] = useState(false);
@@ -176,7 +175,8 @@ export default function TextbookOcrPage() {
           body: JSON.stringify({
             bookIds,
             folderScope: scope, // 현재 탭의 폴더를 백엔드에 전달
-            force: overrideBookIds ? true : force, // 책 단위 재처리 버튼은 항상 force
+            // force 옵션 제거됨 — 책 단위 SKIP 로직 자체가 사라져서 의미 없음.
+            // 페이지 단위 멱등이 미처리 페이지만 자동 처리.
             maxPages: Number.isFinite(maxP) && maxP > 0 ? maxP : 0,
           }),
         });
@@ -209,7 +209,7 @@ export default function TextbookOcrPage() {
         setStarting(false);
       }
     },
-    [selected, force, maxPages, scope],
+    [selected, maxPages, scope],
   );
 
   const selectedCount = selected.size;
@@ -405,15 +405,9 @@ export default function TextbookOcrPage() {
       </div>
 
       <div className="mt-3 flex flex-wrap items-center gap-4 text-sm">
-        <label className="flex items-center gap-1.5">
-          <input
-            type="checkbox"
-            checked={force}
-            onChange={(e) => setForce(e.target.checked)}
-            disabled={isRunning}
-          />
-          <span>force 재처리 (이미 처리분도 처음부터)</span>
-        </label>
+        <span className="rounded bg-emerald-50 px-2 py-1 text-xs text-emerald-800">
+          ✅ 이미 처리된 페이지는 자동으로 건너뜁니다 — 부분 처리 책 다시 시작해도 비용 거의 0
+        </span>
         <label className="flex items-center gap-1.5">
           <span>최대 페이지 (테스트)</span>
           <input
