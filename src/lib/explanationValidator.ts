@@ -18,7 +18,7 @@
  *  반환값에 retryHint를 담아 promptBuilder에 다시 넘기면 자동 교정됨.
  * ────────────────────────────────────────────────────────────────────────────
  */
-import { simplifyLatexContent } from "./latexToPlainText";
+import { explanationLatexToPlain, simplifyLatexContent } from "./latexToPlainText";
 
 export interface ParsedExplanation {
   answer: string;
@@ -76,6 +76,11 @@ export function validateExplanation(rawOutput: string): ValidationResult {
   // LLM 이 instruction 무시하고 평문에 LaTeX 섞어 보내도, 사용자 의도 보존하면서 통과시킴.
   if (Array.isArray(parsed.explanation_steps)) {
     parsed.explanation_steps = parsed.explanation_steps.map(autoSplitLatexFromText);
+    // V6b: text 잔재 한 번 더 청소 — `\implies`·`\quad`·`\\` 등 분리 누락분을 한국어 친화 평문으로 변환
+    parsed.explanation_steps = parsed.explanation_steps.map((s) => ({
+      text: s.text ? explanationLatexToPlain(s.text) : "",
+      equation: s.equation ?? "",
+    }));
   }
 
   // V4: 풀이 본문 길이 검증 (V6a 적용 후 다시 측정)
