@@ -234,21 +234,114 @@ export async function findOrCreateChildFolder(
   return res.data.id;
 }
 
-/** 부모 폴더 아래 하위 폴더 목록 (이름·ID). 시중교재 책 목록 스캔용. */
+/**
+ * 부모 폴더 아래 하위 폴더 목록 (이름·ID·createdTime).
+ * 시중교재 책 목록 스캔 + 진단 도구 그룹화에 사용.
+ * pagination 안전 (1000 초과 비현실적이지만 nextPageToken loop).
+ */
 export async function listDriveChildFolders(
   parentId: string,
-): Promise<Array<{ id: string; name: string }>> {
+): Promise<Array<{ id: string; name: string; createdTime: string | null }>> {
   const drive = getDriveClient();
-  const res = await drive.files.list({
-    q: `'${parentId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`,
-    fields: "files(id, name)",
+  const q = `'${parentId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`;
+  const out: Array<{ id: string; name: string; createdTime: string | null }> = [];
+  let res = await drive.files.list({
+    q,
+    fields: "nextPageToken, files(id, name, createdTime)",
     pageSize: 1000,
+    orderBy: "name, createdTime",
   });
-  const out: Array<{ id: string; name: string }> = [];
-  for (const f of res.data.files ?? []) {
-    if (f.id && f.name) out.push({ id: f.id, name: f.name });
+  while (true) {
+    for (const f of res.data.files ?? []) {
+      if (f.id && f.name) {
+        out.push({ id: f.id, name: f.name, createdTime: f.createdTime ?? null });
+      }
+    }
+    const next = res.data.nextPageToken;
+    if (!next) break;
+    res = await drive.files.list({
+      q,
+      fields: "nextPageToken, files(id, name, createdTime)",
+      pageSize: 1000,
+      orderBy: "name, createdTime",
+      pageToken: next,
+    });
   }
   return out;
+}
+
+/**
+ * 같은 부모 아래 같은 이름의 폴더를 모두 반환 (중복 진단·헬스체크 용).
+ * findChildFolderId 가 [0] 만 반환해 중복 폴더 누락 → 진단 도구가 그룹화에 사용.
+ */
+export async function listSameNameChildFolders(
+  parentId: string,
+  folderName: string,
+): Promise<Array<{ id: string; createdTime: string | null }>> {
+  const drive = getDriveClient();
+  const q = `name='${escapeDriveQueryString(folderName)}' and '${parentId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`;
+  const out: Array<{ id: string; createdTime: string | null }> = [];
+  let res = await drive.files.list({
+    q,
+    fields: "nextPageToken, files(id, createdTime)",
+    pageSize: 100,
+    orderBy: "createdTime",
+  });
+  while (true) {
+    for (const f of res.data.files ?? []) {
+      if (f.id) out.push({ id: f.id, createdTime: f.createdTime ?? null });
+    }
+    const next = res.data.nextPageToken;
+    if (!next) break;
+    res = await drive.files.list({
+      q,
+      fields: "nextPageToken, files(id, createdTime)",
+      pageSize: 100,
+      orderBy: "createdTime",
+      pageToken: next,
+    });
+  }
+  return out;
+}
+
+/**
+ * 폴더 안 자식 파일 수 + 폴더 수 + manifest.json 존재 여부 (다운로드 X).
+ * P9: hasManifest 는 책 폴더에서만 의미 있음 — 서브폴더 (ocr/pages) 는 manifest 없는 게 정상.
+ */
+export async function countDriveFolderChildren(
+  folderId: string,
+): Promise<{ fileCount: number; folderCount: number; hasManifest: boolean }> {
+  const drive = getDriveClient();
+  const q = `'${folderId}' in parents and trashed=false`;
+  let fileCount = 0;
+  let folderCount = 0;
+  let hasManifest = false;
+  let res = await drive.files.list({
+    q,
+    fields: "nextPageToken, files(id, name, mimeType)",
+    pageSize: 1000,
+  });
+  while (true) {
+    for (const f of res.data.files ?? []) {
+      const name = f.name ?? "";
+      const mimeType = f.mimeType ?? "";
+      if (mimeType === "application/vnd.google-apps.folder") {
+        folderCount += 1;
+      } else {
+        fileCount += 1;
+        if (name === "manifest.json") hasManifest = true;
+      }
+    }
+    const next = res.data.nextPageToken;
+    if (!next) break;
+    res = await drive.files.list({
+      q,
+      fields: "nextPageToken, files(id, name, mimeType)",
+      pageSize: 1000,
+      pageToken: next,
+    });
+  }
+  return { fileCount, folderCount, hasManifest };
 }
 
 /**

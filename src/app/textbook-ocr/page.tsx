@@ -9,11 +9,26 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { TextbookOcrBookInfo, TextbookOcrBookStatus } from "../api/textbook-ocr/list/route";
+import type {
+  DiagnoseResponse,
+  DiagnoseGroup,
+  DiagnoseSubGroup,
+} from "../api/textbook-ocr/diagnose/route";
+import type { DiagnoseManifestResponse } from "../api/textbook-ocr/diagnose/manifest/route";
 import type { TextbookOcrProgress } from "@/lib/textbookOcrProgress";
 
 type ProgressResponse = TextbookOcrProgress & { elapsedMs: number };
 
 type FolderScope = "textbook" | "exam";
+
+function groupKey(g: DiagnoseGroup | DiagnoseSubGroup): string {
+  // 책 이름 그룹 vs 서브폴더 그룹 구분 (서브폴더는 책 이름 prefix)
+  return "bookName" in g ? `sub::${g.bookName}::${g.subName}` : `book::${g.name}`;
+}
+
+function driveFolderUrl(id: string): string {
+  return `https://drive.google.com/drive/folders/${id}`;
+}
 
 const SCOPE_TABS: Array<{ value: FolderScope; label: string; hint: string }> = [
   { value: "textbook", label: "시중교재", hint: "분석용 자료/시중교재 폴더의 PDF" },
@@ -60,6 +75,16 @@ export default function TextbookOcrPage() {
   const [starting, setStarting] = useState(false);
   const [startError, setStartError] = useState<string | null>(null);
   const [expandedBook, setExpandedBook] = useState<string | null>(null);
+
+  // 진단 도구 (P5 PR-A): 같은 이름 중복 폴더 찾기
+  const [diagnosis, setDiagnosis] = useState<DiagnoseResponse | null>(null);
+  const [diagnosing, setDiagnosing] = useState(false);
+  const [diagnoseError, setDiagnoseError] = useState<string | null>(null);
+  const [diagnoseExpanded, setDiagnoseExpanded] = useState(false);  // P7: 기본 접힘
+  const [expandedGroupKey, setExpandedGroupKey] = useState<string | null>(null);
+  // P8 lazy load — folderId 별 manifest 상세 캐시
+  const [manifestDetails, setManifestDetails] = useState<Map<string, DiagnoseManifestResponse>>(new Map());
+  const manifestPendingRef = useRef<Map<string, Promise<DiagnoseManifestResponse>>>(new Map());
 
   const selected = selectedByScope[scope];
   const setSelected = useCallback(
@@ -158,6 +183,81 @@ export default function TextbookOcrPage() {
     [books, setSelected],
   );
 
+  // 진단 도구 (PR-A 핵심)
+  const runDiagnose = useCallback(async () => {
+    setDiagnosing(true);
+    setDiagnoseError(null);
+    setDiagnosis(null);
+    try {
+      const res = await fetch(`/api/textbook-ocr/diagnose?scope=${scope}`, { cache: "no-store" });
+      const data = await res.json();
+      if (!data.ok) {
+        setDiagnoseError(data.error ?? "진단 실패");
+        return;
+      }
+      setDiagnosis(data as DiagnoseResponse);
+      setDiagnoseExpanded(true); // 결과 나오면 자동 펼침
+    } catch (e) {
+      setDiagnoseError((e as Error).message);
+    } finally {
+      setDiagnosing(false);
+    }
+  }, [scope]);
+
+  // P8 + G2: folder manifest lazy load. Promise 중복 방지 (Map 캐시).
+  const loadManifestDetail = useCallback(
+    async (folderId: string): Promise<DiagnoseManifestResponse> => {
+      const cached = manifestDetails.get(folderId);
+      if (cached) return cached;
+      const inflight = manifestPendingRef.current.get(folderId);
+      if (inflight) return inflight;
+      const promise = (async () => {
+        try {
+          const res = await fetch(
+            `/api/textbook-ocr/diagnose/manifest?folderId=${encodeURIComponent(folderId)}`,
+            { cache: "no-store" },
+          );
+          const data = (await res.json()) as DiagnoseManifestResponse;
+          setManifestDetails((prev) => {
+            const next = new Map(prev);
+            next.set(folderId, data);
+            return next;
+          });
+          return data;
+        } finally {
+          manifestPendingRef.current.delete(folderId);
+        }
+      })();
+      manifestPendingRef.current.set(folderId, promise);
+      return promise;
+    },
+    [manifestDetails],
+  );
+
+  // 책 카드 배지 클릭 → 진단 패널 펼침 + 해당 그룹으로 스크롤·강조
+  const focusDiagnosisGroup = useCallback((bookName: string) => {
+    if (!diagnosis) return;
+    const target =
+      diagnosis.duplicateBookFolders.find((g) => g.name === bookName) ??
+      diagnosis.duplicateSubFolders.find((g) => g.bookName === bookName);
+    if (!target) return;
+    setDiagnoseExpanded(true);
+    setExpandedGroupKey(groupKey(target));
+    setTimeout(() => {
+      document.getElementById(`diag-group-${groupKey(target)}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+    }, 50);
+  }, [diagnosis]);
+
+  // scope 변경 시 진단 결과 초기화 (이전 scope 결과는 부적절) — 외부 입력(탭 클릭)에 반응
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setDiagnosis(null);
+    setDiagnoseExpanded(false);
+    setExpandedGroupKey(null);
+    setManifestDetails(new Map());
+    manifestPendingRef.current.clear();
+  }, [scope]);
+
   const onStart = useCallback(
     async (overrideBookIds?: string[]) => {
       const bookIds = overrideBookIds ?? Array.from(selected);
@@ -240,6 +340,11 @@ export default function TextbookOcrPage() {
         Drive 「분석용 자료」 안의 PDF 를 선택해 OCR 진행합니다. 시작 후 PC/브라우저 꺼도 Railway 서버에서
         자동으로 진행 — 나중에 다시 들어와서 진행률·결과를 확인할 수 있습니다.
       </p>
+
+      {/* P7: Drive UI 캐시 안내 — 항상 표시 */}
+      <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+        💡 Drive 폴더가 비어 보일 때: Drive UI 캐시 때문일 수 있습니다. 폴더 안에서 <kbd className="rounded border border-amber-300 bg-white px-1 font-mono">F5</kbd> 한 번 누르면 OCR 파일이 나타납니다. 그래도 비어 있으면 아래 「Drive 중복 폴더 진단」 버튼을 눌러 같은 이름 폴더가 두 개 있는지 확인하세요.
+      </div>
 
       {/* 폴더 탭 */}
       <div className="mt-4 flex gap-1 border-b border-slate-200">
@@ -420,7 +525,33 @@ export default function TextbookOcrPage() {
             disabled={isRunning}
           />
         </label>
+        <button
+          onClick={() => void runDiagnose()}
+          disabled={diagnosing}
+          className="ml-auto rounded border border-violet-300 bg-violet-50 px-3 py-1 text-xs font-semibold text-violet-800 hover:bg-violet-100 disabled:cursor-not-allowed disabled:opacity-60"
+          title="같은 이름의 중복 폴더가 있는지 검사 (Drive UI 빈 폴더로 보일 때)"
+        >
+          {diagnosing ? "진단 중..." : "🔍 Drive 중복 폴더 진단"}
+        </button>
       </div>
+
+      {/* 진단 결과 패널 — Accordion 기본 접힘 (P7) */}
+      {diagnoseError && (
+        <div className="mt-3 rounded border border-rose-300 bg-rose-50 px-3 py-2 text-sm text-rose-800">
+          진단 실패: {diagnoseError}
+        </div>
+      )}
+      {diagnosis && (
+        <DiagnosisPanel
+          diagnosis={diagnosis}
+          expanded={diagnoseExpanded}
+          onToggle={() => setDiagnoseExpanded((v) => !v)}
+          expandedGroupKey={expandedGroupKey}
+          setExpandedGroupKey={setExpandedGroupKey}
+          manifestDetails={manifestDetails}
+          loadManifestDetail={loadManifestDetail}
+        />
+      )}
 
       {/* 책 목록 테이블 */}
       <div className="mt-4 overflow-x-auto rounded-lg border border-slate-200">
@@ -473,7 +604,39 @@ export default function TextbookOcrPage() {
                         disabled={isRunning}
                       />
                     </td>
-                    <td className="px-3 py-2 font-medium">{b.name}</td>
+                    <td className="px-3 py-2 font-medium">
+                      <span>{b.name}</span>
+                      {(() => {
+                        // P3·P7: 책 카드 배지. manifest.warnings 또는 진단 결과의 해당 책 그룹.
+                        const hasWarnings = b.warnings && b.warnings.length > 0;
+                        const dupBookGroup =
+                          diagnosis?.duplicateBookFolders.find((g) => g.name === b.name);
+                        const dupSubGroup =
+                          diagnosis?.duplicateSubFolders.find((g) => g.bookName === b.name);
+                        const dupGroup = dupBookGroup ?? dupSubGroup;
+                        const isStrong = dupGroup?.requiresManualMerge === true;
+                        if (!hasWarnings && !dupGroup) return null;
+                        const tooltip = [
+                          ...(b.warnings ?? []),
+                          dupGroup ? (isStrong ? "❌ 양쪽 폴더에 모두 파일 있음 — 수동 병합 필요" : "⚠️ 같은 이름 중복 폴더 발견") : "",
+                        ]
+                          .filter(Boolean)
+                          .join(" / ");
+                        return (
+                          <button
+                            onClick={() => focusDiagnosisGroup(b.name)}
+                            title={tooltip}
+                            className={`ml-2 rounded px-1.5 py-0.5 text-xs ${
+                              isStrong
+                                ? "bg-rose-100 text-rose-800 hover:bg-rose-200"
+                                : "bg-amber-100 text-amber-800 hover:bg-amber-200"
+                            }`}
+                          >
+                            {isStrong ? "❌" : "⚠️"}
+                          </button>
+                        );
+                      })()}
+                    </td>
                     <td className="px-3 py-2 text-right text-slate-600">{formatBytes(b.sizeBytes)}</td>
                     <td className="px-3 py-2 text-center">
                       <span className={`rounded px-2 py-0.5 text-xs font-semibold ${status.color}`}>
@@ -551,6 +714,191 @@ export default function TextbookOcrPage() {
           진행률이 자동으로 표시됩니다.
         </p>
       </div>
+    </div>
+  );
+}
+
+/**
+ * Drive 중복 폴더 진단 결과 패널 (Accordion).
+ * 그룹 색상: 빨강 (requiresManualMerge), 노랑 (manifestStale), 녹색 (auto-safe).
+ */
+function DiagnosisPanel(props: {
+  diagnosis: DiagnoseResponse;
+  expanded: boolean;
+  onToggle: () => void;
+  expandedGroupKey: string | null;
+  setExpandedGroupKey: (key: string | null) => void;
+  manifestDetails: Map<string, DiagnoseManifestResponse>;
+  loadManifestDetail: (folderId: string) => Promise<DiagnoseManifestResponse>;
+}) {
+  const { diagnosis, expanded, onToggle, expandedGroupKey, setExpandedGroupKey, manifestDetails, loadManifestDetail } = props;
+  const allGroups: Array<DiagnoseGroup | DiagnoseSubGroup> = [
+    ...diagnosis.duplicateBookFolders,
+    ...diagnosis.duplicateSubFolders,
+  ];
+  const summaryClass =
+    diagnosis.summary.duplicateGroupCount === 0
+      ? "border-emerald-300 bg-emerald-50 text-emerald-900"
+      : diagnosis.summary.requiresManualMergeCount > 0
+        ? "border-rose-300 bg-rose-50 text-rose-900"
+        : "border-amber-300 bg-amber-50 text-amber-900";
+  return (
+    <div className={`mt-3 rounded-lg border ${summaryClass}`}>
+      <button
+        onClick={onToggle}
+        className="flex w-full items-center justify-between px-3 py-2 text-sm font-semibold"
+      >
+        <span>
+          {diagnosis.summary.duplicateGroupCount === 0
+            ? "✅ 중복 폴더 없음 (모두 정상)"
+            : `🔍 중복 그룹 ${diagnosis.summary.duplicateGroupCount}개 발견 — 자동 안전 ${diagnosis.summary.autoSafeGroupCount}, 수동 병합 필요 ${diagnosis.summary.requiresManualMergeCount}`}
+        </span>
+        <span className="text-xs">{expanded ? "▲ 접기" : "▼ 펼치기"}</span>
+      </button>
+      {expanded && allGroups.length > 0 && (
+        <div className="space-y-2 border-t border-current/20 p-3">
+          {allGroups.map((g) => {
+            const key = groupKey(g);
+            const isOpen = expandedGroupKey === key;
+            return (
+              <DiagnosisGroupCard
+                key={key}
+                groupId={`diag-group-${key}`}
+                group={g}
+                expanded={isOpen}
+                onToggle={() => setExpandedGroupKey(isOpen ? null : key)}
+                manifestDetails={manifestDetails}
+                loadManifestDetail={loadManifestDetail}
+              />
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function DiagnosisGroupCard(props: {
+  groupId: string;
+  group: DiagnoseGroup | DiagnoseSubGroup;
+  expanded: boolean;
+  onToggle: () => void;
+  manifestDetails: Map<string, DiagnoseManifestResponse>;
+  loadManifestDetail: (folderId: string) => Promise<DiagnoseManifestResponse>;
+}) {
+  const { groupId, group, expanded, onToggle, manifestDetails, loadManifestDetail } = props;
+  const isSubGroup = "bookName" in group;
+  const title = isSubGroup ? `${group.bookName} → ${group.subName}` : group.name;
+  const cardColor = group.requiresManualMerge
+    ? "border-rose-400 bg-rose-50"
+    : group.manifestStale
+      ? "border-amber-400 bg-amber-50"
+      : "border-emerald-300 bg-emerald-50";
+  // 펼침 시 manifestPending 인 폴더 lazy load
+  useEffect(() => {
+    if (!expanded) return;
+    for (const f of group.folders) {
+      if (f.manifestPending && !manifestDetails.has(f.id)) {
+        void loadManifestDetail(f.id);
+      }
+    }
+  }, [expanded, group.folders, manifestDetails, loadManifestDetail]);
+  return (
+    <div id={groupId} className={`rounded border ${cardColor}`}>
+      <button onClick={onToggle} className="flex w-full items-center justify-between px-3 py-2 text-sm font-semibold">
+        <span>
+          {group.requiresManualMerge ? "❌ " : group.manifestStale ? "⚠️ " : "✅ "}
+          {isSubGroup ? "서브폴더" : "책 폴더"} 「{title}」 — {group.folders.length}개 인스턴스
+        </span>
+        <span className="text-xs">{expanded ? "▲" : "▼"}</span>
+      </button>
+      {expanded && (
+        <div className="space-y-2 border-t border-current/10 p-3 text-xs">
+          {group.requiresManualMerge ? (
+            <div className="rounded border border-rose-300 bg-white px-2 py-1.5 text-rose-800">
+              <strong>양쪽 폴더에 모두 파일이 있습니다.</strong> 자동 정리 위험 — 수동 병합 필요:
+              <ol className="ml-5 mt-1 list-decimal">
+                <li>아래 두 폴더를 새 탭으로 모두 엽니다.</li>
+                <li>{isSubGroup ? "" : "manifest 가진 폴더 (있으면) 또는 "}파일 더 많은 쪽으로 다른 폴더 파일을 드래그 이동합니다.</li>
+                <li>이동 후 빈 폴더를 휴지통으로 보냅니다.</li>
+                <li>이 페이지로 돌아와 「Drive 중복 폴더 진단」 다시 누름 → 그룹이 사라져야 정상.</li>
+              </ol>
+            </div>
+          ) : (
+            <div className="rounded border border-emerald-300 bg-white px-2 py-1.5 text-emerald-800">
+              <strong>자동 안전:</strong> 한쪽 폴더만 파일 있음. 빈 폴더 (아래 🗑 표시) 를 Drive 에서 휴지통으로 보내면 됩니다.
+              <div className="mt-1">권장 순서: 1) 빈 폴더 링크 새 탭으로 열기, 2) F5 한 번 (캐시 회피), 3) 진짜 비었으면 우클릭 → 삭제.</div>
+            </div>
+          )}
+          {isSubGroup && (
+            <div className="text-[11px] text-slate-600">
+              ※ ocr/pages 같은 서브폴더는 manifest.json 이 없는 게 정상. 파일 수만으로 판단합니다.
+            </div>
+          )}
+          <table className="w-full">
+            <thead className="text-[11px] text-slate-600">
+              <tr>
+                <th className="px-2 py-1 text-left">폴더 ID</th>
+                <th className="px-2 py-1 text-right">파일</th>
+                <th className="px-2 py-1 text-right">하위폴더</th>
+                {!isSubGroup && <th className="px-2 py-1 text-center">manifest</th>}
+                <th className="px-2 py-1 text-center">생성</th>
+                <th className="px-2 py-1 text-center">동작</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-current/10">
+              {group.folders.map((f) => {
+                const isKeep = group.recommendedKeepId === f.id;
+                const isTrash = group.recommendedTrashIds.includes(f.id);
+                const detail = manifestDetails.get(f.id);
+                const processedPages = detail?.ok && detail.processedPages !== undefined
+                  ? detail.processedPages
+                  : f.manifestProcessedPages;
+                return (
+                  <tr key={f.id} className={isKeep ? "bg-emerald-100/50" : isTrash ? "bg-rose-100/30" : ""}>
+                    <td className="px-2 py-1 font-mono text-[11px]">
+                      {isKeep ? "✅ keep " : isTrash ? "🗑 trash " : "  "}
+                      <span className="text-slate-700">{f.id.slice(0, 12)}…</span>
+                    </td>
+                    <td className="px-2 py-1 text-right font-semibold">{f.fileCount}</td>
+                    <td className="px-2 py-1 text-right text-slate-600">{f.folderCount}</td>
+                    {!isSubGroup && (
+                      <td className="px-2 py-1 text-center text-[11px]">
+                        {f.hasManifest ? (
+                          <span className="text-emerald-700">
+                            ✓
+                            {typeof processedPages === "number" && (
+                              <span className="ml-1 text-slate-600">
+                                ({processedPages}/{f.manifestTotalPages ?? "?"})
+                              </span>
+                            )}
+                            {f.manifestPending && !detail && <span className="ml-1 text-slate-400">로딩...</span>}
+                          </span>
+                        ) : (
+                          <span className="text-slate-400">없음</span>
+                        )}
+                      </td>
+                    )}
+                    <td className="px-2 py-1 text-center text-[11px] text-slate-600">
+                      {f.createdTime ? new Date(f.createdTime).toLocaleDateString("ko-KR") : "-"}
+                    </td>
+                    <td className="px-2 py-1 text-center">
+                      <a
+                        href={driveFolderUrl(f.id)}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="rounded border border-slate-300 bg-white px-1.5 py-0.5 text-[11px] text-indigo-700 hover:bg-indigo-50"
+                      >
+                        Drive 열기 ↗
+                      </a>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }

@@ -44,6 +44,8 @@ export type TextbookOcrBookInfo = {
   failedPages: Array<{ page: number; error: string }>;
   lastBuiltAt: string | null;
   status: TextbookOcrBookStatus;
+  /** PR-B 헬스체크가 manifest.json 에 누적한 경고들 — UI 카드 ⚠️/❌ 배지용. PR-A 시점엔 항상 빈 배열. */
+  warnings: string[];
 };
 
 export async function GET(req: NextRequest): Promise<Response> {
@@ -72,6 +74,7 @@ export async function GET(req: NextRequest): Promise<Response> {
         let totalPages: number | null = null;
         let failedPages: Array<{ page: number; error: string }> = [];
         let lastBuiltAt: string | null = null;
+        let warnings: string[] = [];
 
         try {
           const workFolderId = await findOrCreateChildFolder(targetFolderId, bookName);
@@ -79,7 +82,7 @@ export async function GET(req: NextRequest): Promise<Response> {
           const ocrFiles = await listDriveFolderFiles(ocrFolderId, new Set([".md"]));
           ocrMdCount = ocrFiles.length;
 
-          // manifest.json 다운로드 → totalPages, pageStatuses 추출
+          // manifest.json 다운로드 → totalPages, pageStatuses, warnings 추출
           const workFiles = await listDriveFolderFiles(workFolderId, new Set([".json"]));
           const manifestFile = workFiles.find((f) => f.name === "manifest.json");
           if (manifestFile) {
@@ -88,6 +91,7 @@ export async function GET(req: NextRequest): Promise<Response> {
               totalPages?: number;
               builtAt?: string;
               pageStatuses?: Array<{ page?: number; ok?: boolean; error?: string }>;
+              warnings?: string[];
             };
             totalPages = typeof parsed.totalPages === "number" ? parsed.totalPages : null;
             lastBuiltAt = typeof parsed.builtAt === "string" ? parsed.builtAt : null;
@@ -98,6 +102,11 @@ export async function GET(req: NextRequest): Promise<Response> {
                   page: p.page as number,
                   error: typeof p.error === "string" ? p.error.slice(0, 200) : "",
                 }));
+            }
+            if (Array.isArray(parsed.warnings)) {
+              warnings = parsed.warnings
+                .filter((w): w is string => typeof w === "string" && w.length > 0)
+                .map((w) => w.slice(0, 300));
             }
           }
         } catch {
@@ -120,6 +129,7 @@ export async function GET(req: NextRequest): Promise<Response> {
           failedPages,
           lastBuiltAt,
           status,
+          warnings,
         };
       }),
     );
