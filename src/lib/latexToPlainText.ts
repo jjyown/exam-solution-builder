@@ -78,6 +78,11 @@ export function simplifyLatexContent(value: string): string {
     .replace(/\\,/g, " ")
     .replace(/\{([^{}]+)\}/g, "$1")
     .replace(/\b(Leftrightarrow|Rightarrow|Leftarrow|rightarrow|leftarrow|mapsto|quad|qquad)\b/g, "")
+    .replace(/\\implies\b/g, "⟹")
+    .replace(/\\begin\{cases\}([\s\S]+?)\\end\{cases\}/g, (_m, body: string) => {
+      const rows = body.split(/\\\\/).map((r: string) => r.replace(/&.*/g, "").trim()).filter(Boolean);
+      return rows.map((r: string, i: number) => (i === 0 ? "{ " : "  ") + r).join("\n");
+    })
     .replace(/\\([A-Za-z]+)/g, "$1")
     .replace(/\biff\b/gi, "<=>")
     .replace(/\r\n/g, "\n")

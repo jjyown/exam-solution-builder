@@ -351,6 +351,7 @@ const SYMBOL_CMD: Record<string, string> = {
   /** ∑ ∫ ∏ 는 OMML n·각 요소로 처리(SYMBOL_CMD 에 두면 위·아래 첨자 결합이 깨짐) */
   otimes: "⊗",
   oplus: "⊕",
+  implies: "⟹",
 };
 
 const TRIG_LIKE = new Set([

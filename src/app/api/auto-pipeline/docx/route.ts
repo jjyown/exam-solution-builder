@@ -24,6 +24,69 @@ import {
 } from "@/lib/googleDrive";
 import { injectGeneratedGraphsIntoRuns } from "@/lib/explanationGraphInjection";
 
+// ── OCR 설정 ──────────────────────────────────────────────────────────────────
+const OCR_ENABLED = process.env.ENABLE_DOCX_OCR === "true";
+
+const OCR_EXTRACT_PROMPT = `이 수학 시험 문제 이미지에서 내용을 추출하세요.
+
+규칙:
+1. 한국어 텍스트 그대로 출력
+2. 수식: 인라인은 $...$, 별도 줄은 $$...$$ (LaTeX)
+3. 그래프/함수그래프/좌표계/기하도형이 있으면 matplotlib Python 코드로 재현:
+   \`\`\`python
+   import matplotlib.pyplot as plt
+   # 그래프 재현 코드
+   plt.savefig("output.png", dpi=150)
+   \`\`\`
+4. 보기(ㄱ, ㄴ, ㄷ)는 각 줄에
+5. HTML/마크다운 이미지 태그 없이 순수 텍스트/LaTeX/Python만 출력`.trim();
+
+/** Gemini Vision으로 이미지 → 텍스트/LaTeX 추출. 실패 시 "[이미지]" 반환. */
+async function callGeminiOcrVision(base64: string, mimeType: string): Promise<string> {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) return "[이미지]";
+  const model =
+    process.env.GEMINI_VISION_MODEL || process.env.GEMINI_MODEL || "gemini-2.5-flash";
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      contents: [
+        {
+          role: "user",
+          parts: [
+            { text: OCR_EXTRACT_PROMPT },
+            { inlineData: { mimeType, data: base64 } },
+          ],
+        },
+      ],
+      generationConfig: { temperature: 0.1 },
+    }),
+  });
+
+  if (!res.ok) {
+    throw new Error(`Gemini OCR ${res.status}: ${(await res.text()).slice(0, 300)}`);
+  }
+
+  const data = await res.json();
+  const text: string =
+    data?.candidates?.[0]?.content?.parts
+      ?.map((p: { text?: string }) => p.text)
+      .filter(Boolean)
+      .join("") || "";
+
+  const usage = data?.usageMetadata;
+  if (usage) {
+    console.log(
+      `[docx/ocr] tokens: input=${usage.promptTokenCount ?? "?"} output=${usage.candidatesTokenCount ?? "?"} total=${usage.totalTokenCount ?? "?"}`,
+    );
+  }
+
+  return text.trim() || "[이미지]";
+}
+
 type ParsedStep = { text: string; equation: string };
 type Parsed = {
   answer: string;
@@ -117,7 +180,32 @@ export async function POST(req: Request) {
 
   const examName = (body.examName || "해설지").trim();
 
-  // 그래프 후처리 — ```python``` 펜스 → matplotlib PNG → dataURL 마크다운.
+  // ── 1. questionImageDataUrl OCR 처리 ─────────────────────────────────────
+  // ENABLE_DOCX_OCR=true: Gemini Vision → OCR 텍스트로 questionText 대체
+  // ENABLE_DOCX_OCR=false(기본): 현행 유지 (이미지 그대로 embed)
+  if (OCR_ENABLED) {
+    body.runs = await Promise.all(
+      body.runs.map(async (r) => {
+        const dataUrl = r.questionImageDataUrl;
+        if (!dataUrl?.startsWith("data:image/")) return r;
+        const m = dataUrl.match(
+          /^data:image\/(png|jpe?g|webp);base64,([A-Za-z0-9+/=\s]+)$/,
+        );
+        if (!m) return r;
+        const mimeType = `image/${m[1] === "jpg" ? "jpeg" : m[1]}`;
+        try {
+          const ocrText = await callGeminiOcrVision(m[2].replace(/\s/g, ""), mimeType);
+          return { ...r, questionImageDataUrl: undefined, questionText: ocrText };
+        } catch (e) {
+          console.error("[docx/ocr] 실패:", (e as Error).message.slice(0, 200));
+          return r; // 실패 시 원본 유지 (이미지 embed 경로)
+        }
+      }),
+    );
+  }
+
+  // ── 2. 그래프 후처리 ─────────────────────────────────────────────────────
+  // ```python``` 펜스 → matplotlib PNG → dataURL 마크다운.
   // EXPLANATION_GRAPH_RUN env 가 켜진 환경에서만 실제 실행. 꺼져 있으면 그대로 통과.
   const { runs: processedRuns, logs: graphLogs } = await injectGeneratedGraphsIntoRuns(body.runs);
   if (graphLogs.length > 0) {
