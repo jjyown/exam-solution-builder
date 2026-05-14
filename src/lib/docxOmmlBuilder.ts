@@ -52,7 +52,9 @@ function stripTrailingEquationPeriodInMath(inner: string): string {
 }
 
 function preprocessInlineMath(inner: string): string {
-  const stripped = stripTrailingEquationPeriodInMath(inner);
+  const stripped = stripTrailingEquationPeriodInMath(inner)
+    // standalone \\ (LaTeX 줄바꿈) → 공백. \\명령어 앞 \\ 는 건드리지 않음.
+    .replace(/\\\\(?![A-Za-z])/g, " ");
   return normalizeNumericFractionInScripts(
     stripped
       /** 느슨한 sqrt 표기: \sqrt3 -> \sqrt{3}, \sqrt x -> \sqrt{x} */
@@ -352,6 +354,26 @@ const SYMBOL_CMD: Record<string, string> = {
   otimes: "⊗",
   oplus: "⊕",
   implies: "⟹",
+  land: "∧",
+  lor: "∨",
+  lnot: "¬",
+  neg: "¬",
+  forall: "∀",
+  exists: "∃",
+  nexists: "∄",
+  subset: "⊂",
+  supset: "⊃",
+  setminus: "∖",
+  sim: "∼",
+  simeq: "≃",
+  cong: "≅",
+  propto: "∝",
+  therefore: "∴",
+  because: "∵",
+  ell: "ℓ",
+  hbar: "ℏ",
+  Re: "ℜ",
+  Im: "ℑ",
 };
 
 const TRIG_LIKE = new Set([
@@ -504,7 +526,10 @@ function parseBackslashCommand(s: string): [MathComponent, string] | null {
   const sym = SYMBOL_CMD[cmd];
   if (sym !== undefined) return [boldMathRun(sym), afterCmd];
 
-  return [boldMathRun(cmd), afterCmd];
+  // SYMBOL_CMD에 없는 명령어 — explanationLatexToPlain으로 평문 유니코드 변환 시도.
+  // 변환이 의미 있으면(입력과 달라지면) TextRun으로 삽입. 수식 렌더링보다 못하지만 읽힘.
+  const plain = explanationLatexToPlain(`\\${cmd}`);
+  return [boldMathRun(plain !== `\\${cmd}` && plain ? plain : cmd), afterCmd];
 }
 
 function parseBase(s: string): [MathComponent, string] | null {

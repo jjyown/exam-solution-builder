@@ -47,6 +47,12 @@ type ApiResponse = {
 
 type Filter = "all" | "ok" | "fail" | "unreviewed" | "low-rated";
 
+function toKstDateStr(iso: string | null | undefined): string {
+  if (!iso) return "0000-00-00";
+  const d = new Date(new Date(iso).getTime() + 9 * 60 * 60 * 1000);
+  return d.toISOString().slice(0, 10);
+}
+
 function fmtTime(iso: string) {
   try {
     return new Date(iso).toLocaleString("ko-KR", { hour12: false });
@@ -272,21 +278,18 @@ export default function InboxPage() {
     });
   }, [rows, search, filter]);
 
-  // 시험명 → row[] 그룹화. 시험명 없는 것은 「(시험명 미지정)」 으로.
+  // KST 날짜 + 시험명 → row[] 그룹화. 같은 날 같은 시험이 하나의 작업 묶음.
   const grouped = useMemo(() => {
     const map = new Map<string, RunRow[]>();
     for (const r of filtered) {
-      const key = (r.exam_name ?? "").trim() || "(시험명 미지정)";
+      const examLabel = (r.exam_name ?? "").trim() || "(시험명 미지정)";
+      const key = `${toKstDateStr(r.created_at)}__${examLabel}`;
       const arr = map.get(key) ?? [];
       arr.push(r);
       map.set(key, arr);
     }
-    // 그룹 순서: 그룹 안 가장 최근 created_at 기준 desc
-    return Array.from(map.entries()).sort((a, b) => {
-      const aTop = a[1][0]?.created_at ?? "";
-      const bTop = b[1][0]?.created_at ?? "";
-      return bTop.localeCompare(aTop);
-    });
+    // 최근 날짜 위 (key가 "YYYY-MM-DD__..." prefix이므로 사전역순 = 날짜역순)
+    return Array.from(map.entries()).sort((a, b) => b[0].localeCompare(a[0]));
   }, [filtered]);
 
   /**
@@ -510,28 +513,33 @@ export default function InboxPage() {
 
       {/* 그룹 카드 */}
       <div className="space-y-4">
-        {grouped.map(([examName, groupRows]) => {
+        {grouped.map(([groupKey, groupRows]) => {
+          const [dateStr, ...rest] = groupKey.split("__");
+          const examName = rest.join("__");
+          const displayDate = (dateStr && dateStr !== "0000-00-00")
+            ? dateStr.replace(/-/g, ".") // "2026.05.14"
+            : null;
           const okCount = groupRows.filter((r) => r.ok).length;
           const reviewedCount = groupRows.filter((r) => r.reviewed_at).length;
           const isUngrouped = examName === "(시험명 미지정)";
           const cropHref = isUngrouped ? "/crop" : `/crop?examName=${encodeURIComponent(examName)}`;
-          const expanded = isExpanded(examName, groupRows.length);
+          const expanded = isExpanded(groupKey, groupRows.length);
           return (
             <div
-              key={examName}
+              key={groupKey}
               className="overflow-hidden rounded-lg border border-slate-200 bg-white"
             >
               <div
                 className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 bg-slate-50 px-4 py-2.5 hover:bg-slate-100"
-                onClick={() => toggleGroup(examName, groupRows.length)}
+                onClick={() => toggleGroup(groupKey, groupRows.length)}
                 role="button"
                 tabIndex={0}
                 aria-expanded={expanded}
-                aria-controls={`inbox-group-body-${encodeURIComponent(examName)}`}
+                aria-controls={`inbox-group-body-${encodeURIComponent(groupKey)}`}
                 onKeyDown={(e) => {
                   if (e.key === "Enter" || e.key === " ") {
                     e.preventDefault();
-                    toggleGroup(examName, groupRows.length);
+                    toggleGroup(groupKey, groupRows.length);
                   }
                 }}
                 style={{ cursor: "pointer" }}
@@ -547,7 +555,12 @@ export default function InboxPage() {
                     ▶
                   </span>
                   <div>
-                    <div className="text-sm font-bold text-slate-800">{examName}</div>
+                    <div className="text-sm font-bold text-slate-800">
+                      {displayDate && (
+                        <span className="mr-1.5 font-normal text-slate-500">{displayDate} ·</span>
+                      )}
+                      {examName}
+                    </div>
                     <div className="text-[11px] text-slate-500">
                       {groupRows.length}건 · 성공 {okCount} / 검수 {reviewedCount}
                       {!expanded && (
@@ -579,7 +592,7 @@ export default function InboxPage() {
               </div>
               {expanded && (
               <table
-                id={`inbox-group-body-${encodeURIComponent(examName)}`}
+                id={`inbox-group-body-${encodeURIComponent(groupKey)}`}
                 className="w-full text-xs"
               >
                 <thead className="text-left text-[11px] uppercase tracking-wide text-slate-500">

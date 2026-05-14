@@ -18,6 +18,7 @@ import { NextResponse } from "next/server";
 import { buildExamExplanationDocxBuffer } from "@/lib/examExplanationDocx";
 import {
   getDriveClient,
+  findOrCreateChildFolder,
   isGoogleDriveConfigured,
   resolveDriveWorkCompleteFolderId,
   uploadBufferToDriveFolder,
@@ -113,6 +114,16 @@ type Body = {
   examName?: string;
   runs?: RunItem[];
 };
+
+function safeExamFolder(name: string): string {
+  return (name || "기타").replace(/[\\/:*?"<>|]/g, "_").slice(0, 50);
+}
+
+function toKstDateTimeStr(): string {
+  // UTC → KST(+9) → "YYYY-MM-DD HH-mm" (콜론은 Drive 폴더명 불가 → 하이픈)
+  const d = new Date(Date.now() + 9 * 60 * 60 * 1000);
+  return d.toISOString().slice(0, 16).replace("T", " ").replace(":", "-");
+}
 
 /**
  * questionText에서 노이즈(시험지 메타·번호 머리)를 떼고 본문만 남긴다.
@@ -233,7 +244,9 @@ export async function POST(req: Request) {
     if (isGoogleDriveConfigured()) {
       try {
         const drive = getDriveClient();
-        const folderId = await resolveDriveWorkCompleteFolderId(drive);
+        const workCompleteFolderId = await resolveDriveWorkCompleteFolderId(drive);
+        const examFolderId = await findOrCreateChildFolder(workCompleteFolderId, safeExamFolder(examName));
+        const folderId = await findOrCreateChildFolder(examFolderId, toKstDateTimeStr());
         const up = await uploadBufferToDriveFolder({
           folderId,
           fileName: docxFileName,

@@ -40,6 +40,7 @@ import { NextResponse } from 'next/server';
 import { recordAutoPipelineRun } from '@/lib/autoPipelineLog';
 import { logApiCall } from '@/lib/apiCallLogger';
 import { geminiModelFor, type Profile } from '@/lib/profileRouting';
+import { explanationLatexToPlain } from '@/lib/latexToPlainText';
 
 type ParsedStep = { text: string; equation: string };
 type Parsed = {
@@ -158,7 +159,7 @@ function safeParseJson(raw: string): Parsed | null {
       explanation_steps: obj.explanation_steps.map((s: unknown) => {
         const o = (s ?? {}) as { text?: unknown; equation?: unknown };
         return {
-          text: typeof o.text === 'string' ? o.text : '',
+          text: typeof o.text === 'string' ? explanationLatexToPlain(o.text) : '',
           equation: typeof o.equation === 'string' ? o.equation : '',
         };
       }),
