@@ -17,7 +17,7 @@ import {
   BorderStyle,
   TableLayoutType,
 } from "docx";
-import { explanationLineToParagraphChildren } from "@/lib/docxOmmlBuilder";
+import { renderLatexToPng } from "@/lib/equationRenderer";
 import {
   imageRunFromBuffer,
   isDocxOmittedTypingReferenceCropMarkdownLine,
@@ -47,6 +47,53 @@ function bodyTextRun(opts: { text: string; bold?: boolean; size?: number }) {
     size: opts.size ?? EXAM_DOCX_BODY_SIZE_HALF_PT,
     font: EXAM_DOCX_FONT,
   });
+}
+
+/**
+ * LaTeX 토큰(`$...$`, `$$...$$`)을 ImageRun(PNG) 으로, 나머지 텍스트는 TextRun 으로 변환.
+ * MathJax → SVG → resvg PNG 경로로 모든 LaTeX 명령어를 그래픽 임베드한다.
+ */
+function latexAwareLineToParagraphChildren(
+  line: string,
+  opts?: { bold?: boolean },
+): ParagraphChild[] {
+  const children: ParagraphChild[] = [];
+  // $$...$$ 우선 → $...$ 순으로 토큰화. `$` 안에는 줄바꿈 없는 inline 만.
+  const tokenRe = /\$\$([\s\S]+?)\$\$|\$([^$\n]+)\$/g;
+  let lastIdx = 0;
+  let m: RegExpExecArray | null;
+  while ((m = tokenRe.exec(line)) !== null) {
+    if (m.index > lastIdx) {
+      const plain = line.slice(lastIdx, m.index);
+      if (plain) children.push(bodyTextRun({ text: plain, bold: opts?.bold }));
+    }
+    const displayInner = m[1];
+    const inlineInner = m[2];
+    const latex = (displayInner ?? inlineInner ?? "").trim();
+    if (latex) {
+      try {
+        const png = renderLatexToPng(latex, { displayMode: !!displayInner });
+        children.push(
+          new ImageRun({
+            data: png.buffer,
+            transformation: { width: png.widthPx, height: png.heightPx },
+            type: "png",
+          } as ConstructorParameters<typeof ImageRun>[0]),
+        );
+      } catch (e) {
+        // 빈 LaTeX/5000자 초과 → 원문 텍스트로 fallback
+        console.warn("[examExplanationDocx] 수식 렌더 실패, 텍스트 폴백:", (e as Error).message);
+        children.push(bodyTextRun({ text: latex, bold: opts?.bold }));
+      }
+    }
+    lastIdx = m.index + m[0].length;
+  }
+  if (lastIdx < line.length) {
+    const tail = line.slice(lastIdx);
+    if (tail) children.push(bodyTextRun({ text: tail, bold: opts?.bold }));
+  }
+  if (children.length === 0) children.push(bodyTextRun({ text: line, bold: opts?.bold }));
+  return children;
 }
 
 async function forceBoldAllRunsInDocx(buffer: Buffer): Promise<Buffer> {
@@ -518,7 +565,7 @@ async function paragraphChildrenForDocxLine(
       }),
     ];
   }
-  return explanationLineToParagraphChildren(normalizedLine, { bold: renderOpts?.boldContent });
+  return latexAwareLineToParagraphChildren(normalizedLine, { bold: renderOpts?.boldContent });
 }
 
 function isSingleImageRunParagraph(children: ParagraphChild[]): boolean {
@@ -610,7 +657,7 @@ function normalizeQuickAnswerForMath(answer: string): string {
 
 function quickAnswerLineChildren(questionLabel: string, quickAnswerText: string): ParagraphChild[] {
   const answerMathText = normalizeQuickAnswerForMath(quickAnswerText);
-  const answerChildren = explanationLineToParagraphChildren(answerMathText, { bold: true });
+  const answerChildren = latexAwareLineToParagraphChildren(answerMathText, { bold: true });
   return [bodyTextRun({ text: `${questionLabel}. [정답] `, bold: true }), ...answerChildren];
 }
 
