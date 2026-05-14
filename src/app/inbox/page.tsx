@@ -387,10 +387,7 @@ export default function InboxPage() {
   }
 
   // 호출 편의 wrapper — 기존 함수명 유지(버튼 핸들러 변경 최소화)
-  const downloadSingleHml = (row: RunRow) => downloadSingle("hml", row);
   const downloadSingleDocx = (row: RunRow) => downloadSingle("docx", row);
-  const downloadGroupHml = (examName: string, groupRows: RunRow[]) =>
-    downloadGroup("hml", examName, groupRows);
   const downloadGroupDocx = (examName: string, groupRows: RunRow[]) =>
     downloadGroup("docx", examName, groupRows);
 
@@ -570,16 +567,6 @@ export default function InboxPage() {
                   >
                     ✂ 크롭에서 이어서
                   </Link>
-                  {/* HWP — 메인 포맷 (한컴 한글). /auto 와 동일 스타일. */}
-                  <button
-                    onClick={() => downloadGroupHml(examName, groupRows)}
-                    disabled={busyDocxId === `group:${examName}`}
-                    className="rounded border border-indigo-700 bg-indigo-700 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-indigo-800 disabled:opacity-60"
-                    title="이 시험명 묶음을 HWP/HML 로 다운로드 — 한컴 한글에서 바로 열림 (메인 포맷)"
-                  >
-                    {busyDocxId === `group:${examName}` ? "묶는 중…" : "📕 묶음 HWP"}
-                  </button>
-                  {/* DOCX — 보조 포맷. */}
                   <button
                     onClick={() => downloadGroupDocx(examName, groupRows)}
                     disabled={busyDocxId === `group:${examName}`}
@@ -709,16 +696,6 @@ export default function InboxPage() {
                               >
                                 자동에서 열기
                               </Link>
-                              {/* HWP — 메인 포맷 (한컴 한글). */}
-                              <button
-                                onClick={() => downloadSingleHml(r)}
-                                disabled={docxBtnDisabled}
-                                className="rounded border border-indigo-700 bg-indigo-700 px-2 py-0.5 text-[11px] font-semibold text-white hover:bg-indigo-800 disabled:opacity-50"
-                                title={r.parsed ? "이 풀이를 HWP/HML 단건 다운로드 — 한컴에서 바로 열림 (메인)" : "parsed 결과가 없어 HWP 생성 불가"}
-                              >
-                                {busyDocxId === r.id ? "받는 중…" : "📕 HWP"}
-                              </button>
-                              {/* DOCX — 보조 포맷. */}
                               <button
                                 onClick={() => downloadSingleDocx(r)}
                                 disabled={docxBtnDisabled}

@@ -664,8 +664,6 @@ export default function CropPage() {
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
   }
-  // 호출 편의 wrapper — 버튼에서 직접 호출 시 가독성용
-  const downloadHmlAll = () => downloadAll("hml");
   const downloadDocxAll = () => downloadAll("docx");
 
   const activeSrc = sources[activePage];
@@ -984,16 +982,6 @@ export default function CropPage() {
               >
                 ▶ 모두 풀이
               </button>
-              {/* HWP — 메인 포맷 (한컴 한글). /auto 와 동일하게 인디고 채움 버튼. */}
-              <button
-                onClick={downloadHmlAll}
-                disabled={crops.filter((c) => c.parsed).length === 0}
-                className="rounded-md border border-indigo-700 bg-indigo-700 px-3 py-1.5 text-xs font-semibold text-white hover:bg-indigo-800 disabled:cursor-not-allowed disabled:opacity-50"
-                title="성공한 크롭들을 한 HWP/HML 파일로 묶어 다운로드 — 한컴 한글에서 바로 열림 (메인 포맷)"
-              >
-                📕 전체 HWP ({crops.filter((c) => c.parsed).length}문항)
-              </button>
-              {/* DOCX — 보조 포맷 (외부 공유·Drive 미리보기용). 흰 배경 outline 버튼. */}
               <button
                 onClick={downloadDocxAll}
                 disabled={crops.filter((c) => c.parsed).length === 0}

@@ -1319,54 +1319,6 @@ export default function AutoPipelinePage() {
     URL.revokeObjectURL(url);
   }
 
-  async function downloadHml(scope: 'active' | 'all') {
-    if (!result) return;
-    const runs =
-      scope === 'all'
-        ? (result.runs ?? []).filter((r) => r.parsed)
-        : activeRun?.parsed
-          ? [activeRun]
-          : [];
-    if (runs.length === 0) return;
-    const res = await fetch('/api/auto-pipeline/hml', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        examName: examName || '해설지',
-        runs: runs.map((r) => ({
-          questionNo: r.questionNo,
-          questionText: r.questionText,
-          parsed: r.parsed,
-        })),
-      }),
-    });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      alert(`HWP/HML 생성 실패: ${err.error ?? res.statusText}`);
-      return;
-    }
-    const blob = await res.blob();
-    const cd = res.headers.get('content-disposition') ?? '';
-    const filenameMatch = cd.match(/filename="?([^";]+)"?/);
-    const fallback = `${examName || 'explanation'}_${runs.length}q.hml`;
-    const filename = filenameMatch ? decodeURIComponent(filenameMatch[1]) : fallback;
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = filename;
-    a.click();
-    URL.revokeObjectURL(url);
-
-    // Drive 작업완료 폴더에도 자동 업로드된 결과를 페이지에 노출 — DOCX 와 동등
-    const driveLink = res.headers.get('x-drive-web-view-link');
-    const driveErr = res.headers.get('x-drive-upload-error');
-    if (driveLink) {
-      setDriveUploadInfo({ link: driveLink, fileName: filename, error: null });
-    } else if (driveErr) {
-      setDriveUploadInfo({ link: null, fileName: filename, error: decodeURIComponent(driveErr) });
-    }
-  }
-
   async function downloadDocx(scope: 'active' | 'all') {
     if (!result) return;
     const runs =
@@ -2277,7 +2229,6 @@ export default function AutoPipelinePage() {
           onDownloadJson={downloadJson}
           onCopyMd={copyAsMarkdown}
           onDownloadDocx={downloadDocx}
-          onDownloadHml={downloadHml}
           onDownloadRunsCsv={downloadRunsCsv}
           onDownloadRunsJson={downloadRunsJson}
           driveUploadInfo={driveUploadInfo}
@@ -2307,7 +2258,6 @@ function ResultsSection(props: {
   onDownloadJson: () => void;
   onCopyMd: () => void;
   onDownloadDocx: (scope: 'active' | 'all') => void;
-  onDownloadHml: (scope: 'active' | 'all') => void;
   onDownloadRunsCsv: () => void;
   onDownloadRunsJson: () => void;
   driveUploadInfo: { link: string | null; fileName: string; error: string | null } | null;
@@ -2323,7 +2273,6 @@ function ResultsSection(props: {
   const active = runs[activeIdx] ?? runs[0];
   const totalCostCents = runs.reduce((s, r) => s + (r.approxCostCents ?? 0), 0);
   const [docxBusy, setDocxBusy] = useState<null | 'active' | 'all'>(null);
-  const [hmlBusy, setHmlBusy] = useState<null | 'active' | 'all'>(null);
   const [previewScope, setPreviewScope] = useState<null | 'active' | 'all'>(null);
   async function handleDocx(scope: 'active' | 'all') {
     setDocxBusy(scope);
@@ -2333,15 +2282,6 @@ function ResultsSection(props: {
       setDocxBusy(null);
     }
   }
-  async function handleHml(scope: 'active' | 'all') {
-    setHmlBusy(scope);
-    try {
-      await props.onDownloadHml(scope);
-    } finally {
-      setHmlBusy(null);
-    }
-  }
-
   // 응답이 최상위 error만 있는 경우 (예: invalid body)
   if (!active && result.error) {
     return (
@@ -2410,14 +2350,6 @@ function ResultsSection(props: {
                 title="DOCX 다운로드 전에 결과물이 어떻게 나올지 화면에서 미리보기"
               >
                 📄 전체 미리보기
-              </button>
-              <button
-                onClick={() => handleHml('all')}
-                disabled={successCount === 0 || hmlBusy !== null}
-                className="rounded-md border border-indigo-700 bg-indigo-700 px-3 py-1 text-[11px] font-semibold text-white hover:bg-indigo-800 disabled:cursor-not-allowed disabled:opacity-50"
-                title="성공한 문항을 한 HWP/HML 파일로 묶어서 다운로드 — 한컴 한글에서 바로 열림 (메인 포맷)"
-              >
-                {hmlBusy === 'all' ? 'HWP 생성 중…' : `📕 전체 HWP (${successCount}문항)`}
               </button>
               <button
                 onClick={() => handleDocx('all')}
@@ -2547,14 +2479,6 @@ function ResultsSection(props: {
                 title="이 문항이 DOCX에서 어떻게 나올지 미리보기"
               >
                 📄 미리보기
-              </button>
-              <button
-                onClick={() => handleHml('active')}
-                disabled={!active.parsed || hmlBusy !== null}
-                className="rounded border border-indigo-700 bg-indigo-600 px-2 py-1 text-[11px] font-semibold text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-40"
-                title="이 문항을 HWP/HML 로 다운로드 — 한컴 한글에서 바로 열림 (메인 포맷)"
-              >
-                {hmlBusy === 'active' ? 'HWP…' : '📕 HWP'}
               </button>
               <button
                 onClick={() => handleDocx('active')}
