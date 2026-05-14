@@ -4,7 +4,7 @@
  * - 2차: **정밀 LaTeX 잔존** — 인라인·표시 달러 수식·마크다운 코드 펜스 밖의 \\frac·\\begin·\\[·미닫힌 달러 등(`explanationLatexArtifactScan`)
  * - 3차: 집합·구간 표기(∈, \\in[ … ])로 값의 범위를 적는 문장 — 고교 교재에서는 부등식 사슬로 바꿈
  * - 4차: 수식만 끝나는 줄·블록의 마침표(소수점 오인) — 문장형 한글 술어가 있을 때만 `.` 허용
- * - 5차(경고): [해설] 안에 마크다운 그림 줄 — HML 동선상 발문 아래([문제] 블록)로 두는 것이 규칙
+ * - 5차(경고): [해설] 안에 마크다운 그림 줄 — 표준 동선상 발문 아래([문제] 블록)로 두는 것이 규칙
  * - 6차: `<보기>`…`</보기>` 짝·빈 블록·과도하게 긴 한 줄(2단 DOCX 보기 박스 눌림 유발 가능)
  * - DOCX: [문제] 안의 `![문제 원본](…)` 등 **타이핑 참고용 크롭**은 삽입 생략(그래프·도형만 유지). `examExplanationDocx` + `docxMarkdownImage.isDocxOmittedTypingReferenceCropAlt`
  */
@@ -58,7 +58,7 @@ export function findFigureMarkdownInExplanation(
     /** 자동 생성·manifest 주입 `![참고 도형 …]` 은 [해설] 직후 허용(파이프라인 Step 3). */
     if (/^\s*!\[\s*참고\s*도형/i.test(line)) return;
     w.push(
-      `${displayLabel}: [해설] ${i + 1}행에 그림(![](…))이 있습니다. 참고 HML·DOCX는 그림을 해당 문항 [문제] 블록(발문·선지 바로 아래)에 둡니다.`,
+      `${displayLabel}: [해설] ${i + 1}행에 그림(![](…))이 있습니다. 표준 DOCX는 그림을 해당 문항 [문제] 블록(발문·선지 바로 아래)에 둡니다.`,
     );
   });
   return w;

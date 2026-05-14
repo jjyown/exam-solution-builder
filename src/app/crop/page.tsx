@@ -615,17 +615,13 @@ export default function CropPage() {
     }
   }
 
-  /**
-   * 성공한 크롭들로 묶음 다운로드를 수행한다.
-   * format='hml' 이 메인(한컴 한글) — /auto 와 동일.
-   * format='docx' 는 외부 공유·Drive 미리보기용 보조.
-   */
-  async function downloadAll(format: "hml" | "docx") {
+  /** 성공한 크롭들을 DOCX 묶음으로 다운로드 + Drive 자동 백업. */
+  async function downloadDocxAll() {
     const successRuns = crops
       .filter((c) => c.parsed)
       .map((c) => ({
         questionNo: c.questionNo,
-        // 잘라낸 이미지를 마크다운 이미지 라인으로 전달 → DOCX/HML 빌더가 dataURL 디코드해 임베드
+        // 잘라낸 이미지를 마크다운 이미지 라인으로 전달 → DOCX 빌더가 dataURL 디코드해 임베드
         questionText: `![문제 원본 — ${c.pageLabel}](${c.imageDataUrl})`,
         parsed: c.parsed,
       }));
@@ -633,10 +629,7 @@ export default function CropPage() {
       alert("성공한 크롭이 없습니다.");
       return;
     }
-    const endpoint =
-      format === "hml" ? "/api/auto-pipeline/hml" : "/api/auto-pipeline/docx";
-    const labelUpper = format === "hml" ? "HWP/HML" : "DOCX";
-    const res = await fetch(endpoint, {
+    const res = await fetch("/api/auto-pipeline/docx", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -646,14 +639,13 @@ export default function CropPage() {
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
-      alert(`${labelUpper} 생성 실패: ${err.error ?? res.statusText}`);
+      alert(`DOCX 생성 실패: ${err.error ?? res.statusText}`);
       return;
     }
     const blob = await res.blob();
-    // /auto 와 동일하게 서버가 content-disposition 으로 파일명 지정해 주면 그걸 우선 사용
     const cd = res.headers.get("content-disposition") ?? "";
     const filenameMatch = cd.match(/filename="?([^";]+)"?/);
-    const fallback = `${examName || "크롭_해설지"}_${successRuns.length}q.${format}`;
+    const fallback = `${examName || "크롭_해설지"}_${successRuns.length}q.docx`;
     const filename = filenameMatch ? decodeURIComponent(filenameMatch[1]) : fallback;
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -664,7 +656,6 @@ export default function CropPage() {
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
   }
-  const downloadDocxAll = () => downloadAll("docx");
 
   const activeSrc = sources[activePage];
 
@@ -986,7 +977,7 @@ export default function CropPage() {
                 onClick={downloadDocxAll}
                 disabled={crops.filter((c) => c.parsed).length === 0}
                 className="rounded-md border border-slate-400 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
-                title="외부 공유·Google Drive 미리보기용 (보조 포맷). 학원 내부 작업은 HWP 권장"
+                title="DOCX 다운로드 + Google Drive 자동 백업"
               >
                 DOCX ({crops.filter((c) => c.parsed).length})
               </button>

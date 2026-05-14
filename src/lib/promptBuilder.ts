@@ -95,7 +95,7 @@ ${questionText.trim()}
 위 형식의 JSON만 출력하세요.`;
 }
 
-// 수학비서 HWP 수식 스크립트는 LLM 프롬프트에 그대로 넣어도 OK (참고용이므로).
+// 수학비서 수식 스크립트는 LLM 프롬프트에 그대로 넣어도 OK (참고용이므로).
 // 다만 \u0001 같은 분리자가 남아 있으면 제거.
 function cleanForPrompt(s: string): string {
   return s.replace(/[\u0001\u0002]/g, '').slice(0, 1500);

@@ -147,7 +147,7 @@ function renderRunAsBlock(run: RunItem): string {
   const lines: string[] = [];
   lines.push(`[문항 ${run.questionNo}]`);
   lines.push(`[문제]`);
-  // 원본 크롭 이미지가 있으면 마크다운 이미지 라인으로 삽입 — DOCX/HML 빌더가
+  // 원본 크롭 이미지가 있으면 마크다운 이미지 라인으로 삽입 — DOCX 빌더가
   // parseMarkdownImageLine + bufferFromDataUrl 로 자동 임베드.
   if (run.questionImageDataUrl && run.questionImageDataUrl.startsWith("data:image/")) {
     lines.push(`![문항 ${run.questionNo} 원본 이미지](${run.questionImageDataUrl})`);

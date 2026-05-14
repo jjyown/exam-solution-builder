@@ -2355,7 +2355,7 @@ function ResultsSection(props: {
                 onClick={() => handleDocx('all')}
                 disabled={successCount === 0 || docxBusy !== null}
                 className="rounded-md border border-slate-400 bg-white px-3 py-1 text-[11px] font-semibold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
-                title="외부 공유·Google Drive 미리보기용 (보조 포맷). 학원 내부 작업은 HWP 권장"
+                title="DOCX 다운로드 + Google Drive 자동 백업"
               >
                 {docxBusy === 'all' ? 'DOCX 중…' : `DOCX (${successCount})`}
               </button>

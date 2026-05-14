@@ -95,7 +95,7 @@ function rasterDimensions(buf: Buffer, t: RasterType): { w: number; h: number } 
 
 /**
  * 2단 칼럼 기준 단일 칼럼 너비에 맞게 픽셀 단위로 축소(docx ImageRun 은 px → 내부 EMU 변환).
- * B4·HML 여백(`examDocxTheme` EXAM_DOCX_HML_PAGE)에 맞춘 본문 단 너비보다 크지 않게 상한을 둔다.
+ * B4 여백(`examDocxTheme` EXAM_DOCX_PAGE)에 맞춘 본문 단 너비보다 크지 않게 상한을 둔다.
  */
 const MAX_DISPLAY_WIDTH_PX = 280;
 

@@ -69,7 +69,7 @@ function preprocessInlineMath(inner: string): string {
       .replace(/\\dfrac(?!\{)\s*(\d)\s*(\d)(?![0-9])/g, "\\frac{$1}{$2}")
       .replace(/\\tfrac(?!\{)\s*(\d)\s*(\d)(?![0-9])/g, "\\frac{$1}{$2}")
       .replace(/\\displaystyle\s*|\\textstyle\s*|\\scriptstyle\s*|\\scriptscriptstyle\s*/g, "")
-      /** HWP·복사 붙여넣기에서 쓰이는 중점·곱점 → LaTeX (OMML 파서가 인식) */
+      /** 복사 붙여넣기에서 쓰이는 중점·곱점 → LaTeX (OMML 파서가 인식) */
       .replace(/\u00B7|\u2219|\u22C5|·/g, "\\cdot ")
       .replace(/\\dfrac\b|\\tfrac\b/g, "\\frac")
       /** 일부 편집기·복사 과정에서 `\frac` 앞 역슬래시만 `#`으로 깨지는 경우 */
@@ -684,7 +684,7 @@ function normalizeExplanationPedagogyKorean(line: string): string {
     .replace(/\bLeftarrow\b/g, "⇐")
     .replace(/\bLeftr\b/g, "<=>")
     .replace(/\biff\b/gi, "<=>")
-    /** 보기 소항: `**ㄱ.**` → `ㄱ) ` (HML·교재형), 줄 아무 곳에서나 */
+    /** 보기 소항: `**ㄱ.**` → `ㄱ) ` (교재형), 줄 아무 곳에서나 */
     .replace(/\*\*ㄱ\.\*\*\s*/gu, "ㄱ) ")
     .replace(/\*\*ㄴ\.\*\*\s*/gu, "ㄴ) ")
     .replace(/\*\*ㄷ\.\*\*\s*/gu, "ㄷ) ")

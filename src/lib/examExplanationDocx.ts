@@ -30,7 +30,7 @@ import {
   EXAM_DOCX_BODY_SIZE_HALF_PT,
   EXAM_DOCX_EXPLANATION_PARAGRAPH_INDENT_TWIPS,
   EXAM_DOCX_FONT,
-  EXAM_DOCX_HML_PAGE,
+  EXAM_DOCX_PAGE,
   EXAM_DOCX_INTER_QUESTION_BEFORE_TWIPS,
   EXAM_DOCX_SECTION_TITLE_HALF_PT,
   EXAM_DOCX_SINGLE_COLUMN_WIDTH_TWIPS,
@@ -120,7 +120,7 @@ const EXAM_DOCX_CHOICES_BOX_BORDER = {
   color: "666666",
 } as const;
 
-/** 문항 블록을 한 덩어리로 묶어 페이지 경계에서 잘리지 않게 한다(HML과 동일하게 통째로 다음 페이지). */
+/** 문항 블록을 한 덩어리로 묶어 페이지 경계에서 잘리지 않게 한다(통째로 다음 페이지). */
 const EXAM_DOCX_QUESTION_WRAPPER_BORDERS = {
   top: { style: BorderStyle.NIL, size: 0, color: "FFFFFF" },
   bottom: { style: BorderStyle.NIL, size: 0, color: "FFFFFF" },
@@ -615,7 +615,7 @@ function quickAnswerLineChildren(questionLabel: string, quickAnswerText: string)
 }
 
 /**
- * HML·`[TEST] TEST1.hml` 과 같은 **대역 순서**(편집본 DOCX와 동일한 **구분 폼**):
+ * 시험지 해설 표준 **대역 순서**:
  * 1) 문항 순서대로 **문제** 전체(섹션·2단) — `N. 발문…`, 문항은 `w:cantSplit` 표로 묶어 페이지 가운데에서 잘리지 않게 함
  * 2) **다음 면**에서 **`[빠른정답]`**(1단·전체 너비) — 문항마다 `N. [정답] 값` 한 줄
  * 3) **그다음 면**에서 **`[해설]`**(2단) — 문항마다 `N. [정답] 값` 다음 줄에 `[해설]` 후 본문
@@ -623,7 +623,7 @@ function quickAnswerLineChildren(questionLabel: string, quickAnswerText: string)
 type ExamExplanationSectionChildren = {
   /** 2단 본문 — 문항 단위 `cantSplit` 표로 감싼 블록 */
   problemChildren: (Paragraph | Table)[];
-  /** 1단 — `[빠른정답]` 다음 페이지(HML 표 전체 너비에 가깝게) */
+  /** 1단 — `[빠른정답]` 다음 페이지(전체 너비에 가깝게) */
   quickAnswerChildren: (Paragraph | Table)[];
   /** 2단 — `[해설]` 다음 페이지 */
   explanationChildren: (Paragraph | Table)[];
@@ -858,8 +858,8 @@ export async function buildExamExplanationDocxBuffer(params: BuildExamExplanatio
       {
         properties: {
           page: {
-            size: EXAM_DOCX_HML_PAGE.size,
-            margin: EXAM_DOCX_HML_PAGE.margin,
+            size: EXAM_DOCX_PAGE.size,
+            margin: EXAM_DOCX_PAGE.margin,
           },
         },
         children: [
@@ -886,12 +886,12 @@ export async function buildExamExplanationDocxBuffer(params: BuildExamExplanatio
         properties: {
           type: SectionType.NEXT_PAGE,
           page: {
-            size: EXAM_DOCX_HML_PAGE.size,
-            margin: EXAM_DOCX_HML_PAGE.margin,
+            size: EXAM_DOCX_PAGE.size,
+            margin: EXAM_DOCX_PAGE.margin,
           },
           column: {
             count: 2,
-            space: EXAM_DOCX_HML_PAGE.columnSpaceTwips,
+            space: EXAM_DOCX_PAGE.columnSpaceTwips,
             separate: true,
           },
         },
@@ -902,8 +902,8 @@ export async function buildExamExplanationDocxBuffer(params: BuildExamExplanatio
         properties: {
           type: SectionType.NEXT_PAGE,
           page: {
-            size: EXAM_DOCX_HML_PAGE.size,
-            margin: EXAM_DOCX_HML_PAGE.margin,
+            size: EXAM_DOCX_PAGE.size,
+            margin: EXAM_DOCX_PAGE.margin,
           },
           column: { count: 1 },
         },
@@ -913,12 +913,12 @@ export async function buildExamExplanationDocxBuffer(params: BuildExamExplanatio
         properties: {
           type: SectionType.NEXT_PAGE,
           page: {
-            size: EXAM_DOCX_HML_PAGE.size,
-            margin: EXAM_DOCX_HML_PAGE.margin,
+            size: EXAM_DOCX_PAGE.size,
+            margin: EXAM_DOCX_PAGE.margin,
           },
           column: {
             count: 2,
-            space: EXAM_DOCX_HML_PAGE.columnSpaceTwips,
+            space: EXAM_DOCX_PAGE.columnSpaceTwips,
             separate: true,
           },
         },
