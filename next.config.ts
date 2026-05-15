@@ -17,6 +17,7 @@ const nextConfig: NextConfig = {
     "@google/generative-ai",
     "googleapis",
     "pg",
+    "@resvg/resvg-js",
   ],
   async headers() {
     return [
