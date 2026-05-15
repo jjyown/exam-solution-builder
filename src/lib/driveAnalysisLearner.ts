@@ -24,17 +24,6 @@ import {
 } from "./googleDrive";
 import { isGeminiVisionAvailable } from "./geminiVisionExtract";
 import { extractTextFromUploadedFile } from "./fileExtraction";
-import { resolveMathpixCredentials, isMathpixUsableForOcr, isMathpixQuotaError, markMathpixExhausted } from "./mathpixV3Text";
-import {
-  recognizeMathpixPdf,
-  submitMathpixPdf,
-  getMathpixPdfStatus,
-  getMathpixPdfLinesJson,
-} from "./mathpixV3Pdf";
-import {
-  rebuildTextFromLineData,
-  diagnoseLineData,
-} from "./mathpixLineDataExtract";
 import type { ReferenceRecord } from "./referenceRetriever";
 import {
   fetchCachedRecords,
@@ -225,11 +214,9 @@ export async function loadDriveAnalysisRecords(): Promise<{
   }
   summary.configured = true;
 
-  // OCR 백엔드: Mathpix 또는 Gemini 중 하나는 있어야 함 (Mathpix 우선, 소진 시 Gemini 자동 폴백)
-  if (!isGeminiVisionAvailable() && !resolveMathpixCredentials()) {
-    summary.errors.push(
-      "OCR 백엔드 미설정 — GEMINI_API_KEY 또는 MATHPIX_APP_ID/KEY 가 필요합니다.",
-    );
+  // OCR 백엔드: Gemini 단일 (Mathpix 폐기)
+  if (!isGeminiVisionAvailable()) {
+    summary.errors.push("OCR 백엔드 미설정 — GEMINI_API_KEY 가 필요합니다.");
     return { records: [], summary };
   }
 
@@ -315,34 +302,26 @@ export async function loadDriveAnalysisRecords(): Promise<{
 
   /**
    * 큰 PDF (이미지 한도 초과) 전용 경로.
-   *  - base64 변환 우회 (메모리 1.33배 절약) → Buffer 직접 Mathpix /v3/pdf 업로드
-   *  - 답지+문제 병합본(보통 100~300MB) 처리에 적합
-   *  - Mathpix 사용 불가(키 없음·잔여 부족·백오프) 면 skip + errors 에 기록
+   *  - 큰 PDF 는 Gemini Vision 으로 처리 (Mathpix 폐기)
    *  - 결과는 일반 흐름과 동일하게 splitTextIntoRecords → records 변환
    */
   async function processLargePdfFile(
     f: DriveFileMeta,
     root: string,
   ): Promise<ReferenceRecord[]> {
-    if (!(await isMathpixUsableForOcr())) {
-      bumpRoot(root, "ocrFailed");
-      summary.errors.push(
-        `${f.name}: 큰 PDF — Mathpix 사용 불가(키 없음/잔여 부족/백오프). 작게 분할 후 다시 업로드하거나 ANALYSIS_PDF_MAX_MB 조정 필요. (폴더: ${root})`,
-      );
-      return [];
-    }
     const dl = await downloadDriveFileById(f.id);
     const buffer = dl.buffer;
-    const mp = await recognizeMathpixPdf(buffer, f.name);
-    if (!mp.ok) {
-      if (isMathpixQuotaError(mp)) {
-        markMathpixExhausted(`large-pdf HTTP ${mp.status}: ${mp.message.slice(0, 100)}`);
-      }
+    const ext = await extractTextFromUploadedFile({
+      fileData: buffer.toString("base64"),
+      fileName: f.name,
+      fileType: dl.mimeType || "application/pdf",
+    });
+    if (!ext.ok) {
       bumpRoot(root, "ocrFailed");
-      summary.errors.push(`${f.name}: 큰 PDF Mathpix 실패 — ${mp.message} (폴더: ${root})`);
+      summary.errors.push(`${f.name}: 큰 PDF Gemini OCR 실패 — ${ext.error} (폴더: ${root})`);
       return [];
     }
-    const normalized = normalizeOcrTextForPairing(mp.text);
+    const normalized = normalizeOcrTextForPairing(ext.text);
     if (normalized.appliedRules.length > 0) {
       summary.pairing.normalizedFiles += 1;
     }
@@ -638,154 +617,8 @@ export function invalidateAnalysisCache(): void {
   fileCache.clear();
 }
 
-/**
- * bbox(line_data) 폴백 재처리 — 페어링률 <40% PDF 한 개에 대해
- * Mathpix `lines.json` 응답으로 좌표 기반 segment 분할 → 표준 헤더 텍스트 재구성
- * → splitTextIntoRecords 재호출 → 페어링률 비교 → 향상되면 records 영속화.
- *
- *  - 일반 sync 와 분리된 명시적 호출 (POST /api/drive/analysis/bbox-fallback).
- *  - 비용: Mathpix /v3/pdf 1회 추가 호출 + lines.json 다운로드.
- *  - 향상이 없으면 옛 records 보존 (롤백 안전).
- */
-export type BboxFallbackResult =
-  | {
-      ok: true;
-      fileId: string;
-      fileName: string;
-      before: { problem: number; paired: number; rate: number };
-      after: { problem: number; paired: number; rate: number };
-      improved: boolean;
-      diagnostics: {
-        totalLines: number;
-        problemHeaderCount: number;
-        hasSolutionSection: boolean;
-      };
-      pdfId: string;
-    }
-  | { ok: false; fileId: string; status: number; message: string };
-
-export async function bboxFallbackForFile(fileId: string): Promise<BboxFallbackResult> {
-  // 1) Drive 메타·다운로드 + 기존 records 페어링률 측정
-  let dl: { buffer: Buffer; mimeType: string; name: string };
-  try {
-    dl = await downloadDriveFileById(fileId);
-  } catch (e) {
-    return { ok: false, fileId, status: 502, message: `Drive 다운로드 실패: ${(e as Error).message}` };
-  }
-  const fileName = dl.name;
-
-  // 기존 캐시된 records — 비교 기준선
-  const cached = fileCache.get(fileId);
-  const beforeStat = measurePairing(cached?.records ?? []);
-
-  // 2) Mathpix submit (lines.json 포함)
-  const sub = await submitMathpixPdf(dl.buffer, fileName, { includeLineData: true });
-  if (!sub.ok) {
-    return { ok: false, fileId, status: sub.status, message: `Mathpix 제출 실패: ${sub.message}` };
-  }
-  const pdfId = sub.pdfId;
-
-  // 3) 폴링 — recognizeMathpixPdf 와 동일 정책, 단 결과는 lines.json 으로 받음
-  const startedAt = Date.now();
-  const maxWaitMs = 5 * 60 * 1000;
-  let pollIntervalMs = 3000;
-  while (Date.now() - startedAt < maxWaitMs) {
-    const st = await getMathpixPdfStatus(pdfId);
-    if (!st.ok) {
-      if (st.status >= 500 && st.status < 600) {
-        await sleep(pollIntervalMs);
-        pollIntervalMs = Math.min(10000, Math.floor(pollIntervalMs * 1.3));
-        continue;
-      }
-      return { ok: false, fileId, status: st.status, message: `Mathpix 상태 조회 실패: ${st.message}` };
-    }
-    if (st.body.status === "completed") break;
-    if (st.body.status === "error") {
-      return {
-        ok: false,
-        fileId,
-        status: 422,
-        message: st.body.error ?? "Mathpix 처리 실패",
-      };
-    }
-    await sleep(pollIntervalMs);
-    pollIntervalMs = Math.min(10000, Math.floor(pollIntervalMs * 1.3));
-  }
-
-  // 4) lines.json 다운로드
-  const ld = await getMathpixPdfLinesJson(pdfId);
-  if (!ld.ok) {
-    return { ok: false, fileId, status: ld.status, message: `lines.json 다운로드 실패: ${ld.message}` };
-  }
-  const diag = diagnoseLineData(ld.data);
-
-  // 헤더로 식별 가능한 줄이 너무 적으면 폴백 효과 없음 — 조기 종료
-  if (diag.problemHeaderCount < 3) {
-    return {
-      ok: true,
-      fileId,
-      fileName,
-      before: beforeStat,
-      after: beforeStat,
-      improved: false,
-      diagnostics: diag,
-      pdfId,
-    };
-  }
-
-  // 5) 표준 헤더 텍스트 재구성 → records 재계산
-  const rebuilt = rebuildTextFromLineData(ld.data);
-  const meta = cached
-    ? null
-    : await (async () => {
-        // pathSegments 는 캐시가 없으면 추정 — Drive listing 재실행은 비싸므로 단순화.
-        // source path 가 없어도 splitTextIntoRecords 는 fileName 만으로 동작.
-        return null;
-      })();
-  void meta;
-  const records = splitTextIntoRecords(fileId, fileName, [], rebuilt);
-  const afterStat = measurePairing(records);
-  const improved = afterStat.rate > beforeStat.rate + 0.05; // 5%p 이상 향상돼야 채택
-
-  // 6) 향상되면 영속화 + 캐시 갱신. 아니면 그대로 둠.
-  if (improved) {
-    try {
-      // modifiedTime 은 알 수 없을 수 있으므로 현재 시각으로 갱신 — 다음 sync 가
-      // 진짜 modifiedTime 으로 다시 덮어씀.
-      const now = new Date().toISOString();
-      await persistRecordsForFile(fileId, now, records);
-      fileCache.set(fileId, { modifiedTime: now, records });
-    } catch (e) {
-      console.warn(`[bboxFallback] persist 실패: ${(e as Error).message}`);
-    }
-  }
-
-  return {
-    ok: true,
-    fileId,
-    fileName,
-    before: beforeStat,
-    after: afterStat,
-    improved,
-    diagnostics: diag,
-    pdfId,
-  };
-}
-
-function measurePairing(records: ReferenceRecord[]): { problem: number; paired: number; rate: number } {
-  let problem = 0;
-  let paired = 0;
-  for (const r of records) {
-    if (typeof r.problem_no !== "number") continue;
-    problem += 1;
-    if (r.solution_text && r.solution_text.trim()) paired += 1;
-  }
-  return { problem, paired, rate: problem > 0 ? paired / problem : 0 };
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
-}
+// bbox(line_data) 폴백 재처리는 Mathpix 폐기와 함께 제거됨.
+// 페어링률 향상은 LLM 어시스트 페어링(refine-pairing)으로 대체된다.
 
 /**
  * 추출된 텍스트를 적당한 단위로 잘라 ReferenceRecord 로 만든다.

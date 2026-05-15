@@ -163,15 +163,6 @@ const ROUTE_CATALOG: Array<{
     notes: "기본 비활성. 명시적으로 켜야 호출됨.",
   },
   {
-    route: "/api/drive/analysis/bbox-fallback",
-    purpose: "분석자료 — BBox 기반 PDF 재처리",
-    trigger: "BBox 패널 (BBOX_FALLBACK_ENABLED=true) + 자동",
-    vendor: "Mathpix v3/pdf",
-    perCallUsd: "~$0.005 (page)",
-    trackedBy: "api_call_logs",
-    notes: "기본 비활성. 페어링률 <40% PDF 만 대상.",
-  },
-  {
     route: "/api/photo-edit/detect-box",
     purpose: "사진 편집기 — 문제 박스 자동감지",
     trigger: "사진 편집기 「박스 자동감지」",

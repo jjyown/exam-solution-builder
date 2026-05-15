@@ -94,10 +94,6 @@ const ROUTE_LABELS: Record<string, { purpose: string; trigger: string }> = {
     purpose: "분석자료 — AI 페어 정제 (unpaired 분류)",
     trigger: "AI 페어 정제 패널 (ASSISTED_PAIRING_ENABLED=true 필요)",
   },
-  "/api/drive/analysis/bbox-fallback": {
-    purpose: "분석자료 — BBox 기반 PDF 재처리 (페어링률 보강)",
-    trigger: "BBox 패널 (BBOX_FALLBACK_ENABLED=true 필요) + 자동 트리거",
-  },
   "/api/photo-edit/detect-box": {
     purpose: "사진 편집기 — 문제 박스 자동감지",
     trigger: "사진 편집기 「박스 자동감지」 버튼",

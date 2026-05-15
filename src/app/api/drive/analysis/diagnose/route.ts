@@ -374,40 +374,8 @@ export async function GET() {
       }
     }
 
-    // Mathpix 잔여·상태 정보
-    let mathpixStatus: {
-      configured: boolean;
-      exhausted: boolean;
-      exhaustedUntilMs: number;
-      callsRemaining: number | null;
-      lowThreshold: number;
-      primary: "gemini" | "mathpix";
-    } | null = null;
-    try {
-      const {
-        getMathpixAccountUsage,
-        isMathpixExhausted,
-        getMathpixExhaustedUntilMs,
-        resolveMathpixCredentials,
-      } = await import("@/lib/mathpixV3Text");
-      const mxConfigured = !!resolveMathpixCredentials();
-      const usage = mxConfigured ? await getMathpixAccountUsage({}) : null;
-      const lowThreshold = Number(process.env.MATHPIX_LOW_THRESHOLD) || 50;
-      const primary = (() => {
-        const v = (process.env.EXTRACTION_PRIMARY || "").trim().toLowerCase();
-        return v === "mathpix" ? ("mathpix" as const) : ("gemini" as const);
-      })();
-      mathpixStatus = {
-        configured: mxConfigured,
-        exhausted: isMathpixExhausted(),
-        exhaustedUntilMs: getMathpixExhaustedUntilMs(),
-        callsRemaining: usage?.callsRemaining ?? null,
-        lowThreshold,
-        primary,
-      };
-    } catch {
-      mathpixStatus = null;
-    }
+    // Mathpix 폐기 — Gemini 단일 OCR 정책. 호환을 위해 필드는 null 유지.
+    const mathpixStatus = null;
 
     return NextResponse.json({
       ok: true,

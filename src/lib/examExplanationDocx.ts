@@ -38,7 +38,6 @@ import {
 import { explanationLatexToPlain, quickAnswerToPlainLine } from "@/lib/latexToPlainText";
 import { normalizeLatexSourceText } from "@/lib/latexSourceNormalize";
 import { splitLabeledQuestionChunks } from "@/lib/explanationBlocks";
-import { recognizeMathpixFromImageBase64, resolveMathpixCredentials } from "@/lib/mathpixV3Text";
 
 function bodyTextRun(opts: { text: string; bold?: boolean; size?: number }) {
   return new TextRun({
@@ -489,30 +488,11 @@ function normalizeProblemOcrText(text: string): string[] {
 }
 
 async function deriveProblemTypingLinesFromImages(
-  problemLinesRaw: string[],
-  assetBaseDir?: string,
+  _problemLinesRaw: string[],
+  _assetBaseDir?: string,
 ): Promise<string[]> {
-  if (!assetBaseDir || hasEnoughTypedProblemText(problemLinesRaw)) return [];
-  if (!resolveMathpixCredentials()) return [];
-  const imageLines = problemLinesRaw
-    .map((line) => parseMarkdownImageLine(line))
-    .filter((x): x is { alt: string; src: string } => Boolean(x));
-  if (imageLines.length === 0) return [];
-  const primary =
-    imageLines.find((img) => /문제\s*원본|원본|문항/i.test(img.alt || "")) ?? imageLines[0];
-  if (!primary) return [];
-  const buf = await readImageRelativeToBase(assetBaseDir, primary.src);
-  if (!buf) return [];
-  const res = await recognizeMathpixFromImageBase64(
-    buf.toString("base64"),
-    imageMimeFromSrc(primary.src),
-  );
-  if (!res.ok) return [];
-  const text = res.data.text?.trim();
-  if (!text) return [];
-  const lines = normalizeProblemOcrText(text);
-  if (lines.length === 0) return [];
-  return ["[OCR 발문/선지]", ...lines];
+  // Mathpix 폐기 — 동등 기능은 docx/route.ts 의 ENABLE_DOCX_OCR 옵션(Gemini Vision) 으로 대체.
+  return [];
 }
 
 async function paragraphChildrenForDocxLine(

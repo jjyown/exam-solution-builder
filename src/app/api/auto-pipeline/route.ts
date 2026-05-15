@@ -287,14 +287,11 @@ async function resolveItems(body: InputBody): Promise<Resolved> {
     // api_call_logs 에 별도 라우트("/api/auto-pipeline:ocr")로 기록.
     // pdf-text 는 pdfjs(무료) 라 외부호출 X — 로깅 생략.
     if (extracted.ok && extracted.source !== 'pdf-text') {
-      const isMathpix = extracted.source === 'image-ocr' || extracted.source === 'pdf-mathpix';
       void apiCallLog({
         route: '/api/auto-pipeline:ocr',
         purpose: '해설 자동 제작 — 업로드 파일 OCR (풀이 생성 사전단계)',
-        vendor: isMathpix ? 'mathpix' : 'gemini',
-        model: isMathpix
-          ? extracted.source === 'pdf-mathpix' ? 'mathpix-v3-pdf' : 'mathpix-v3-text'
-          : extracted.model || 'unknown',
+        vendor: 'gemini',
+        model: extracted.model || 'unknown',
         ok: true,
         units: extracted.pages && extracted.pages > 0 ? extracted.pages : 1,
         meta: { fileName: body.fileName, source: extracted.source },

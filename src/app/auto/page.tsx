@@ -304,56 +304,7 @@ export default function AutoPipelinePage() {
   const [health, setHealth] = useState<HealthSnapshot | null>(null);
   const [cautionsOpen, setCautionsOpen] = useState(false);
   const [supervisorRunning, setSupervisorRunning] = useState(false);
-  // bbox 재처리 권장 큐 토글 — 페어링률 <40% PDF 목록을 표시
-  const [lowPairingOpen, setLowPairingOpen] = useState(false);
-  // 파일별 재처리 진행 상태/결과 — UI 표 옆에 즉시 보여주기
-  type BboxResult =
-    | { status: 'running' }
-    | {
-        status: 'done';
-        improved: boolean;
-        before: { problem: number; paired: number; rate: number };
-        after: { problem: number; paired: number; rate: number };
-      }
-    | { status: 'error'; message: string };
-  const [bboxResults, setBboxResults] = useState<Record<string, BboxResult>>({});
-
-  const runBboxFallback = useCallback(async (fileId: string) => {
-    if (!fileId) return;
-    setBboxResults((prev) => ({ ...prev, [fileId]: { status: 'running' } }));
-    try {
-      const res = await fetch('/api/drive/analysis/bbox-fallback', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ fileId }),
-      });
-      const data = await res.json();
-      if (!data?.ok) {
-        setBboxResults((prev) => ({
-          ...prev,
-          [fileId]: {
-            status: 'error',
-            message: data?.error ?? `HTTP ${res.status}`,
-          },
-        }));
-        return;
-      }
-      setBboxResults((prev) => ({
-        ...prev,
-        [fileId]: {
-          status: 'done',
-          improved: !!data.improved,
-          before: data.before,
-          after: data.after,
-        },
-      }));
-    } catch (e) {
-      setBboxResults((prev) => ({
-        ...prev,
-        [fileId]: { status: 'error', message: (e as Error).message },
-      }));
-    }
-  }, []);
+  // Mathpix bbox 폐기 — 페어링 향상은 refine-pairing(LLM)으로 대체
 
   // 분석자료 검색
   const [analysisSearchOpen, setAnalysisSearchOpen] = useState(false);
@@ -1378,7 +1329,7 @@ export default function AutoPipelinePage() {
             문제 입력 → 검색 · 생성 · 검증 · 자동 재시도 → 검수 체크리스트.
             결과는 Supabase에 기록되며 사용자 피드백이 다음 호출에 반영됩니다.
           </p>
-          <HealthBadges health={health} onToggleLowPairing={() => setLowPairingOpen((v) => !v)} />
+          <HealthBadges health={health} />
           {/*
             감독관 자동 메모 — 6시간마다 retrospective 결과에서 추출되며 다음 풀이 호출의
             cautionNotes 에 자동 주입된다. 사용자가 별점 안 남겨도 자동 학습.
@@ -1423,124 +1374,7 @@ export default function AutoPipelinePage() {
               )}
             </div>
           )}
-          {/*
-            bbox 재처리 권장 PDF 목록 — 페어링률 <40% 인 파일만.
-            scripts/textbook_page_split_mathpix.py 로 재처리할 후보를 사용자에게 노출.
-            (실행은 사용자가 로컬 터미널에서 수동 — Railway 에 Python 의존성 없음)
-          */}
-          {lowPairingOpen && (
-            <div className="mt-2 rounded-lg border border-rose-200 bg-rose-50 p-2 text-[11px] text-rose-950">
-              {(health?.drive_sync?.lastLowPairingFiles?.length ?? 0) === 0 ? (
-                <p className="text-slate-700">
-                  페어링률 &lt;40% PDF 없음 — 텍스트 헤더 매칭이 잘 작동 중. bbox 재처리 불필요.
-                </p>
-              ) : (
-                <>
-                  <p className="mb-1 font-semibold">
-                    📦 페어링률 &lt;40% PDF {health!.drive_sync!.lastLowPairingFiles!.length}개 — bbox 분할 권장
-                  </p>
-                  <p className="mb-2 text-rose-800">
-                    텍스트 헤더 매칭 깨짐. 「⊕ bbox 재처리」 버튼 클릭 시 Node 에서 직접
-                    Mathpix lines.json 호출로 재처리 (Python·로컬 실행 불필요).
-                  </p>
-                  {/*
-                    자동 폴백 상태 — BBOX_FALLBACK_AUTO=true 면 sync 직후 상위 N개를 자동 처리.
-                    여기에 「자동 적용 X/Y건」 형태로 결과 요약 노출.
-                  */}
-                  {health?.drive_sync?.lastAutoFallback?.enabled && (
-                    <p className="mb-2 rounded border border-emerald-300 bg-emerald-50 px-1.5 py-1 text-emerald-900">
-                      ✓ 자동 폴백 활성 — 마지막 sync 에서 {health.drive_sync.lastAutoFallback.attempted}건 시도,
-                      {' '}{health.drive_sync.lastAutoFallback.improved}건 적용됨.
-                      {health.drive_sync.lastAutoFallback.results.length > 0 && (
-                        <span className="ml-1 text-emerald-700">
-                          ({health.drive_sync.lastAutoFallback.results
-                            .filter((r) => r.improved)
-                            .map((r) => r.source.split('/').pop())
-                            .slice(0, 3)
-                            .join(', ') || '향상 0건'})
-                        </span>
-                      )}
-                    </p>
-                  )}
-                  {!health?.drive_sync?.lastAutoFallback?.enabled && (
-                    <p className="mb-2 rounded border border-slate-300 bg-slate-50 px-1.5 py-1 text-slate-700">
-                      ⓘ 자동 폴백 OFF — Railway env 에 <code className="font-mono">BBOX_FALLBACK_AUTO=true</code>
-                      {' '}+ <code className="font-mono">BBOX_FALLBACK_ENABLED=true</code> 설정 시 sync 직후
-                      상위 {' '}<code className="font-mono">BBOX_FALLBACK_MAX_PER_SYNC</code>(기본 3)개 PDF 가
-                      자동으로 재처리됩니다.
-                    </p>
-                  )}
-                  <table className="w-full text-[11px]">
-                    <thead className="text-rose-700">
-                      <tr>
-                        <th className="px-1 py-0.5 text-left">파일</th>
-                        <th className="px-1 py-0.5 text-right">페어/문제</th>
-                        <th className="px-1 py-0.5 text-right">적중률</th>
-                        <th className="px-1 py-0.5 text-center">재처리</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {(health?.drive_sync?.lastLowPairingFiles ?? []).map((f) => {
-                        const result = f.fileId ? bboxResults[f.fileId] : undefined;
-                        return (
-                          <tr key={f.source} className="border-t border-rose-200">
-                            <td className="px-1 py-0.5 font-mono text-slate-800">
-                              {f.source.split('/').slice(-2).join('/')}
-                            </td>
-                            <td className="px-1 py-0.5 text-right text-slate-700">
-                              {f.pairedRecords}/{f.problemRecords}
-                            </td>
-                            <td className="px-1 py-0.5 text-right font-semibold text-rose-700">
-                              {(f.rate * 100).toFixed(0)}%
-                              {result?.status === 'done' && (
-                                <span
-                                  className={`ml-1 ${result.improved ? 'text-emerald-700' : 'text-slate-500'}`}
-                                  title={`재처리 결과: ${result.before.paired}/${result.before.problem} → ${result.after.paired}/${result.after.problem}`}
-                                >
-                                  → {(result.after.rate * 100).toFixed(0)}%
-                                  {result.improved ? ' ✓' : ' ='}
-                                </span>
-                              )}
-                            </td>
-                            <td className="px-1 py-0.5 text-center">
-                              {!f.fileId ? (
-                                <span className="text-slate-400" title="fileId 미보유 — 다음 sync 후 가능">
-                                  -
-                                </span>
-                              ) : result?.status === 'running' ? (
-                                <span className="text-rose-700">처리 중…</span>
-                              ) : result?.status === 'error' ? (
-                                <button
-                                  onClick={() => runBboxFallback(f.fileId)}
-                                  className="rounded border border-rose-400 bg-white px-1.5 py-0.5 text-rose-800 hover:bg-rose-100"
-                                  title={result.message}
-                                >
-                                  실패 — 재시도
-                                </button>
-                              ) : (
-                                <button
-                                  onClick={() => runBboxFallback(f.fileId)}
-                                  className="rounded border border-rose-700 bg-rose-700 px-1.5 py-0.5 font-semibold text-white hover:bg-rose-800"
-                                  title="Mathpix lines.json (좌표 기반) 재호출 → segment 재분할 → 페어링률 향상 시 records 갱신. 비용: Mathpix /v3/pdf 1회 추가."
-                                >
-                                  ⊕ bbox 재처리
-                                </button>
-                              )}
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                  <p className="mt-1 text-[10px] text-slate-600">
-                    ⓘ 「⊕ bbox 재처리」: Mathpix lines.json (좌표 기반) 응답으로 segment 를
-                    다시 잘라 페어링률 회복 시도. 향상 시에만 records 갱신 (롤백 안전).
-                    환경변수 BBOX_FALLBACK_ENABLED=true 필요.
-                  </p>
-                </>
-              )}
-            </div>
-          )}
+          {/* Mathpix bbox 폐기 — 페어링 향상은 refine-pairing(LLM)으로 별도 처리. 패널 제거됨. */}
         </div>
         <div className="flex items-center gap-2">
           {/* 「분석 현황」 패널은 /cost (비용 체크) 탭으로 이동 — 비용·진행상태를 한 곳에서 보게. */}
@@ -3305,7 +3139,6 @@ type HealthBadgesProps = {
       error: string | null;
     } | null;
   } | null;
-  onToggleLowPairing?: () => void;
 };
 
 function HealthBadges(props: HealthBadgesProps) {
@@ -3409,27 +3242,7 @@ function HealthBadges(props: HealthBadgesProps) {
           무결성 ⚠ {sup.integrityIssues.missing + sup.integrityIssues.duplicate + sup.integrityIssues.unpaired}
         </a>
       )}
-      {/*
-        bbox 재처리 권장 큐 — 페어링률 <40% PDF 만. 클릭 시 패널 토글.
-        텍스트 헤더 매칭이 깨진 PDF 가 식별되면, scripts/textbook_page_split_mathpix.py
-        (Mathpix include_line_data=true + bbox 분할) 로 재처리할 후보로 노출.
-      */}
-      {(sync?.lastLowPairingFiles?.length ?? 0) > 0 && (
-        <button
-          type="button"
-          onClick={() => props.onToggleLowPairing?.()}
-          className="rounded border border-rose-400 bg-rose-50 px-1.5 py-0.5 font-semibold text-rose-900 hover:bg-rose-100"
-          title={
-            `페어링률 <40% PDF ${sync!.lastLowPairingFiles!.length}개 — 텍스트 헤더 매칭 깨짐.\n` +
-            `bbox 기반 재분할 권장 (scripts/textbook_page_split_mathpix.py).\n` +
-            sync!.lastLowPairingFiles!.slice(0, 5)
-              .map((f) => `· ${f.source.split('/').slice(-2).join('/')} ${(f.rate * 100).toFixed(0)}% (${f.pairedRecords}/${f.problemRecords})`)
-              .join('\n')
-          }
-        >
-          ⊕ bbox 재처리 {sync!.lastLowPairingFiles!.length}건
-        </button>
-      )}
+      {/* bbox 재처리 배지 폐기 (Mathpix 폐기) */}
     </div>
   );
 }

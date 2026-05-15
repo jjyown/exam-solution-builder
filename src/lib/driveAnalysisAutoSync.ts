@@ -148,78 +148,14 @@ export function startDriveAnalysisAutoSync(): void {
         }
       }
 
-      // 자동 bbox 폴백 — BBOX_FALLBACK_AUTO=true + BBOX_FALLBACK_ENABLED=true 일 때만.
-      // 비용 보호: 한 sync 당 최대 N 개만 (BBOX_FALLBACK_MAX_PER_SYNC, 기본 3).
-      // 가장 깨진(rate 오름차순) 파일부터, fileId 가 있는 것만 시도.
-      const autoEnabled =
-        /^(1|true|yes|on)$/i.test(process.env.BBOX_FALLBACK_AUTO || "") &&
-        /^(1|true|yes|on)$/i.test(process.env.BBOX_FALLBACK_ENABLED || "");
-      const maxPerSync = (() => {
-        const raw = Number(process.env.BBOX_FALLBACK_MAX_PER_SYNC);
-        return Number.isFinite(raw) && raw > 0 && raw <= 20 ? Math.floor(raw) : 3;
-      })();
-      const autoResults: AutoSyncSnapshot["lastAutoFallback"]["results"] = [];
-      let attempted = 0;
-      let improvedCount = 0;
-      if (autoEnabled && summary.pairing.lowPairingFiles.length > 0) {
-        const { bboxFallbackForFile } = await import("./driveAnalysisLearner");
-        const candidates = summary.pairing.lowPairingFiles
-          .filter((f) => f.fileId)
-          .slice(0, maxPerSync);
-        for (const f of candidates) {
-          attempted += 1;
-          try {
-            const r = await bboxFallbackForFile(f.fileId);
-            if (r.ok) {
-              if (r.improved) improvedCount += 1;
-              autoResults.push({
-                fileId: f.fileId,
-                source: f.source,
-                improved: r.improved,
-                beforeRate: r.before.rate,
-                afterRate: r.after.rate,
-              });
-              console.warn(
-                `[driveAnalysisAutoSync] auto-fallback ${f.source}: ` +
-                  `${(r.before.rate * 100).toFixed(0)}% → ${(r.after.rate * 100).toFixed(0)}% ` +
-                  `${r.improved ? "✓ 적용" : "= 변화 없음"}`,
-              );
-            } else {
-              autoResults.push({
-                fileId: f.fileId,
-                source: f.source,
-                improved: false,
-                beforeRate: f.rate,
-                afterRate: f.rate,
-                error: r.message,
-              });
-              console.warn(
-                `[driveAnalysisAutoSync] auto-fallback 실패 ${f.source}: ${r.message}`,
-              );
-            }
-          } catch (e) {
-            autoResults.push({
-              fileId: f.fileId,
-              source: f.source,
-              improved: false,
-              beforeRate: f.rate,
-              afterRate: f.rate,
-              error: (e as Error).message,
-            });
-          }
-        }
-        // records 가 갱신됐으니 retriever 캐시 무효화
-        if (improvedCount > 0) {
-          resetAutoPipelineRetriever();
-        }
-      }
+      // Mathpix bbox 폴백 폐기 — 페어링 향상은 refine-pairing(LLM) 으로 별도 수행.
       snapshot = {
         ...snapshot,
         lastAutoFallback: {
-          enabled: autoEnabled,
-          attempted,
-          improved: improvedCount,
-          results: autoResults,
+          enabled: false,
+          attempted: 0,
+          improved: 0,
+          results: [],
         },
       };
       // 화이트리스트 매칭 0건처럼 명시적 경고가 나오면 운영 로그에 흘려둔다

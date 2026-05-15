@@ -39,12 +39,8 @@ export async function POST(req: Request) {
   // 어떤 OCR 백엔드가 실제로 호출됐는지 source 로 판별 → 라우트별 비용 통계용 로그.
   // pdf-text 는 pdfjs(무료) — 외부 호출이 없으므로 로깅 생략.
   if (extracted.ok && extracted.source !== 'pdf-text') {
-    let vendor: ApiVendor = 'gemini';
-    let model = extracted.model || 'unknown';
-    if (extracted.source === 'image-ocr' || extracted.source === 'pdf-mathpix') {
-      vendor = 'mathpix';
-      model = extracted.source === 'pdf-mathpix' ? 'mathpix-v3-pdf' : 'mathpix-v3-text';
-    }
+    const vendor: ApiVendor = 'gemini';
+    const model = extracted.model || 'unknown';
     void logApiCall({
       route: '/api/auto-pipeline/extract',
       purpose: '해설 제작 — 업로드 파일에서 문항 미리 추출 (OCR)',
