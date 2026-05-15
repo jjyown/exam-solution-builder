@@ -22,7 +22,7 @@ import { explanationLatexToPlain, simplifyLatexContent } from "./latexToPlainTex
 
 export interface ParsedExplanation {
   answer: string;
-  explanation_steps: { text: string; equation: string }[];
+  explanation_steps: { text: string; equation: string; figure_hint?: string }[];
   summary?: string;
 }
 
@@ -80,6 +80,9 @@ export function validateExplanation(rawOutput: string): ValidationResult {
     parsed.explanation_steps = parsed.explanation_steps.map((s) => ({
       text: s.text ? explanationLatexToPlain(s.text) : "",
       equation: s.equation ?? "",
+      ...(typeof s.figure_hint === "string" && s.figure_hint.trim()
+        ? { figure_hint: s.figure_hint.trim() }
+        : {}),
     }));
   }
 

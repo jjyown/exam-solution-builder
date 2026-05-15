@@ -17,8 +17,14 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { stripPythonFencesAndRunGraphs } from "./explanationPythonGraphRunner";
+import {
+  generateMatplotlibCodeForFigureHint,
+  isExplanationFigureEnabled,
+  explanationFigureMax,
+  type FigureStatus,
+} from "./explanationFigureHint";
 
-export type ParsedStep = { text: string; equation: string };
+export type ParsedStep = { text: string; equation: string; figure_hint?: string };
 export type ParsedExplanation = {
   answer: string;
   explanation_steps: ParsedStep[];
@@ -60,10 +66,73 @@ export async function injectGeneratedGraphsIntoRuns<
     return { runs, logs };
   }
 
+  // J — figure_hint → matplotlib 코드 자동 생성. 풀이당 호출 상한 적용.
+  const figureEnabled = isExplanationFigureEnabled();
+  const figureMax = explanationFigureMax();
+
   const transformed: T[] = [];
   for (const run of runs) {
     // current 는 처리 중 업데이트되는 복사본
     let current: T = run;
+
+    // ── figure_hint → matplotlib 코드 펜스 주입 (풀이당 figureMax 호출 한도) ───
+    if (current.parsed && Array.isArray(current.parsed.explanation_steps)) {
+      const hintSteps = current.parsed.explanation_steps
+        .map((s, idx) => ({ step: s, idx }))
+        .filter((x) => typeof x.step.figure_hint === "string" && x.step.figure_hint!.trim());
+      if (hintSteps.length > 0) {
+        let figureCalls = 0;
+        const updatedSteps = [...current.parsed.explanation_steps];
+        const figureStatuses: FigureStatus[] = [];
+        for (const { step, idx } of hintSteps) {
+          if (!figureEnabled) {
+            figureStatuses.push("skipped_disabled");
+            continue;
+          }
+          if (figureCalls >= figureMax) {
+            figureStatuses.push("skipped_limit");
+            continue;
+          }
+          figureCalls += 1;
+          try {
+            const { code } = await generateMatplotlibCodeForFigureHint({
+              figureHint: step.figure_hint!,
+              stepText: step.text,
+              stepEquation: step.equation,
+            });
+            // 기존 python 펜스 처리 경로가 step.text 에서 펜스를 찾아 실행한다.
+            // text 끝에 추가하면 후속 처리에서 자동 PNG 변환·임베드.
+            updatedSteps[idx] = {
+              ...step,
+              text: `${step.text || ""}\n\n${code}`.trim(),
+            };
+            figureStatuses.push("ok");
+          } catch (e) {
+            figureStatuses.push("failed");
+            logs.push(
+              `문항 ${current.questionNo}: figure_hint #${idx} 실패 — ${(e as Error).message.slice(0, 200)}`,
+            );
+          }
+        }
+        current = {
+          ...current,
+          parsed: { ...current.parsed, explanation_steps: updatedSteps },
+        };
+        if (figureStatuses.length > 0) {
+          const summary = figureStatuses.reduce<Record<string, number>>((acc, s) => {
+            acc[s] = (acc[s] ?? 0) + 1;
+            return acc;
+          }, {});
+          logs.push(
+            `문항 ${current.questionNo}: figure_hint ${hintSteps.length}건 — ${
+              Object.entries(summary)
+                .map(([k, v]) => `${k}:${v}`)
+                .join(" ")
+            }`,
+          );
+        }
+      }
+    }
 
     // ── explanation_steps python 블록 처리 ─────────────────────────────────
     if (current.parsed && Array.isArray(current.parsed.explanation_steps)) {

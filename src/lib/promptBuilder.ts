@@ -89,7 +89,11 @@ ${solution}
    {
      "answer": "<최종 정답>",
      "explanation_steps": [
-       {"text": "<단계별 풀이>", "equation": "<해당 식 LaTeX, 없으면 빈 문자열>"},
+       {
+         "text": "<단계별 풀이 (한국어 평문만, 1~2문장)>",
+         "equation": "<해당 식 LaTeX, 없으면 빈 문자열>",
+         "figure_hint": "<선택, 그림이 도움되면 1~2문장 (예: 'x²+y²=4 원과 직선 y=x 교점'). 불필요하면 생략.>"
+       },
        ...
      ],
      "summary": "<한 줄 결론>"

@@ -42,7 +42,7 @@ import { logApiCall } from '@/lib/apiCallLogger';
 import { geminiModelFor, type Profile } from '@/lib/profileRouting';
 import { explanationLatexToPlain } from '@/lib/latexToPlainText';
 
-type ParsedStep = { text: string; equation: string };
+type ParsedStep = { text: string; equation: string; figure_hint?: string };
 type Parsed = {
   answer: string;
   explanation_steps: ParsedStep[];
@@ -56,7 +56,11 @@ const VISION_PROMPT = `
 {
   "answer": "<최종 정답. 객관식이면 ①②③④⑤ 중 하나, 주관식이면 숫자/식.>",
   "explanation_steps": [
-    { "text": "1단계 핵심 줄거리 (1~2문장, 한국어 평문만)", "equation": "이 단계의 모든 수식 (LaTeX)" },
+    {
+      "text": "1단계 핵심 줄거리 (1~2문장, 한국어 평문만)",
+      "equation": "이 단계의 모든 수식 (LaTeX)",
+      "figure_hint": "<선택> 이 단계에 그림이 도움되면 무엇을 그릴지 1~2문장 (예: 'x²+y² = 4 원과 직선 y=x 의 교점 표시'). 불필요하면 생략."
+    },
     ...
   ],
   "summary": "<선택, 한 줄 요약>"
@@ -70,6 +74,7 @@ const VISION_PROMPT = `
 - 이미지에 문제가 명확하지 않으면 answer 에 "확인 필요" 라고 적고 explanation_steps 에 무엇이 안 보이는지 설명.
 - 객관식 보기 번호와 정답 번호를 반드시 일치시킬 것.
 - 추측하지 말 것 — 이미지에서 읽을 수 있는 정보로만 풀이.
+- **figure_hint** (선택): 이 단계를 이해하는 데 그림(좌표평면, 원, 함수 그래프, 도형 등)이 도움되면 무엇을 그릴지 1~2문장. 운영자가 활성화 한 경우 자동으로 matplotlib PNG 가 생성·임베드됨.
 `.trim();
 
 /**
@@ -159,11 +164,14 @@ function safeParseJson(raw: string): Parsed | null {
     return {
       answer: obj.answer,
       explanation_steps: obj.explanation_steps.map((s: unknown) => {
-        const o = (s ?? {}) as { text?: unknown; equation?: unknown };
-        return {
+        const o = (s ?? {}) as { text?: unknown; equation?: unknown; figure_hint?: unknown };
+        const base = {
           text: typeof o.text === 'string' ? explanationLatexToPlain(o.text) : '',
           equation: typeof o.equation === 'string' ? o.equation : '',
         };
+        return typeof o.figure_hint === 'string' && o.figure_hint.trim()
+          ? { ...base, figure_hint: o.figure_hint.trim() }
+          : base;
       }),
       summary: typeof obj.summary === 'string' ? obj.summary : undefined,
     };
