@@ -623,6 +623,8 @@ export default function CropPage() {
         questionNo: c.questionNo,
         // 잘라낸 이미지를 마크다운 이미지 라인으로 전달 → DOCX 빌더가 dataURL 디코드해 임베드
         questionText: `![문제 원본 — ${c.pageLabel}](${c.imageDataUrl})`,
+        // ENABLE_DOCX_OCR=true 시 docx 라우트의 OCR 토글 발동 조건 (route.ts:197 r.questionImageDataUrl 확인)
+        questionImageDataUrl: c.imageDataUrl,
         parsed: c.parsed,
       }));
     if (successRuns.length === 0) {
