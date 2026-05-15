@@ -2,11 +2,23 @@
  * promptBuilder.ts
  * ────────────────────────────────────────────────────────────────────────────
  *  새 문제 + 참고 예시들로부터 LLM 프롬프트를 조립.
- *  핵심: 수학비서 스타일의 논리 깊이/단계 분할/결론 형식을 references로 보여주고
- *       LLM이 그 스타일을 따라가도록 유도한다.
+ *  핵심: 시중교재 스타일·표현·논리 흐름을 references로 보여주되 풀이 내용은 베끼지 않게.
+ *
+ *  EXPLANATION_RAG_MODE (기본 'style-only'):
+ *    - 'full'       : 시중교재 [문제]/[정답]/[해설] 전체 주입 (legacy, 내용 mimic 위험)
+ *    - 'style-only' : [해설] 본문은 첫 ~200자만 + 마지막에 표현 패턴 힌트
+ *    - 'off'        : 예시 섹션 제거 (LLM이 프롬프트 지시만으로 풀이)
  * ────────────────────────────────────────────────────────────────────────────
  */
 import type { ReferenceRecord } from './referenceRetriever';
+
+type RagMode = 'full' | 'style-only' | 'off';
+function ragMode(): RagMode {
+  const v = (process.env.EXPLANATION_RAG_MODE || '').trim().toLowerCase();
+  if (v === 'full') return 'full';
+  if (v === 'off') return 'off';
+  return 'style-only';
+}
 
 export interface PromptInput {
   questionText: string;     // OCR이나 사용자 입력으로 받은 문제 본문
@@ -27,22 +39,30 @@ export function buildExplanationPrompt({
   retryHint,
   cautionNotes,
 }: PromptInput): string {
-  const fewShot = references
-    .map((r, i) => {
-      // 1:1 페어링된 record 면 분석자료의 문제 본문 + 풀이 단계까지 모두 보여줌
-      const hasPaired = !!(r.solution_text && r.solution_text.trim());
-      const problemBody = hasPaired ? r.content : r.problem_hint;
-      const solution = hasPaired
-        ? cleanForPrompt(r.solution_text || '')
-        : cleanForPrompt(r.content);
-      return `<예시 ${i + 1}>
+  const mode = ragMode();
+  const fewShot = mode === 'off'
+    ? ''
+    : references
+        .map((r, i) => {
+          // 1:1 페어링된 record 면 분석자료의 문제 본문 + 풀이 단계까지 모두 보여줌
+          const hasPaired = !!(r.solution_text && r.solution_text.trim());
+          const problemBody = hasPaired ? r.content : r.problem_hint;
+          const fullSolution = hasPaired
+            ? cleanForPrompt(r.solution_text || '')
+            : cleanForPrompt(r.content);
+          // style-only: 풀이 본문은 첫 200자까지만 (스타일·기호 사용·논리 흐름은 충분히 보임)
+          const solution =
+            mode === 'style-only'
+              ? truncateForStyle(fullSolution, 200)
+              : fullSolution;
+          return `<예시 ${i + 1}>
 [문제] ${cleanForPrompt(problemBody)}
 [정답] ${cleanForPrompt(r.answer)}
 [해설]
 ${solution}
 </예시 ${i + 1}>`;
-    })
-    .join('\n\n');
+        })
+        .join('\n\n');
 
   const retrySection = retryHint
     ? `\n[이전 시도 피드백]\n${retryHint}\n위 사유를 반드시 반영해서 다시 작성하세요.\n`
@@ -89,10 +109,13 @@ ${solution}
    - 각 step.text는 최대 2문장. 길면 step 분리.
 6. "예시"의 표현 방식·기호 사용·논리 흐름만 참고하고 풀이 내용은 독립적으로 생성. 예시를 그대로 베끼지 말 것.
 7. 정답이 명백하지 않으면 정답 칸에 "확인 필요"라고 쓰고 explanation_steps 마지막에 그 이유를 명시.
-${retrySection}${cautionSection}
-[스타일 가이드 — 표현·정렬 참고용. 풀이 내용 복사 금지]
-${fewShot}
-
+${retrySection}${cautionSection}${
+    fewShot
+      ? `\n[스타일 가이드 — 표현·정렬 참고용. 풀이 내용 복사 금지${
+          mode === 'style-only' ? ' (예시 풀이는 첫 200자만 보여드립니다)' : ''
+        }]\n${fewShot}\n`
+      : ''
+  }
 [새 문제]
 ${questionText.trim()}
 
@@ -103,4 +126,15 @@ ${questionText.trim()}
 // 다만 \u0001 같은 분리자가 남아 있으면 제거.
 function cleanForPrompt(s: string): string {
   return s.replace(/[\u0001\u0002]/g, '').slice(0, 1500);
+}
+
+/**
+ * style-only RAG 모드용 — 풀이 본문을 limit 자까지만 보여주고 그 뒤는 잘라낸다.
+ * 표현 방식·기호 사용·도입 패턴은 첫 ~200자에 충분히 드러나므로
+ * LLM 이 내용을 mimic 할 여지를 줄인다.
+ */
+function truncateForStyle(s: string, limit: number): string {
+  if (!s) return '';
+  if (s.length <= limit) return s;
+  return s.slice(0, limit).trimEnd() + '… (이하 생략 — 풀이 내용 복사 금지)';
 }
