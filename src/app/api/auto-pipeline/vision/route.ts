@@ -41,7 +41,7 @@ import { recordAutoPipelineRun } from '@/lib/autoPipelineLog';
 import { logApiCall } from '@/lib/apiCallLogger';
 import { geminiModelFor, type Profile } from '@/lib/profileRouting';
 import { explanationLatexToPlain } from '@/lib/latexToPlainText';
-import { dumpRawVisionResponseIfEnabled } from '@/lib/geminiVisionExtract';
+import { dumpRawVisionResponseIfEnabled, resolveOcrPromptVersion } from '@/lib/geminiVisionExtract';
 
 type ParsedStep = { text: string; equation: string; figure_hint?: string };
 type Parsed = {
@@ -79,6 +79,44 @@ const VISION_PROMPT = `
 `.trim();
 
 /**
+ * V2 프롬프트 — 운영 로그에서 확인된 풀이 LLM 회귀 패턴 차단용 룰 강화 버전.
+ *  - LaTeX 명령어 완결성 (\times 를 \tim 처럼 잘라 끝내지 말 것)
+ *  - 환경 짝 매칭 (\begin{cases} ↔ \end{cases})
+ *  - equation 필드 도중 끊김 금지
+ * OCR_PROMPT_VERSION=v2 환경변수로 활성화. 기본은 V1.
+ */
+const VISION_PROMPT_V2 = `
+당신은 수학 문제 해설 전문가입니다. 첨부된 이미지에 있는 수학 문제 1개를 읽고 풀이하세요.
+
+다음 JSON 형식만으로 응답하세요(마크다운 백틱 금지, 다른 텍스트 금지):
+{
+  "answer": "<최종 정답. 객관식이면 ①②③④⑤ 중 하나, 주관식이면 숫자/식.>",
+  "explanation_steps": [
+    {
+      "text": "1단계 핵심 줄거리 (1~2문장, 한국어 평문만)",
+      "equation": "이 단계의 모든 수식 (LaTeX)",
+      "figure_hint": "<선택> 이 단계에 그림이 도움되면 무엇을 그릴지 1~2문장 (예: 'x²+y² = 4 원과 직선 y=x 의 교점 표시'). 불필요하면 생략."
+    },
+    ...
+  ],
+  "summary": "<선택, 한 줄 요약>"
+}
+
+규칙 (엄격):
+- **필드 분리**: text 는 순수 한국어 평문만. \`$\`, \`\\\\\`, \`\\implies\`, \`\\quad\` 같은 LaTeX 명령어·기호 절대 금지. 변수·수식은 무조건 equation 필드로.
+- **수식 위주**: 한글 설명은 줄거리만 (최대 2문장). 풀이 본체는 equation 에 LaTeX 로.
+- 자명한 부분(예: "양변을 정리하면")은 text 생략하고 equation 만 두어도 됨.
+- 단계는 3~7개 권장. 비약 금지.
+- 이미지에 문제가 명확하지 않으면 answer 에 "확인 필요" 라고 적고 explanation_steps 에 무엇이 안 보이는지 설명.
+- 객관식 보기 번호와 정답 번호를 반드시 일치시킬 것.
+- 추측하지 말 것 — 이미지에서 읽을 수 있는 정보로만 풀이.
+- **LaTeX 명령어 완결성 (중요)**: 모든 LaTeX 명령어를 완전한 형태로 작성. \`\\times\` 를 \`\\tim\` 처럼, \`\\frac\` 를 \`\\fra\` 처럼 잘라 끝내지 말 것. 명령어 도중에 응답을 종료하지 말 것. 응답이 길어져도 명령어는 항상 완결시켜 닫을 것.
+- **환경 짝 매칭 (중요)**: \`\\begin{cases}\` / \`\\begin{aligned}\` / \`\\begin{pmatrix}\` 등 환경을 열면 반드시 \`\\end{cases}\` / \`\\end{aligned}\` / \`\\end{pmatrix}\` 로 닫을 것. 환경 미닫힌 채 출력 종료 금지. \`\\left(\` / \`\\left[\` 등은 \`\\right)\` / \`\\right]\` 로 짝 맞춤. 중괄호 \`{\` \`}\` 도 짝을 맞춰 닫을 것.
+- **equation 필드 완결성 (중요)**: equation 필드는 완결된 LaTeX 표기로만. 도중에 끊긴 표기로 응답을 종료하지 말 것. 단계가 길어지면 explanation_steps 개수를 줄여서라도 마지막 단계의 equation 을 완결할 것.
+- **figure_hint** (선택): 이 단계를 이해하는 데 그림(좌표평면, 원, 함수 그래프, 도형 등)이 도움되면 무엇을 그릴지 1~2문장. 운영자가 활성화 한 경우 자동으로 matplotlib PNG 가 생성·임베드됨.
+`.trim();
+
+/**
  * Gemini Vision 호출 + 429 자동 재시도.
  *
  * 무료/저티어 한도(RPM 60 등)에 빠르게 부딪히는 케이스가 빈번해
@@ -100,6 +138,9 @@ async function callGeminiVision(
 
   const sleeps = [0, 2000, 5000, 10000];
   let lastErr = '';
+  // OCR_PROMPT_VERSION=v2 시 강화된 V2 사용 (LaTeX 명령어 완결성·환경 짝 매칭 룰 추가).
+  // 기본/v1 시 기존 VISION_PROMPT 그대로 — 회귀 0.
+  const prompt = resolveOcrPromptVersion() === 'v2' ? VISION_PROMPT_V2 : VISION_PROMPT;
   for (let attempt = 0; attempt < sleeps.length; attempt++) {
     if (sleeps[attempt] > 0) {
       await new Promise((r) => setTimeout(r, sleeps[attempt]));
@@ -112,7 +153,7 @@ async function callGeminiVision(
           {
             role: 'user',
             parts: [
-              { text: VISION_PROMPT },
+              { text: prompt },
               { inlineData: { mimeType, data: imageBase64 } },
             ],
           },
@@ -133,8 +174,8 @@ async function callGeminiVision(
           .join('') || '';
       // 진단용 raw 응답 dump (DEBUG_VISION_RAW_DUMP=true 일 때만 동작).
       // vision/route.ts 는 OCR 이 아닌 풀이 LLM 호출이라 stripMetaWrappers 안 거침 → raw == cleaned.
-      // VISION_PROMPT 를 prompt 인자로 전달해 dump 파일의 promptKind 식별 가능.
-      await dumpRawVisionResponseIfEnabled(text, text, model, mimeType, VISION_PROMPT);
+      // 실제 사용된 prompt(V1 또는 V2)를 전달해 dump 파일에서 어느 버전 응답인지 식별 가능.
+      await dumpRawVisionResponseIfEnabled(text, text, model, mimeType, prompt);
       return { text, usedModel: model, retried: attempt };
     }
 
