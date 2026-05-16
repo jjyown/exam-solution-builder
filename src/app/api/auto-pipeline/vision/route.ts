@@ -42,6 +42,7 @@ import { logApiCall } from '@/lib/apiCallLogger';
 import { geminiModelFor, type Profile } from '@/lib/profileRouting';
 import { explanationLatexToPlain } from '@/lib/latexToPlainText';
 import { dumpRawVisionResponseIfEnabled, resolveOcrPromptVersion } from '@/lib/geminiVisionExtract';
+import { noThinkingConfig, isResponseTruncated } from '@/lib/geminiGenerationConfig';
 
 type ParsedStep = { text: string; equation: string; figure_hint?: string };
 type Parsed = {
@@ -158,15 +159,25 @@ async function callGeminiVision(
             ],
           },
         ],
-        generationConfig: {
+        // Gemini 2.5 thinking 비활성 + maxOutputTokens 명시 (plan v26 단계 2.5).
+        // 운영 로그의 \tim 잘림 / \begin{cases} 미닫힘 회귀는 thinking이 토큰을 다 먹어
+        // 본 응답이 잘린 것이 원인 — thinkingBudget=0 + maxOutputTokens=8192 로 차단.
+        // temperature 0.2 는 풀이 다양성 위해 유지 (noThinkingConfig 기본 0 을 덮어씀).
+        generationConfig: noThinkingConfig(8192, {
           responseMimeType: 'application/json',
           temperature: 0.2,
-        },
+        }),
       }),
     });
 
     if (res.ok) {
       const data = await res.json();
+      // 잘림 감지 — finishReason=MAX_TOKENS 면 [ocr_truncated] 로그 (retrospective 가 자동 집계)
+      if (isResponseTruncated(data)) {
+        console.warn(
+          `[ocr_truncated] vision/route.ts ${model} maxOutputTokens=8192 한도 도달 — 응답 잘림 가능. 시험지 복잡도 높으면 16384 상향 검토.`,
+        );
+      }
       const text =
         data?.candidates?.[0]?.content?.parts
           ?.map((p: { text?: string }) => p.text)

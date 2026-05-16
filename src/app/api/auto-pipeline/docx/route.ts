@@ -16,6 +16,7 @@
  */
 import { NextResponse } from "next/server";
 import { buildExamExplanationDocxBuffer } from "@/lib/examExplanationDocx";
+import { noThinkingConfig, isResponseTruncated } from "@/lib/geminiGenerationConfig";
 import {
   getDriveClient,
   findOrCreateChildFolder,
@@ -62,7 +63,9 @@ async function callGeminiOcrVision(base64: string, mimeType: string): Promise<st
           ],
         },
       ],
-      generationConfig: { temperature: 0.1 },
+      // plan v26 단계 2.5: thinking 비활성 + maxOutputTokens 명시.
+      // 문제 본문 OCR은 보통 짧지만 시험지 한 문항이 길어지면 잘림 가능 → 4096 충분.
+      generationConfig: noThinkingConfig(4096, { temperature: 0.1 }),
     }),
   });
 
@@ -71,6 +74,12 @@ async function callGeminiOcrVision(base64: string, mimeType: string): Promise<st
   }
 
   const data = await res.json();
+  // 잘림 감지 — retrospective 가 자동 집계
+  if (isResponseTruncated(data)) {
+    console.warn(
+      `[ocr_truncated] docx/route.ts ${model} maxOutputTokens=4096 한도 도달 — 응답 잘림 가능.`,
+    );
+  }
   const text: string =
     data?.candidates?.[0]?.content?.parts
       ?.map((p: { text?: string }) => p.text)

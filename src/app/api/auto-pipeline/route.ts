@@ -27,6 +27,7 @@ import { buildAutoChecklist } from '@/lib/autoPipelineChecklist';
 import { findRelevantCautions, recordAutoPipelineRun } from '@/lib/autoPipelineLog';
 import { extractTextFromUploadedFile } from '@/lib/fileExtraction';
 import { logApiCall as apiCallLog } from '@/lib/apiCallLogger';
+import { noThinkingConfig, isResponseTruncated } from '@/lib/geminiGenerationConfig';
 import { extractQuestionsFromText, type ExtractedQuestion } from '@/lib/questionSplit';
 import {
   approxCostCents,
@@ -143,10 +144,12 @@ async function callGemini(prompt: string, modelOverride?: string): Promise<strin
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       contents: [{ role: 'user', parts: [{ text: prompt }] }],
-      generationConfig: {
+      // plan v26 단계 2.5: thinking 비활성 + maxOutputTokens 명시.
+      // 풀이 LLM 응답이 길어지면 명령어/환경 미닫힘 회귀 — 8192 로 차단.
+      generationConfig: noThinkingConfig(8192, {
         responseMimeType: 'application/json',
         temperature: 0.2,
-      },
+      }),
     }),
   });
   if (!res.ok) {
@@ -155,6 +158,12 @@ async function callGemini(prompt: string, modelOverride?: string): Promise<strin
     throw new Error(`Gemini ${res.status}: ${body}`);
   }
   const data = await res.json();
+  // 잘림 감지 — retrospective 가 자동 집계
+  if (isResponseTruncated(data)) {
+    console.warn(
+      `[ocr_truncated] auto-pipeline/route.ts ${model} maxOutputTokens=8192 한도 도달 — 응답 잘림 가능.`,
+    );
+  }
   return (
     data?.candidates?.[0]?.content?.parts?.map((p: { text?: string }) => p.text).join('') || ''
   );
