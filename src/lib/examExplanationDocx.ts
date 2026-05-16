@@ -448,6 +448,12 @@ function normalizeLineForDocxRender(rawLine: string): string {
     /(^|[\s(])(?:√|\\sqrt\{?)(2|3)\}?\s*\/\s*2(?=$|[\s),.가-힣])/g,
     (_m, lead: string, n: string) => `${lead}$\\frac{\\sqrt{${n}}}{2}$`,
   );
+  // Stage I-2 (보조): 단순 숫자/숫자 분수 → LaTeX 승격. 변수 포함 분수는 OCR 프롬프트(route.ts:35)가 처리.
+  // 보수적 패턴: 좌우 boundary 명확한 경우만 (날짜·URL 오탐 방지)
+  line = line.replace(
+    /(^|[\s=(])([+\-]?\d+)\s*\/\s*([+\-]?\d+)(?=$|[\s),.가-힣])/g,
+    (_m, lead: string, a: string, b: string) => `${lead}$\\frac{${a}}{${b}}$`,
+  );
 
   const block = line.match(/^\s*\$\$([\s\S]+)\$\$\s*$/);
   if (block?.[1] && block[1].length >= 130) {
@@ -477,9 +483,35 @@ function hasEnoughTypedProblemText(problemLinesRaw: string[]): boolean {
   return plain.length >= 24;
 }
 
+/**
+ * Stage I-1: OCR 응답의 단어 단위 부자연스러운 줄바꿈 합치기.
+ * 시험지 시각적 줄바꿈(한 줄 안 들어가 다음 줄로 떨어진 단어)을 자연 단락으로 복원.
+ * 보수적 조건: 짧은 줄(< 40자) + 다음 줄이 한글로 시작 → 공백 join. 빈 줄은 단락 구분으로 보존.
+ */
+function joinShortLines(text: string): string {
+  const lines = text.split("\n");
+  const out: string[] = [];
+  let i = 0;
+  while (i < lines.length) {
+    let curr = lines[i] ?? "";
+    while (
+      curr.trim().length > 0 &&
+      curr.trim().length < 40 &&
+      i + 1 < lines.length &&
+      /^[가-힣]/.test((lines[i + 1] ?? "").trim())
+    ) {
+      curr = curr + " " + (lines[i + 1] ?? "").trim();
+      i += 1;
+    }
+    out.push(curr);
+    i += 1;
+  }
+  return out.join("\n");
+}
+
 function normalizeProblemOcrText(text: string): string[] {
-  return text
-    .replace(/\r\n/g, "\n")
+  const joined = joinShortLines(text.replace(/\r\n/g, "\n"));
+  return joined
     .split("\n")
     .map((x) => x.trim())
     .filter(Boolean)
