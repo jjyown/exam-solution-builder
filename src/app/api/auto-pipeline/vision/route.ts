@@ -41,6 +41,7 @@ import { recordAutoPipelineRun } from '@/lib/autoPipelineLog';
 import { logApiCall } from '@/lib/apiCallLogger';
 import { geminiModelFor, type Profile } from '@/lib/profileRouting';
 import { explanationLatexToPlain } from '@/lib/latexToPlainText';
+import { dumpRawVisionResponseIfEnabled } from '@/lib/geminiVisionExtract';
 
 type ParsedStep = { text: string; equation: string; figure_hint?: string };
 type Parsed = {
@@ -130,6 +131,10 @@ async function callGeminiVision(
           ?.map((p: { text?: string }) => p.text)
           .filter(Boolean)
           .join('') || '';
+      // 진단용 raw 응답 dump (DEBUG_VISION_RAW_DUMP=true 일 때만 동작).
+      // vision/route.ts 는 OCR 이 아닌 풀이 LLM 호출이라 stripMetaWrappers 안 거침 → raw == cleaned.
+      // VISION_PROMPT 를 prompt 인자로 전달해 dump 파일의 promptKind 식별 가능.
+      await dumpRawVisionResponseIfEnabled(text, text, model, mimeType, VISION_PROMPT);
       return { text, usedModel: model, retried: attempt };
     }
 

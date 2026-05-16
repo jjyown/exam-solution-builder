@@ -235,8 +235,11 @@ export function isGeminiOcrDisabled(): boolean {
  * cleaned 와 raw 둘 다 저장해 stripMetaWrappers 가 LaTeX 손상시키는지도 확인 가능.
  * 실패해도 OCR 진행은 막지 않는다 (fire-and-forget try/catch).
  * 저장 위치: project root/tmp/raw_vision_response_{ISO}.json (.gitignore 처리됨)
+ *
+ * vision/route.ts(비전 모드 풀이 LLM) 같은 별도 라우트에서도 import 해 사용.
+ * stripMetaWrappers 안 거치는 호출처는 raw==cleaned 로 같은 값 전달.
  */
-async function dumpRawVisionResponseIfEnabled(
+export async function dumpRawVisionResponseIfEnabled(
   raw: string,
   cleaned: string,
   modelName: string,
