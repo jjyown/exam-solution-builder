@@ -157,11 +157,13 @@ function renderRunAsBlock(run: RunItem): string {
   lines.push(`[문제]`);
   // 원본 크롭 이미지가 있으면 마크다운 이미지 라인으로 삽입 — DOCX 빌더가
   // parseMarkdownImageLine + bufferFromDataUrl 로 자동 임베드.
-  if (run.questionImageDataUrl && run.questionImageDataUrl.startsWith("data:image/")) {
+  // 이미지 있으면 본문 텍스트 생략 — 평문화 회피 (v29 F안, plan v18~v28 종결).
+  if (run.questionImageDataUrl?.startsWith("data:image/")) {
     lines.push(`![문항 ${run.questionNo} 원본 이미지](${run.questionImageDataUrl})`);
+  } else {
+    const body = cleanQuestionText(run.questionNo, run.questionText);
+    lines.push(body || "(문제 본문 누락 — 운영자 검수 필요)");
   }
-  const body = cleanQuestionText(run.questionNo, run.questionText);
-  lines.push(body || "(문제 본문 누락 — 운영자 검수 필요)");
   if (!run.parsed) {
     lines.push(`[정답] -`);
     lines.push(`[해설]`);
