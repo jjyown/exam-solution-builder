@@ -82,7 +82,7 @@ function renderFallbackPng(latex: string): RenderResult {
  * LaTeX 1개를 PNG 로 렌더.
  * @param latex - `$` / `$$` 없이 본문만 (예: `\frac{1}{2}` 또는 `x^2 + y^2 = r^2`)
  * @param opts.displayMode - true 면 디스플레이 수식 (큰 글자), false 면 인라인
- * @param opts.scale - resvg zoom 배율(기본 2 → 200% 해상도)
+ * @param opts.scale - resvg zoom 배율(기본 1.3 → 130% 해상도)
  */
 export function renderLatexToPng(
   latex: string,
@@ -92,7 +92,9 @@ export function renderLatexToPng(
   if (!trimmed) throw new Error("empty latex");
   if (trimmed.length > 5000) throw new Error("latex too long (>5000 chars)");
 
-  const scale = opts.scale ?? 2;
+  // 기본 1.3 — 사용자 docx 검증에서 200% 확대가 텍스트 줄간격 대비 비대하다는 보고.
+  // 130%로 줄여 균형. displayMode/inline 차등은 호출처가 opts.scale 명시로 처리.
+  const scale = opts.scale ?? 1.3;
   const displayMode = opts.displayMode ?? false;
   const cacheKey = `${displayMode ? "d" : "i"}:${scale}:${trimmed}`;
   const hit = cache.get(cacheKey);
