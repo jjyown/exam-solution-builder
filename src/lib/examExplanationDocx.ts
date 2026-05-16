@@ -635,10 +635,17 @@ function normalizeQuickAnswerForMath(answer: string): string {
   return t;
 }
 
-function quickAnswerLineChildren(questionLabel: string, quickAnswerText: string): ParagraphChild[] {
+function quickAnswerLineChildren(
+  questionLabel: string,
+  quickAnswerText: string,
+  separator: "." | ")" = ".",
+): ParagraphChild[] {
   const answerMathText = normalizeQuickAnswerForMath(quickAnswerText);
   const answerChildren = latexAwareLineToParagraphChildren(answerMathText, { bold: true });
-  return [bodyTextRun({ text: `${questionLabel}. [정답] `, bold: true }), ...answerChildren];
+  return [
+    bodyTextRun({ text: `${questionLabel}${separator} [정답] `, bold: true }),
+    ...answerChildren,
+  ];
 }
 
 /**
@@ -778,7 +785,7 @@ async function buildExplanationSectionChildren(
     const quickAnswerText = quickAnswerDisplayText(block);
     explanationChildren.push(
       new Paragraph({
-        children: quickAnswerLineChildren(block.questionLabel, quickAnswerText),
+        children: quickAnswerLineChildren(block.questionLabel, quickAnswerText, ")"),
         indent: explIndent,
         spacing: {
           ...EXAM_DOCX_BODY_PARAGRAPH_SPACING,
@@ -890,13 +897,6 @@ export async function buildExamExplanationDocxBuffer(params: BuildExamExplanatio
           },
         },
         children: [
-          new Paragraph({
-            alignment: AlignmentType.CENTER,
-            children: [
-              bodyTextRun({ text: "수학영역", bold: true, size: EXAM_DOCX_SECTION_TITLE_HALF_PT }),
-            ],
-            spacing: { after: 100 },
-          }),
           new Paragraph({
             alignment: AlignmentType.CENTER,
             children: [bodyTextRun({ text: headerTitle, bold: true, size: EXAM_DOCX_SECTION_TITLE_HALF_PT })],
