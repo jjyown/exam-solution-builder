@@ -60,6 +60,8 @@ yarn-error.log*
 
 # scratch / 로컬만 쓰는 작업 폴더
 /work/
+# 디버그 dump (DEBUG_VISION_RAW_DUMP=true 시 raw OCR 응답 저장)
+/tmp/
 # 교재 OCR·분할 실험 산출(대용량) — README만 추적
 /scratch/ocr-mapping-runs/*
 !/scratch/ocr-mapping-runs/README.md

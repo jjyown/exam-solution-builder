@@ -12,6 +12,8 @@
  * ────────────────────────────────────────────────────────────────────────────
  */
 import { GoogleGenerativeAI } from "@google/generative-ai";
+import { promises as fs } from "node:fs";
+import path from "node:path";
 import { isGeminiRateLimitedMessage } from "./geminiRateLimit";
 
 export type VisionExtractResult =
@@ -169,6 +171,7 @@ async function runGeminiVisionWithPrompt(
         failures.push(`${modelName}: 청소 후 텍스트 없음`);
         continue;
       }
+      await dumpRawVisionResponseIfEnabled(raw, cleaned, modelName, mimeType, prompt);
       return { ok: true, text: cleaned, model: modelName, mimeType };
     } catch (error) {
       const message = error instanceof Error ? error.message : "알 수 없는 비전 OCR 오류";
@@ -224,4 +227,42 @@ export function isGeminiVisionAvailable(): boolean {
 /** 킬 스위치 상태 조회 — UI/관리 페이지용 */
 export function isGeminiOcrDisabled(): boolean {
   return isGeminiOcrKillSwitched();
+}
+
+/**
+ * 진단용 raw 응답 dump.
+ * DEBUG_VISION_RAW_DUMP=true (또는 1/yes/on) 일 때만 동작. 기본 false.
+ * cleaned 와 raw 둘 다 저장해 stripMetaWrappers 가 LaTeX 손상시키는지도 확인 가능.
+ * 실패해도 OCR 진행은 막지 않는다 (fire-and-forget try/catch).
+ * 저장 위치: project root/tmp/raw_vision_response_{ISO}.json (.gitignore 처리됨)
+ */
+async function dumpRawVisionResponseIfEnabled(
+  raw: string,
+  cleaned: string,
+  modelName: string,
+  mimeType: string,
+  prompt: string,
+): Promise<void> {
+  const flag = (process.env.DEBUG_VISION_RAW_DUMP || "").trim();
+  if (!/^(1|true|yes|on)$/i.test(flag)) return;
+  try {
+    const ts = new Date().toISOString().replace(/[:.]/g, "-");
+    const dir = path.join(process.cwd(), "tmp");
+    await fs.mkdir(dir, { recursive: true });
+    const file = path.join(dir, `raw_vision_response_${ts}.json`);
+    const promptKind = prompt === KOREAN_TEXTBOOK_OCR_PROMPT ? "textbook" : "exam";
+    const payload = {
+      timestamp: ts,
+      model: modelName,
+      mimeType,
+      promptKind,
+      rawLength: raw.length,
+      cleanedLength: cleaned.length,
+      raw,
+      cleaned,
+    };
+    await fs.writeFile(file, JSON.stringify(payload, null, 2), "utf8");
+  } catch {
+    // dump 실패는 OCR 진행을 막지 않음 (조용히 무시)
+  }
 }
