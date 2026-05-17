@@ -175,7 +175,12 @@ function renderRunAsBlock(run: RunItem): string {
   run.parsed.explanation_steps.forEach((step, i) => {
     const num = `${i + 1}.`;
     if (step.text) lines.push(`${num} ${step.text}`);
-    if (step.equation) lines.push(`   $$${step.equation}$$`);
+    if (step.equation) {
+      // Fix-W2b: 멀티라인 LaTeX은 한 줄로 join — line split 시 $$..$$ 매칭 깨짐 방지.
+      // 환경(\begin{cases}...\end{cases}) 보존. 너무 긴 수식은 Fix-W1 width clamp 자동 축소.
+      const flat = step.equation.replace(/\n/g, " ").trim();
+      if (flat) lines.push(`   $$${flat}$$`);
+    }
   });
   if (run.parsed.summary) {
     lines.push("");
