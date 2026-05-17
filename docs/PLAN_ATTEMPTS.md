@@ -8,7 +8,16 @@
 
 ---
 
-## 현 plan 회차: **v29 종결** — F안 (본문 이미지화). 사용자 가치 미확인으로 평문화 fix 전 항목 폐기. commit `d48d5c7`. 이하 §3~§7은 git history 보존용 deprecated.
+## 현 plan 회차: **v30 라운드 2** — Fix-W1 commit 후 멀티라인 step.equation 회귀 발견 → Fix-W2b 진입 예정. X5 폐기 결정 정정(우회 회귀 룰 적용).
+
+### v30 회차 기록
+- **단계 1** (`24bd4ca`): scale 1.3 — 수식 크기 200% → 130%
+- **단계 2** (코드 변경 0건): 진단 grep — X1 (step.text raw push), X2 (explanationLatexToPlain 평문화 함수, 단 explanationLinesRaw 렌더에 미사용), X4 (page 4 텍스트는 정상 한국어 평문), X5 (page 2 questionImageDataUrl 미수신) 확정
+- **단계 3 Fix-W1** (`f55aa03`): ImageRun width clamp (SINGLE_COLUMN 기준 비례 축소)
+- **v30 라운드 2 회귀 발견**: 사용자 docx 검증 시 step.equation 멀티라인 → `$$..$$` wrapping이 line split으로 분리 → raw 텍스트 폴백 (`Wsqrt`/`Wfrac` 패턴). Fix-W1과 무관 — Fix-W2b 진입 예정
+- **X5 폐기 결정 정정**: page 2 본문 평문화는 v29 F안의 회귀 (questionImageDataUrl 미수신). 신설 메모리 룰 `feedback_workaround_regression_no_rule` 정합 — 우회 후 회귀는 무조건 fix → Fix-X5 진단 진입 예정
+
+이하 §3~§7은 v29 종결 시점 기록 — deprecated. v30 회차는 §1·§3에 추가.
 
 ## 1. 시도한 것 (완료)
 
@@ -19,6 +28,9 @@
 | v21 | 단계 2-0a/2-0b: `KOREAN_EXAM_OCR_PROMPT_V2` + `KOREAN_TEXTBOOK_OCR_PROMPT_V2` + `VISION_PROMPT_V2` + `OCR_PROMPT_VERSION` ENV toggle + `resolveOcrPromptVersion()` helper | `80caf02` | ✅ |
 | v26 | 단계 2.5: `src/lib/geminiGenerationConfig.ts` 신규 모듈 + `noThinkingConfig` + `isResponseTruncated`. vision/docx/auto-pipeline 3개 라우트 fetch body의 `generationConfig` 표준화. `[ocr_truncated]` 로그 + retrospective 자동 집계 | `de652ce` | ✅ |
 | 안전 조치 | dev `.env.local`에 `TEXTBOOK_DRIVE_BUILD_INTERVAL_MS=0` + `DRIVE_ANALYSIS_AUTO_SYNC_MS=0` + `DEBUG_VISION_RAW_DUMP=true` + `OCR_PROMPT_VERSION=v2` 추가, 메모리 폭증 차단 | — | ✅ |
+| v30 | **단계 1 scale 1.3** — `renderLatexToPng` 기본 scale 200% → 130% (수식 이미지 크기 균형) | `24bd4ca` | ✅ |
+| v30 | **단계 2 진단 grep** — X1/X2/X4/X5 확정. step.text raw push, explanationLatexToPlain 렌더 미사용, page 4 텍스트는 정상 평문, page 2 questionImageDataUrl 미수신 | (코드 변경 0건) | ✅ |
+| v30 | **Fix-W1 width clamp** — `latexAwareLineToParagraphChildren` ImageRun width SINGLE_COLUMN 기준 비례 축소 (큰 수식 양옆 잘림 방지) | `f55aa03` | ✅ |
 
 ## 2. 검증된 효과
 
@@ -26,7 +38,12 @@
 - **단계 1 textbook dump 5건 분석** (v19): 어절 중간 줄바꿈이 OCR raw에서 이미 발생 확인. raw vs cleaned 4/5 동일 → `stripMetaWrappers`는 줄바꿈 손상 안 함
 - **단계 2.5 + V2 조합 정상 작동** (v27): commit `de652ce` 후 시험지 4문항 재실행. **JSON 파싱 실패 1건 사라짐 ✅** + 풀이 LLM의 LaTeX 완결성 정성 확인 (`\overline{AC}`, `\int_{-2}^x f(t) dt`, `\begin{cases}...\end{cases}`, `\vec{AE} = \vec{AD} - \frac{1}{2}\vec{AB}`). **v25 Critical 가설(maxOutputTokens 누락이 잘림 원인) 확정**
 
-## 3. 실패·미완료한 것 — **deprecated (v29 종결)**
+## 3. 미해결 (v30 라운드 2 진행 중)
+- **Fix-W2b commit + 검증 대기** — step.equation 멀티라인 `\n` → 공백 join. raw LaTeX 통과 0건 확인 필요
+- **Fix-X5 진단** — page 2 questionImageDataUrl 미수신 원인 (X5-i 클라이언트 다른 경로 / X5-ii body 직렬화 drop / X5-iii successRuns 변환 reset) 사용자 1건 확인 또는 grep 추가
+- **단계 4·5·6·7·8·9 미진입** — 우선순위 표에 명시 (가시화 패널, 페이지 활용, 번호 충돌, 학년별 용어집)
+
+## 3-deprecated. 실패·미완료한 것 — **deprecated (v29 종결)**
 
 | 항목 | 상태 | 원인 가설 |
 |---|---|---|
@@ -36,7 +53,13 @@
 | **LaTeX 손상 패턴 카탈로그** | 미수집 | dump 정상화 후 단계 1.5에서 수집 |
 | **thinkingBudget=0 풀이 품질 회귀 검증** | 미수행 | v26 주의 #2 A/B 비교 미진행. 운영 Railway 적용 결정 prerequisite |
 
-## 4. 결정 이력 (왜 이렇게 정했는지) — **deprecated (v29 종결)**
+## 4. v30 결정 이력
+- **옵션 1-A (formatError throw 제거) 폐기** — `equationRenderer.ts:124-131` 이미 try/catch 후 `renderFallbackPng` 자동 호출. 사실관계 오류
+- **Fix-W2 옵션 비교 → W2b 채택** — W2a(줄마다 별도 `$$..$$`)는 환경(`\begin{cases}...\end{cases}`) 깨짐 위험. W2b(한 줄 join + Fix-W1 width clamp)가 환경 보존 + 단순. W2c(환경 감지 분기)는 복잡도 ↑, W2b 부족 시 확장
+- **v30 사이클 2라운드 한도 self-check** — 라운드 1: 단계1+Fix-W1 회귀 발견 / 라운드 2: Fix-W2b — 마지막. 통과 안 되면 fix 폐기 + 검토 페이지 재평가
+- **X5 폐기 → 무조건 fix 결정 정정** — v28 시점 "본문 평문화는 우선순위 아님"으로 X5 폐기했으나, v29 F안 도입 후에도 잔존 = 우회 회귀. 신설 메모리 룰 `feedback_workaround_regression_no_rule` 적용 → fix 정당화
+
+## 4-deprecated. 결정 이력 (v29 종결 시점) — **deprecated**
 
 | 결정 | 근거 |
 |---|---|
@@ -48,7 +71,10 @@
 | **단계 1.5 sampling: 같은 시험지 1부 × 3회** (A안) | V1 baseline 분산 측정 우선, 데이터-드리븐 임계값(평균+2σ) 산정 |
 | **mathmode 경계 안전 가드** (단계 2-A/2-B) | `(frac{` → `\frac{` 매핑이 mathmode 밖 텍스트 오작동 우려. `$...$` 경계 안에서만 적용 |
 
-## 5. 막다른 길 (안 됨 확정) — **deprecated (v29 종결)**
+## 5. v30 막다른 길
+- **옵션 1-A `formatError` throw 제거** — `equationRenderer.ts:124-131` 이미 fallback 존재. 작업 불필요
+
+## 5-deprecated. 막다른 길 (v29 종결 시점) — **deprecated**
 
 - **textbook dump로 LaTeX 손상 패턴 카탈로그** — textbook 페이지(중수학 2-2 이등변삼각형 등)에 LaTeX 거의 없음. 시험지 dump로만 가능
 - **autoPipeline 자동 재시도 확대** — 메모리 `feedback_llm_fallback_order` 룰: 싼→비싼 자동 진급 금지. 단계 4는 같은 모델 같은 단가만, 1회 한도
@@ -56,7 +82,23 @@
 - **textbook-build-auto 자동 빌더 dev 활성화** — 1차 메모리 폭증 회귀. `TEXTBOOK_DRIVE_BUILD_INTERVAL_MS=0` 필수
 - **driveAnalysisAutoSync dev 활성화** — 2차 메모리 폭증(303s에 rss 2.4GB). `DRIVE_ANALYSIS_AUTO_SYNC_MS=0` 필수
 
-## 6. 흐름 매핑 (확정) — **deprecated (v29 종결)**
+## 6. v30 우선순위 표 (9단계 + 검토 진입 정책)
+
+| 🔥 | 작업 | 작업량 | 검토 진입 |
+|---|---|---|---|
+| 🔴 1 | KaTeX fix 1.5순위 — 수식 이미지 크기 (scale 1.3) | 10분 ✅ | ❌ 생략 |
+| 🔴 2 | KaTeX fix 진단 grep — X1/X2/X4/X5 | 1시간 ✅ | ✅ 필수 |
+| 🔴 3 | KaTeX fix 원인 fix — Fix-W1 width clamp ✅ + Fix-W2b 멀티라인 join ⏳ | 1~2시간 | ✅ 필수 |
+| 🔴 4 | 이슈 2 옵션 (a) — 피드백 가시화 패널 | 1~2시간 | 🟡 단순 UI |
+| 🟠 5 | KaTeX fix 단계 4 — 페이지 활용 (cantSplit + 빠른정답 통합) | 1시간 | ✅ 진단 grep 필요 |
+| 🟠 6 | KaTeX fix 단계 5 — 번호 충돌 (좌측 픽셀 자동 제외 A안) | 30분 | ❌ 사용자 합의 완료 |
+| 🟡 7 | 이슈 1 Phase 1 — 학년별 용어집 추출 인프라 (중1 1교재 우선) | 4~5시간 | ✅ 비용 가드 + 학년 단계 |
+| 🟡 8 | 이슈 1 Phase 2 — UI 통합 (기존 OCR 트리거 재사용) | 1~2시간 | 🟡 UI 재사용 |
+| 🟡 9 | 이슈 1 Phase 3 — 옵션 (d) 검출 연동 | 1~2시간 | ✅ 검출 로직 |
+
+→ 실제 검토 라운드 5회 (단계 2·3·5·7·9). 영역 분리로 누적 폭주 위험 낮음.
+
+## 6-deprecated. 흐름 매핑 (v29 종결 시점) — **deprecated**
 
 | # | 흐름 | 라우트 | V2 적용 |
 |---|---|---|---|
