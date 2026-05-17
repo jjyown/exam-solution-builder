@@ -176,10 +176,16 @@ function renderRunAsBlock(run: RunItem): string {
     const num = `${i + 1}.`;
     if (step.text) lines.push(`${num} ${step.text}`);
     if (step.equation) {
-      // Fix-W2b: 멀티라인 LaTeX은 한 줄로 join — line split 시 $$..$$ 매칭 깨짐 방지.
-      // 환경(\begin{cases}...\end{cases}) 보존. 너무 긴 수식은 Fix-W1 width clamp 자동 축소.
-      const flat = step.equation.replace(/\n/g, " ").trim();
-      if (flat) lines.push(`   $$${flat}$$`);
+      // Fix-W2c: LaTeX 줄바꿈 `\\` 기준 split → 라인별 별도 $$..$$ PNG.
+      // Fix-W2b(한 줄 join)가 가로 폭 초과로 잘림 발생 → 라인별 분리로 해소.
+      // 함정: \begin{cases}...\\...\end{cases} 환경 내부 \\ 도 split됨 — 환경 깨짐
+      // 발견 시 별도 Fix-W2d (환경 검출 후 보존) 회차 진입.
+      // \n 은 먼저 공백으로 normalize (line split 시 $$..$$ 매칭 깨짐 방지).
+      const flat = step.equation.replace(/\n/g, " ");
+      const eqLines = flat.split(/\\\\/).map((l) => l.trim()).filter(Boolean);
+      for (const eqLine of eqLines) {
+        lines.push(`   $$${eqLine}$$`);
+      }
     }
   });
   if (run.parsed.summary) {
