@@ -72,10 +72,18 @@ function latexAwareLineToParagraphChildren(
     if (latex) {
       try {
         const png = renderLatexToPng(latex, { displayMode: !!displayInner });
+        // Fix-W1: 페이지 본문 width 초과 시 비례 축소 (큰 수식 양옆 잘림 방지).
+        // SINGLE_COLUMN 기준 — 1단/2단 어디든 안전. 안 넘는 수식은 그대로 (회귀 0).
+        const maxColumnPx = Math.round((EXAM_DOCX_SINGLE_COLUMN_WIDTH_TWIPS / 1440) * 96);
+        const w = png.widthPx > maxColumnPx ? maxColumnPx : png.widthPx;
+        const h =
+          png.widthPx > maxColumnPx
+            ? Math.round(png.heightPx * (w / png.widthPx))
+            : png.heightPx;
         children.push(
           new ImageRun({
             data: png.buffer,
-            transformation: { width: png.widthPx, height: png.heightPx },
+            transformation: { width: w, height: h },
             type: "png",
           } as ConstructorParameters<typeof ImageRun>[0]),
         );
