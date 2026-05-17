@@ -8,7 +8,7 @@
 
 ---
 
-## 현 plan 회차: **v30 라운드 2** — Fix-W1 commit 후 멀티라인 step.equation 회귀 발견 → Fix-W2b 진입 예정. X5 폐기 결정 정정(우회 회귀 룰 적용).
+## 현 plan 회차: **v30 KaTeX fix 시리즈 종결** — 옵션 R rollback 완료 (HEAD = `b5b2957` Fix-W2c 안정). 5-시각-1/2 폐기. 후속 회차 보류.
 
 ### v30 회차 기록
 - **단계 1** (`24bd4ca`): scale 1.3 — 수식 크기 200% → 130%
@@ -31,6 +31,10 @@
 | v30 | **단계 1 scale 1.3** — `renderLatexToPng` 기본 scale 200% → 130% (수식 이미지 크기 균형) | `24bd4ca` | ✅ |
 | v30 | **단계 2 진단 grep** — X1/X2/X4/X5 확정. step.text raw push, explanationLatexToPlain 렌더 미사용, page 4 텍스트는 정상 평문, page 2 questionImageDataUrl 미수신 | (코드 변경 0건) | ✅ |
 | v30 | **Fix-W1 width clamp** — `latexAwareLineToParagraphChildren` ImageRun width SINGLE_COLUMN 기준 비례 축소 (큰 수식 양옆 잘림 방지) | `f55aa03` | ✅ |
+| v30 라운드 3 | **Fix-W2b** — step.equation 멀티라인 `\n` → 공백 한 줄 join | `7eab984` | ⚠️ 부분 (raw 평문화 해소했으나 가로 잘림 회귀) |
+| v30 라운드 4 | **Fix-W2c** — step.equation `\\` (LaTeX 줄바꿈) 기준 split → 라인별 별도 `$$..$$` PNG | `b5b2957` | ✅ — Railway docx 143759 검증 통과. **현 안정 HEAD** |
+| v30 라운드 5 | **5-시각-1 minScale 0.6** + **5-시각-2 공백 텍스트 skip → CENTER alignment** — 시각 정리 시도 | `dcd3553` + `9a95c4b` | ❌ 화질 흐릿 회귀 (Railway docx 151035) → **옵션 R rollback 폐기** |
+| v30 종결 | **옵션 R rollback** — `git reset --hard b5b2957` + `git push --force-with-lease`. 5-시각-1/2 origin/main 폐기. v30 KaTeX fix 시리즈 **종결** | (rollback) | ✅ |
 
 ## 2. 검증된 효과
 
@@ -38,10 +42,11 @@
 - **단계 1 textbook dump 5건 분석** (v19): 어절 중간 줄바꿈이 OCR raw에서 이미 발생 확인. raw vs cleaned 4/5 동일 → `stripMetaWrappers`는 줄바꿈 손상 안 함
 - **단계 2.5 + V2 조합 정상 작동** (v27): commit `de652ce` 후 시험지 4문항 재실행. **JSON 파싱 실패 1건 사라짐 ✅** + 풀이 LLM의 LaTeX 완결성 정성 확인 (`\overline{AC}`, `\int_{-2}^x f(t) dt`, `\begin{cases}...\end{cases}`, `\vec{AE} = \vec{AD} - \frac{1}{2}\vec{AB}`). **v25 Critical 가설(maxOutputTokens 누락이 잘림 원인) 확정**
 
-## 3. 미해결 (v30 라운드 2 진행 중)
-- **Fix-W2b commit + 검증 대기** — step.equation 멀티라인 `\n` → 공백 join. raw LaTeX 통과 0건 확인 필요
-- **Fix-X5 진단** — page 2 questionImageDataUrl 미수신 원인 (X5-i 클라이언트 다른 경로 / X5-ii body 직렬화 drop / X5-iii successRuns 변환 reset) 사용자 1건 확인 또는 grep 추가
-- **단계 4·5·6·7·8·9 미진입** — 우선순위 표에 명시 (가시화 패널, 페이지 활용, 번호 충돌, 학년별 용어집)
+## 3. 미해결 (v30 KaTeX fix 종결 후)
+- **"글자 크기 뒤죽박죽" 잔존** — 짧은 수식 원본 + 긴 수식 비례 축소로 페이지 내 글자 크기 2-3배 차이. **별도 회차 후보 (i)~(iv) 보류** — 사용자 가치 명시 후 결정 (검토자 추천 = (iv) 종결)
+- **Fix-X5 진단** — page 2 questionImageDataUrl 미수신. `project_haeseol_workflow_intent` 룰 따라 우선순위 낮음
+- **환경 깨짐 검증 deferred** — Fix-W2c 검증 시 표본 부족 (`\begin{cases}` 등 없음). 회귀 발견 시 안전망 1 rollback + Fix-W2d
+- **단계 4·6·7·8·9 미진입** — 가시화 패널, 번호 충돌, 학년별 용어집
 
 ## 3-deprecated. 실패·미완료한 것 — **deprecated (v29 종결)**
 
@@ -55,9 +60,16 @@
 
 ## 4. v30 결정 이력
 - **옵션 1-A (formatError throw 제거) 폐기** — `equationRenderer.ts:124-131` 이미 try/catch 후 `renderFallbackPng` 자동 호출. 사실관계 오류
-- **Fix-W2 옵션 비교 → W2b 채택** — W2a(줄마다 별도 `$$..$$`)는 환경(`\begin{cases}...\end{cases}`) 깨짐 위험. W2b(한 줄 join + Fix-W1 width clamp)가 환경 보존 + 단순. W2c(환경 감지 분기)는 복잡도 ↑, W2b 부족 시 확장
-- **v30 사이클 2라운드 한도 self-check** — 라운드 1: 단계1+Fix-W1 회귀 발견 / 라운드 2: Fix-W2b — 마지막. 통과 안 되면 fix 폐기 + 검토 페이지 재평가
-- **X5 폐기 → 무조건 fix 결정 정정** — v28 시점 "본문 평문화는 우선순위 아님"으로 X5 폐기했으나, v29 F안 도입 후에도 잔존 = 우회 회귀. 신설 메모리 룰 `feedback_workaround_regression_no_rule` 적용 → fix 정당화
+- **Fix-W2 옵션 비교 → W2b → W2c** — W2a(줄마다 별도)는 환경 깨짐. W2b(한 줄 join)는 가로 잘림 회귀. W2c(`\\` split + Fix-W1 width clamp)가 검증 통과
+- **v30 라운드 한도 초과** — 라운드 1~5 누적. 5-시각-1/2 회귀로 옵션 R rollback 결정 (검토자 명시 룰 예외 종료)
+- **X5 폐기 → 무조건 fix 결정 정정** — v28 시점 "본문 평문화는 우선순위 아님"으로 X5 폐기했으나, v29 F안 도입 후에도 잔존 = 우회 회귀. 신설 메모리 룰 `feedback_workaround_regression_no_rule` 적용 → fix 정당화 (단 단계 5 후순위)
+- **5-A (빠른정답 통합) 폐기** — 사용자 구조 의도 정정: "표지 → 문제 → break → 빠른정답 → break → 해설" 현 구조 유지
+- **"글자 크기 뒤죽박죽" 후속 회차 후보** (즉시 진입 X, 사용자 가치 명시 후 결정):
+  - (i) scale 통일 축소 (1.3 → 1.0) — 1줄 변경, 효과 명확
+  - (ii) scale 동적 조정 — 복잡
+  - (iii) MathJax linebreaks — extension 비추천
+  - (iv) **KaTeX fix 종결** — 메모리 룰 정합 (검토자 추천)
+- **검증 환경 = Railway production** — dev 거의 안 씀. git push 후 Railway 재빌드 → docx 재생성
 
 ## 4-deprecated. 결정 이력 (v29 종결 시점) — **deprecated**
 
@@ -71,8 +83,18 @@
 | **단계 1.5 sampling: 같은 시험지 1부 × 3회** (A안) | V1 baseline 분산 측정 우선, 데이터-드리븐 임계값(평균+2σ) 산정 |
 | **mathmode 경계 안전 가드** (단계 2-A/2-B) | `(frac{` → `\frac{` 매핑이 mathmode 밖 텍스트 오작동 우려. `$...$` 경계 안에서만 적용 |
 
-## 5. v30 막다른 길
+## 5. v30 막다른 길 (시도 누적)
 - **옵션 1-A `formatError` throw 제거** — `equationRenderer.ts:124-131` 이미 fallback 존재. 작업 불필요
+- **Fix-W2b 한 줄 join** (`7eab984`) — raw 평문화 해소했으나 가로 잘림 회귀 → Fix-W2c로 이행
+- **5-A 빠른정답 통합** — 사용자 의도 = 현 구조 유지. 폐기
+- **5-시각-1 minScale 0.6** (`dcd3553`) — 비트맵 다운샘플링 손실로 화질 흐릿. 옵션 R rollback
+- **5-시각-2 가운데 정렬** (`9a95c4b`) — 효과 있었지만 5-시각-1 동반 폐기 (rollback 묶음)
+
+## §6 신설 메모리 룰 (검토자 선처리, 2026-05-17~18)
+- `feedback_prev_commit_rollback_safety_net.md` — Fix-W2c 안전망 첫 적용 사례
+- `feedback_verify_env_explicit_local_vs_deploy.md` — Railway 검증 환경 명시
+- `reference_academy_manager_live_url.md` (신설)
+- `reference_haeseol_project.md` — 라이브 URL 추가
 
 ## 5-deprecated. 막다른 길 (v29 종결 시점) — **deprecated**
 
