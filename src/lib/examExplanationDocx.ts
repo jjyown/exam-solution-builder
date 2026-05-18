@@ -741,18 +741,36 @@ async function buildExplanationSectionChildren(
       let children = await paragraphChildrenForProblemDocxLine(seg.line, assetBaseDir);
       if (!children) continue;
       const isFirstProblemParagraph = !problemNumberPrefixApplied;
+      const childrenIsImageOnly = isSingleImageRunParagraph(children);
       if (isFirstProblemParagraph) {
-        children = prependQuestionNumberToProblemChildren(block.questionLabel, children);
-        problemNumberPrefixApplied = true;
+        if (childrenIsImageOnly) {
+          // 첫 줄이 단독 이미지면 번호를 별도 paragraph 로 분리.
+          // 한 paragraph 에 합치면 ImageRun 줄 박스 height 로 텍스트가 좌하단 정렬돼
+          // "1." 이 이미지 아래에 보이는 회귀 (2026-05-18).
+          inner.push(
+            new Paragraph({
+              children: [bodyTextRun({ text: `${block.questionLabel}. `, bold: true })],
+              spacing: {
+                ...EXAM_DOCX_BODY_PARAGRAPH_SPACING,
+                before: idx === 0 ? 0 : EXAM_DOCX_INTER_QUESTION_BEFORE_TWIPS,
+                after: 40,
+              },
+            }),
+          );
+          problemNumberPrefixApplied = true;
+        } else {
+          children = prependQuestionNumberToProblemChildren(block.questionLabel, children);
+          problemNumberPrefixApplied = true;
+        }
       }
-      const figureOnly = isSingleImageRunParagraph(children);
+      const figureOnly = childrenIsImageOnly;
       inner.push(
         new Paragraph({
           children,
           alignment: figureOnly ? AlignmentType.CENTER : undefined,
           spacing: {
             ...EXAM_DOCX_BODY_PARAGRAPH_SPACING,
-            before: isFirstProblemParagraph
+            before: isFirstProblemParagraph && !figureOnly
               ? idx === 0
                 ? 0
                 : EXAM_DOCX_INTER_QUESTION_BEFORE_TWIPS
