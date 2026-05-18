@@ -52,17 +52,27 @@ export async function register(): Promise<void> {
   }
 
   // 4) 메모리 사용량 주기 로깅 — Railway 「Killed」(OOM) 진단용.
-  //    부팅 직후 1회 + 60초마다 1회. 한 줄짜리 로그라 비용 무시 가능.
+  //    부팅 직후 1회 + 20초마다 1회. 한 줄짜리 로그라 비용 무시 가능.
   //    누수 의심 시: rss/heapUsed 가 시간에 따라 우상향 → 메모리 누수.
   //    한도 의심 시: rss 가 일정 천장 근처에서 Killed → Railway 인스턴스 메모리 부족.
+  //    임계값 초과 시 console.warn 으로 [mem][WARN]/[CRITICAL] 분리 출력.
+  //    env: MEMORY_RSS_WARN_MB(기본 1200), MEMORY_RSS_CRITICAL_MB(기본 1500).
   try {
+    const parseMbEnv = (key: string, fallback: number): number => {
+      const v = Number(process.env[key]);
+      return Number.isFinite(v) && v > 0 ? v : fallback;
+    };
+    const warnMb = parseMbEnv("MEMORY_RSS_WARN_MB", 1200);
+    const criticalMb = parseMbEnv("MEMORY_RSS_CRITICAL_MB", 1500);
     const logMem = (label: string) => {
       const m = process.memoryUsage();
       const fmt = (b: number) => `${(b / 1024 / 1024).toFixed(0)}MB`;
       const uptime = Math.round(process.uptime());
-      console.log(
-        `[mem] ${label} uptime=${uptime}s rss=${fmt(m.rss)} heapUsed=${fmt(m.heapUsed)} heapTotal=${fmt(m.heapTotal)} external=${fmt(m.external)} arrayBuffers=${fmt(m.arrayBuffers)}`,
-      );
+      const rssMb = m.rss / 1024 / 1024;
+      const line = `[mem] ${label} uptime=${uptime}s rss=${fmt(m.rss)} heapUsed=${fmt(m.heapUsed)} heapTotal=${fmt(m.heapTotal)} external=${fmt(m.external)} arrayBuffers=${fmt(m.arrayBuffers)}`;
+      if (rssMb >= criticalMb) console.warn(`[mem][CRITICAL] rss>=${criticalMb}MB ${line}`);
+      else if (rssMb >= warnMb) console.warn(`[mem][WARN] rss>=${warnMb}MB ${line}`);
+      else console.log(line);
     };
     logMem("boot");
     setInterval(() => logMem("tick"), 20_000).unref?.();
