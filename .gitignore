@@ -65,6 +65,8 @@ yarn-error.log*
 # 교재 OCR·분할 실험 산출(대용량) — README만 추적
 /scratch/ocr-mapping-runs/*
 !/scratch/ocr-mapping-runs/README.md
+# OMML capability 검증 결과물 (PR-1 Commit 2.5, 스크립트 실행 시 생성)
+/scratch/verify-omml-output.docx
 
 # typescript
 *.tsbuildinfo
