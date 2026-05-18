@@ -3,28 +3,25 @@
  * ────────────────────────────────────────────────────────────────────────────
  *  Gemini Vision/풀이 LLM 호출의 generationConfig 표준화 모듈.
  *
- *  ▶ 배경(2026-05-16, plan v25/v26):
- *    Gemini 2.5 시리즈는 기본적으로 thinking tokens 사용. maxOutputTokens 안에서
- *    thinking 이 토큰을 다 먹으면 본 응답이 중간에 끊김(`\tim` 잘림,
- *    `\begin{cases}` 미닫힘, JSON unterminated 등). 운영 로그에서 직접 확인.
- *
- *  ▶ 해결: thinkingBudget=0 + maxOutputTokens 명시.
- *
  *  ▶ 적용 대상 라우트:
  *    - src/app/api/auto-pipeline/vision/route.ts (풀이 LLM 직접)
  *    - src/app/api/auto-pipeline/docx/route.ts (DOCX 생성 시 문제 본문 OCR)
  *    - src/app/api/auto-pipeline/route.ts (일반 모드)
  *
- *  ▶ 호환: 2.0 모델은 thinkingConfig 무시하므로 같은 옵션 안전하게 공유.
- *    기존 photoEditGemini.ts 의 동명 함수 본문과 동일 패턴 — 표준화·중앙화 목적.
+ *  ▶ Gemini 2.5 thinking: dynamic 자동. thinkingBudget 명시 안 함.
+ *    과거 thinkingBudget=0 강제(de652ce, 2026-05-16) 는 2026-05-19 API 정책으로
+ *    "Budget 0 is invalid. This model only works in thinking mode." 거부 회귀 → 제거.
+ *    응답 잘림 방어는 maxOutputTokens cap 으로 갈음 (isResponseTruncated 감지 유지).
+ *
+ *  ▶ 호환: 2.0 모델은 thinkingConfig 무관, 같은 옵션 안전 공유.
+ *    photoEditGemini.ts 의 동명 로컬 함수는 별 PR 정리 대상 (/edit 경로, /auto 와 무관).
  * ────────────────────────────────────────────────────────────────────────────
  */
 
 /**
- * Gemini 2.5 thinking 비활성화 + 표준 generation 옵션.
+ * Gemini 풀이 LLM 표준 generation 옵션.
  *  - temperature: 0 (deterministic — 진단/측정에 유리)
- *  - maxOutputTokens: 인자로 명시
- *  - thinkingConfig.thinkingBudget: 0 (2.5 모델 thinking 사용 안 함)
+ *  - maxOutputTokens: 인자로 명시 (응답 잘림 cap)
  *  - opts 로 호출처별 추가 옵션 덮어쓰기 가능 (responseMimeType, temperature 등)
  *
  * 예:
@@ -35,6 +32,8 @@
  *    temperature: 0.2,
  *  }),
  *  ```
+ *
+ * 함수명 noThinkingConfig 은 과거 의도 잔재 — 현재 thinking 활성. rename 은 별 PR (호출처 3곳).
  */
 export function noThinkingConfig(
   maxOutputTokens: number,
@@ -43,7 +42,6 @@ export function noThinkingConfig(
   return {
     temperature: 0,
     maxOutputTokens,
-    thinkingConfig: { thinkingBudget: 0 },
     ...(opts ?? {}),
   };
 }
