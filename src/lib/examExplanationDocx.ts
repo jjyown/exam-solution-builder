@@ -3,6 +3,7 @@ import JSZip from "jszip";
 import {
   Document,
   ImageRun,
+  Math as DocxMath,
   Packer,
   PageBreak,
   Paragraph,
@@ -17,7 +18,9 @@ import {
   BorderStyle,
   TableLayoutType,
 } from "docx";
-import { renderLatexToPng } from "@/lib/equationRenderer";
+import { EXAM_DOCX_MATH_MODE, renderLatexToPng } from "@/lib/equationRenderer";
+import { latexToOmmlChildren } from "@/lib/latexToOmml";
+import { logOmmlFailure } from "@/lib/ommlFailureLogger";
 import {
   imageRunFromBuffer,
   isDocxOmittedTypingReferenceCropMarkdownLine,
@@ -35,7 +38,11 @@ import {
   EXAM_DOCX_SECTION_TITLE_HALF_PT,
   EXAM_DOCX_SINGLE_COLUMN_WIDTH_TWIPS,
 } from "@/lib/examDocxTheme";
-import { explanationLatexToPlain, quickAnswerToPlainLine } from "@/lib/latexToPlainText";
+import {
+  explanationLatexToPlain,
+  quickAnswerToPlainLine,
+  simplifyLatexContent,
+} from "@/lib/latexToPlainText";
 import { normalizeLatexSourceText } from "@/lib/latexSourceNormalize";
 import { splitLabeledQuestionChunks } from "@/lib/explanationBlocks";
 
@@ -70,27 +77,40 @@ function latexAwareLineToParagraphChildren(
     const inlineInner = m[2];
     const latex = (displayInner ?? inlineInner ?? "").trim();
     if (latex) {
-      try {
-        const png = renderLatexToPng(latex, { displayMode: !!displayInner });
-        // Fix-W1: 페이지 본문 width 초과 시 비례 축소 (큰 수식 양옆 잘림 방지).
-        // SINGLE_COLUMN 기준 — 1단/2단 어디든 안전. 안 넘는 수식은 그대로 (회귀 0).
-        const maxColumnPx = Math.round((EXAM_DOCX_SINGLE_COLUMN_WIDTH_TWIPS / 1440) * 96);
-        const w = png.widthPx > maxColumnPx ? maxColumnPx : png.widthPx;
-        const h =
-          png.widthPx > maxColumnPx
-            ? Math.round(png.heightPx * (w / png.widthPx))
-            : png.heightPx;
-        children.push(
-          new ImageRun({
-            data: png.buffer,
-            transformation: { width: w, height: h },
-            type: "png",
-          } as ConstructorParameters<typeof ImageRun>[0]),
-        );
-      } catch (e) {
-        // 빈 LaTeX/5000자 초과 → 원문 텍스트로 fallback
-        console.warn("[examExplanationDocx] 수식 렌더 실패, 텍스트 폴백:", (e as Error).message);
-        children.push(bodyTextRun({ text: latex, bold: opts?.bold }));
+      if (EXAM_DOCX_MATH_MODE === "omml") {
+        try {
+          const ommlChildren = latexToOmmlChildren(latex);
+          children.push(new DocxMath({ children: ommlChildren }));
+        } catch (e) {
+          // Major 1 (검토창 3회차): 본 함수는 sync 라 await 불가 → fire-and-forget.
+          // 미지원 토큰은 Supabase 자동 로그 + simplifyLatexContent 평문 fallback.
+          // 정확도 개선 cycle (의뢰인 회귀 보고 → 주 1회 변환기 commit) 의 데이터 소스.
+          logOmmlFailure(latex, e).catch(() => {});
+          children.push(bodyTextRun({ text: simplifyLatexContent(latex), bold: opts?.bold }));
+        }
+      } else {
+        try {
+          const png = renderLatexToPng(latex, { displayMode: !!displayInner });
+          // Fix-W1: 페이지 본문 width 초과 시 비례 축소 (큰 수식 양옆 잘림 방지).
+          // SINGLE_COLUMN 기준 — 1단/2단 어디든 안전. 안 넘는 수식은 그대로 (회귀 0).
+          const maxColumnPx = Math.round((EXAM_DOCX_SINGLE_COLUMN_WIDTH_TWIPS / 1440) * 96);
+          const w = png.widthPx > maxColumnPx ? maxColumnPx : png.widthPx;
+          const h =
+            png.widthPx > maxColumnPx
+              ? Math.round(png.heightPx * (w / png.widthPx))
+              : png.heightPx;
+          children.push(
+            new ImageRun({
+              data: png.buffer,
+              transformation: { width: w, height: h },
+              type: "png",
+            } as ConstructorParameters<typeof ImageRun>[0]),
+          );
+        } catch (e) {
+          // 빈 LaTeX/5000자 초과 → 원문 텍스트로 fallback
+          console.warn("[examExplanationDocx] 수식 렌더 실패, 텍스트 폴백:", (e as Error).message);
+          children.push(bodyTextRun({ text: latex, bold: opts?.bold }));
+        }
       }
     }
     lastIdx = m.index + m[0].length;
