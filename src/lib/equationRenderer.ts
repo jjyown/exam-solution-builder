@@ -36,6 +36,18 @@ export type RenderResult = {
   heightPx: number;
 };
 
+/**
+ * DOCX 수식 렌더 모드.
+ *  - `png`: 본 모듈의 `renderLatexToPng` (현행, MathJax → SVG → resvg PNG)
+ *  - `omml`: `latexToOmml.ts` 변환기 + docx Math 클래스 네이티브 (Commit 3 도입)
+ *
+ * default `png` — v30 KaTeX cool-down 안전. 의뢰인 viewer 검증 통과 후
+ * Railway env 수동 `omml` 전환. 회귀 시 env 1줄 원상 복귀.
+ */
+export type ExamDocxMathMode = "png" | "omml";
+export const EXAM_DOCX_MATH_MODE: ExamDocxMathMode =
+  process.env.EXAM_DOCX_MATH_MODE === "omml" ? "omml" : "png";
+
 const cache = new Map<string, RenderResult>();
 
 /** SVG width="Xex" / height="Yex" 또는 "Xpt" 등 단위 + 숫자 추출. */
