@@ -82,7 +82,7 @@
 - "**/auto**" / "**해설 제작**" → /auto 파이프라인 우선 탐색
 - "**Drive 업로드**" → search-then-update 패턴 확인
 - "**자동 빌더**" → 안전 toggle + 실패 모니터링 점검
-- "**토의해주세요**" → `docs/DISCUSSIONS.md` 시간순 회의록 형식으로 자율 토의 시작
+- "**토의해주세요**" → **즉시 plan mode 진입** (Claude가 `EnterPlanMode` 도구 자동 호출) 후 `docs/DISCUSSIONS.md` 시간순 회의록 형식으로 자율 토의 시작. 사용자가 Shift+Tab 누를 필요 X. 토의 결론 후 `ExitPlanMode`로 사용자 승인 받고 일반 모드 복귀. "토의 좀", "회의해줘", "의견 들어봐" 등 변형 표현도 동일 처리.
 - "**[페르소나명]에 학습시켜줘**" → 해당 페르소나 `.claude/agents/<name>.md` 의 `## 학습 노트` 섹션에 룰 추가
 
 ---
