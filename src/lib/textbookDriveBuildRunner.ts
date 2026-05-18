@@ -33,6 +33,9 @@ import {
 } from "./googleDrive";
 import { extractTextbookPageWithGeminiVision } from "./geminiVisionExtract";
 
+// global.gc 미존재 시 1회만 경고 (페이지 루프마다 로그 폭주 방지). 모듈 단일 인스턴스 가정.
+let gcWarnLoggedOnce = false;
+
 // pdf-to-img 는 @napi-rs/canvas 네이티브 모듈에 의존 — 모듈 로드 시점에 바이너리
 // 동적 로드를 시도한다. Railway Linux 환경에서 로드 실패 시 모듈 전체가 import
 // 단계에서 죽으면 디버깅 어려움. lazy 로 감싸 에러 메시지를 잡고 자동 실행이 통째로
@@ -185,6 +188,14 @@ async function processFolder(args: {
   })();
 
   const ocrModel = "gemini-2.0-flash";
+
+  // env: MEMORY_GC_EVERY_N_PAGES(기본 10), MEMORY_GC_DISABLED=1 비상 비활성. NODE_OPTIONS=--expose-gc 필요.
+  const gcDisabled = /^(1|true|yes)$/i.test(process.env.MEMORY_GC_DISABLED ?? "");
+  const gcEveryNPages = (() => {
+    const v = Number(process.env.MEMORY_GC_EVERY_N_PAGES);
+    return Number.isFinite(v) && v > 0 ? Math.floor(v) : 10;
+  })();
+
   let processedBooks = 0;
   let skippedBooks = 0;
 
@@ -340,10 +351,18 @@ async function processFolder(args: {
       log(`  [page ${pagePadded(pageNo)}/${pagePadded(limit)}] ✓ ${ocr.model} ${mdBuf.byteLength}B`);
 
       // pdfjs/네이티브 캔버스가 external 메모리에 누적 — V8 GC 가 자동 회수 약함.
-      // 10페이지마다 명시적 GC + event loop tick 양보. NODE_OPTIONS=--expose-gc 필요.
-      if (pageNo % 10 === 0) {
+      // N페이지마다 명시적 GC + event loop tick 양보 + rss 로그 (env 설정 위 참조).
+      if (!gcDisabled && pageNo % gcEveryNPages === 0) {
         await new Promise((r) => setImmediate(r));
-        if (typeof global.gc === "function") global.gc();
+        if (typeof global.gc === "function") {
+          global.gc();
+        } else if (!gcWarnLoggedOnce) {
+          gcWarnLoggedOnce = true;
+          log(`  ⚠️ global.gc 미존재 — NODE_OPTIONS=--expose-gc 누락. 메모리 가드 no-op`);
+        }
+        const m = process.memoryUsage();
+        const mb = (b: number) => `${(b / 1024 / 1024).toFixed(0)}MB`;
+        log(`  [mem] page ${pagePadded(pageNo)} rss=${mb(m.rss)} heapUsed=${mb(m.heapUsed)} external=${mb(m.external)}`);
       }
     }
 
