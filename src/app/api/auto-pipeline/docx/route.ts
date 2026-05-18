@@ -25,6 +25,48 @@ import {
   uploadBufferToDriveFolder,
 } from "@/lib/googleDrive";
 import { injectGeneratedGraphsIntoRuns } from "@/lib/explanationGraphInjection";
+import {
+  validateExplanationConsistency,
+  type ValidationSeverity,
+} from "@/lib/explanationAnswerValidators";
+import { simplifyLatexContent } from "@/lib/latexToPlainText";
+
+/**
+ * 방어 후처리 (PR-1 Commit 4) — LLM 이 룰을 위반해 `text` 필드에 raw LaTeX
+ * 명령(`\frac`, `\sqrt`, `^{}` 등)을 박는 케이스 대응. `$$..$$` / `$..$` 토큰
+ * 안은 examExplanationDocx 가 latexAware 로 처리하므로 그대로 두고, 토큰 밖에서만
+ * `simplifyLatexContent` 평문화.
+ *
+ * 검토창 3회차 Commit 4 보강 — Commit 4 가정 "$$ 분기로 떨어질 일 없음" 너무
+ * 낙관적, 본 sanitize 가 방어망.
+ */
+function sanitizeOutsideToken(s: string): string {
+  if (
+    /\\(?:frac|sqrt|sum|int|alpha|beta|gamma|delta|pi|theta|sigma|lambda|omega|cdot|times|leq|geq|neq|infty|to|left|right)\b/.test(
+      s,
+    ) ||
+    /[\^_]\{[^}]+\}/.test(s)
+  ) {
+    return simplifyLatexContent(s);
+  }
+  return s;
+}
+
+function sanitizeStepTextForRender(text: string): string {
+  const tokenRe = /\$\$([\s\S]+?)\$\$|\$([^$\n]+)\$/g;
+  let lastIdx = 0;
+  const parts: string[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = tokenRe.exec(text)) !== null) {
+    const pre = text.slice(lastIdx, m.index);
+    if (pre) parts.push(sanitizeOutsideToken(pre));
+    parts.push(m[0]);
+    lastIdx = m.index + m[0].length;
+  }
+  const tail = text.slice(lastIdx);
+  if (tail) parts.push(sanitizeOutsideToken(tail));
+  return parts.join("");
+}
 
 // ── OCR 설정 ──────────────────────────────────────────────────────────────────
 const OCR_ENABLED = process.env.ENABLE_DOCX_OCR === "true";
@@ -174,7 +216,7 @@ function renderRunAsBlock(run: RunItem): string {
   lines.push(`[해설]`);
   run.parsed.explanation_steps.forEach((step, i) => {
     const num = `${i + 1}.`;
-    if (step.text) lines.push(`${num} ${step.text}`);
+    if (step.text) lines.push(`${num} ${sanitizeStepTextForRender(step.text)}`);
     if (step.equation) {
       // Fix-W2c: LaTeX 줄바꿈 `\\` 기준 split → 라인별 별도 $$..$$ PNG.
       // Fix-W2b(한 줄 join)가 가로 폭 초과로 잘림 발생 → 라인별 분리로 해소.
@@ -251,6 +293,33 @@ export async function POST(req: Request) {
     .map((r) => `${r.questionNo}: ${r.parsed!.answer}`)
     .join(", ");
 
+  // ── 자동 검증 5종 (PR-1 Commit 4, LLM 호출 X — 정규식·구조만, 비용 0) ──
+  // 결과는 응답 헤더 X-Validation-Severity 로 전달. 자세한 issues 는 Commit 5.7
+  // 4배지 UI 가 별 endpoint(향후 신설) 또는 본 console.log 로 확인.
+  let validationSeverity: ValidationSeverity = "ok";
+  const allValidationIssues: string[] = [];
+  for (const run of body.runs) {
+    if (!run.parsed) continue;
+    const blockText = renderRunAsBlock(run);
+    const equations = run.parsed.explanation_steps
+      .map((s) => s.equation || "")
+      .filter(Boolean);
+    const result = validateExplanationConsistency(blockText, equations);
+    if (result.severity === "error") validationSeverity = "error";
+    else if (result.severity === "warn" && validationSeverity === "ok") validationSeverity = "warn";
+    if (result.issues.length > 0) {
+      allValidationIssues.push(...result.issues.map((s) => `[Q${run.questionNo}] ${s}`));
+    }
+  }
+  if (allValidationIssues.length > 0) {
+    console.log(
+      `[docx/validation] severity=${validationSeverity} issues=${allValidationIssues.length}건`,
+    );
+    for (const issue of allValidationIssues.slice(0, 20)) {
+      console.log(`  · ${issue}`);
+    }
+  }
+
   try {
     const { buffer, docxFileName } = await buildExamExplanationDocxBuffer({
       examName,
@@ -288,6 +357,8 @@ export async function POST(req: Request) {
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
       "Content-Disposition": `attachment; filename="${encodeURIComponent(docxFileName)}"`,
       "Content-Length": String(buffer.length),
+      "X-Validation-Severity": validationSeverity,
+      "X-Validation-Issue-Count": String(allValidationIssues.length),
     };
     if (driveFileId) {
       headers["X-Drive-File-Id"] = driveFileId;
