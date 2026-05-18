@@ -159,11 +159,9 @@ async function callGeminiVision(
             ],
           },
         ],
-        // Gemini 2.5 thinking 비활성 + maxOutputTokens 명시 (plan v26 단계 2.5).
-        // 운영 로그의 \tim 잘림 / \begin{cases} 미닫힘 회귀는 thinking이 토큰을 다 먹어
-        // 본 응답이 잘린 것이 원인 — thinkingBudget=0 + maxOutputTokens=8192 로 차단.
+        // maxOutputTokens cap. Gemini 2.5 thinking 활성 후 토큰 잠식 방어 (2026-05-19, 8192→16384).
         // temperature 0.2 는 풀이 다양성 위해 유지 (noThinkingConfig 기본 0 을 덮어씀).
-        generationConfig: noThinkingConfig(8192, {
+        generationConfig: noThinkingConfig(16384, {
           responseMimeType: 'application/json',
           temperature: 0.2,
         }),

@@ -144,9 +144,8 @@ async function callGemini(prompt: string, modelOverride?: string): Promise<strin
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       contents: [{ role: 'user', parts: [{ text: prompt }] }],
-      // plan v26 단계 2.5: thinking 비활성 + maxOutputTokens 명시.
-      // 풀이 LLM 응답이 길어지면 명령어/환경 미닫힘 회귀 — 8192 로 차단.
-      generationConfig: noThinkingConfig(8192, {
+      // maxOutputTokens cap. Gemini 2.5 thinking 활성 후 토큰 잠식 방어 (2026-05-19, 8192→16384).
+      generationConfig: noThinkingConfig(16384, {
         responseMimeType: 'application/json',
         temperature: 0.2,
       }),

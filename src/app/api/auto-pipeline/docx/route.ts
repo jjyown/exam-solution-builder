@@ -105,9 +105,8 @@ async function callGeminiOcrVision(base64: string, mimeType: string): Promise<st
           ],
         },
       ],
-      // plan v26 단계 2.5: thinking 비활성 + maxOutputTokens 명시.
-      // 문제 본문 OCR은 보통 짧지만 시험지 한 문항이 길어지면 잘림 가능 → 4096 충분.
-      generationConfig: noThinkingConfig(4096, { temperature: 0.1 }),
+      // maxOutputTokens cap. Gemini 2.5 thinking 활성 후 토큰 잠식 방어 (2026-05-19, 4096→8192).
+      generationConfig: noThinkingConfig(8192, { temperature: 0.1 }),
     }),
   });
 
