@@ -139,6 +139,13 @@ function tokenize(input: string): Token[] {
         throw new Error(`unsupported token: \\ 직후 알파벳 없음`);
       }
       const name = input.slice(i + 1, j);
+      // `\left` / `\right` 는 visual 그룹 표시자 — 본 변환기는 일반 () [] 와
+      // 동등 처리하므로 토큰 자체를 skip (parseCommand 에서 빈 MathRun 으로
+      // 처리하면 시퀀스 첫 element 가 빈 토큰이 되어 호출처 회귀).
+      if (name === "left" || name === "right") {
+        i = j;
+        continue;
+      }
       tokens.push({ kind: "command", name });
       i = j;
       continue;
